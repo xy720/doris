@@ -160,6 +160,15 @@ public class SqlModeHelper {
         return value;
     }
 
+    // return true if the input sqlModes are all active
+    public static boolean isActive(long sqlMode) {
+        SessionVariable var = ConnectContext.get().getSessionVariable();
+        if ((var != null) && (sqlMode != 0) && ((var.getSqlMode() & sqlMode) == sqlMode)) {
+                return true;
+        }
+        return false;
+    }
+
     // check if this SQL MODE is supported
     public static boolean isSupportedSqlMode(String sqlMode) {
         // empty string is valid and equals to 0L
