@@ -33,26 +33,30 @@ namespace segment_v2 {
 
 using strings::Substitute;
 
+Status Segment::open(std::string filename,
+                     uint32_t segment_id,
+                     const TabletSchema* tablet_schema,
+                     std::shared_ptr<Segment>* output) {
+    std::shared_ptr<Segment> segment(new Segment(std::move(filename), segment_id, tablet_schema));
+    RETURN_IF_ERROR(segment->_open());
+    output->swap(segment);
+    return Status::OK();
+}
+
 Segment::Segment(
         std::string fname, uint32_t segment_id,
         const TabletSchema* tablet_schema)
         : _fname(std::move(fname)),
         _segment_id(segment_id),
-        _tablet_schema(tablet_schema),
-        _index_loaded(false) {
+        _tablet_schema(tablet_schema) {
 }
 
-Segment::~Segment() {
-    for (auto reader : _column_readers) {
-        delete reader;
-    }
-}
+Segment::~Segment() = default;
 
-Status Segment::open() {
+Status Segment::_open() {
     RETURN_IF_ERROR(Env::Default()->new_random_access_file(_fname, &_input_file));
-    // parse footer to get meta
     RETURN_IF_ERROR(_parse_footer());
-
+    RETURN_IF_ERROR(_create_column_readers());
     return Status::OK();
 }
 
@@ -61,6 +65,7 @@ Status Segment::new_iterator(
         const StorageReadOptions& read_options,
         std::unique_ptr<RowwiseIterator>* iter) {
 
+    // trying to prune the current segment by segment-level zone map
     if (read_options.conditions != nullptr) {
         for (auto& column_condition : read_options.conditions->columns()) {
             int32_t column_id = column_condition.first;
@@ -84,8 +89,10 @@ Status Segment::new_iterator(
                 return Status::NotSupported(Substitute("unsupported typeinfo, type=$0", c_meta.type()));
             }
             FieldType type = type_info->type();
-            std::unique_ptr<WrapperField> min_value(WrapperField::create_by_type(type));
-            std::unique_ptr<WrapperField> max_value(WrapperField::create_by_type(type));
+            const Field* field = schema.column(column_id);
+            int32_t var_length = field->length();
+            std::unique_ptr<WrapperField> min_value(WrapperField::create_by_type(type, var_length));
+            std::unique_ptr<WrapperField> max_value(WrapperField::create_by_type(type, var_length));
             if (c_zone_map.has_not_null()) {
                 min_value->from_string(c_zone_map.min());
                 max_value->from_string(c_zone_map.max());
@@ -104,14 +111,7 @@ Status Segment::new_iterator(
         }
     }
 
-
-    if(!_index_loaded) {
-        // parse short key index
-        RETURN_IF_ERROR(_parse_index());
-        // initial all column reader
-        RETURN_IF_ERROR(_initial_column_readers());
-        _index_loaded = true;
-    }
+    RETURN_IF_ERROR(_load_index());
     iter->reset(new SegmentIterator(this->shared_from_this(), schema));
     iter->get()->init(read_options);
     return Status::OK();
@@ -157,33 +157,30 @@ Status Segment::_parse_footer() {
     if (!_footer.ParseFromString(footer_buf)) {
         return Status::Corruption(Substitute("Bad segment file $0: failed to parse SegmentFooterPB", _fname));
     }
+    return Status::OK();
+}
 
+Status Segment::_load_index() {
+    return _load_index_once.call([this] {
+        // read short key index content
+        _sk_index_buf.resize(_footer.short_key_index_page().size());
+        Slice slice(_sk_index_buf.data(), _sk_index_buf.size());
+        RETURN_IF_ERROR(_input_file->read_at(_footer.short_key_index_page().offset(), slice));
+
+        // Parse short key index
+        _sk_index_decoder.reset(new ShortKeyIndexDecoder(_sk_index_buf));
+        RETURN_IF_ERROR(_sk_index_decoder->parse());
+        return Status::OK();
+    });
+}
+
+Status Segment::_create_column_readers() {
     for (uint32_t ordinal = 0; ordinal < _footer.columns().size(); ++ordinal) {
         auto& column_pb = _footer.columns(ordinal);
         _column_id_to_footer_ordinal.emplace(column_pb.unique_id(), ordinal);
     }
-    return Status::OK();
-}
 
-// load and parse short key index
-Status Segment::_parse_index() {
-    // read short key index content
-    _sk_index_buf.resize(_footer.short_key_index_page().size());
-    Slice slice(_sk_index_buf.data(), _sk_index_buf.size());
-    RETURN_IF_ERROR(_input_file->read_at(_footer.short_key_index_page().offset(), slice));
-
-    // Parse short key index
-    _sk_index_decoder.reset(new ShortKeyIndexDecoder(_sk_index_buf));
-    RETURN_IF_ERROR(_sk_index_decoder->parse());
-    return Status::OK();
-}
-
-Status Segment::_initial_column_readers() {
-    // TODO(zc): Lazy init()?
-    // There may be too many columns, majority of them would not be used
-    // in query, so we should not init them here.
-    _column_readers.resize(_tablet_schema->columns().size(), nullptr);
-
+    _column_readers.resize(_tablet_schema->columns().size());
     for (uint32_t ordinal = 0; ordinal < _tablet_schema->num_columns(); ++ordinal) {
         auto& column = _tablet_schema->columns()[ordinal];
         auto iter = _column_id_to_footer_ordinal.find(column.unique_id());
@@ -192,11 +189,10 @@ Status Segment::_initial_column_readers() {
         }
 
         ColumnReaderOptions opts;
-        std::unique_ptr<ColumnReader> reader(
-            new ColumnReader(opts, _footer.columns(iter->second), _footer.num_rows(), _input_file.get()));
-        RETURN_IF_ERROR(reader->init());
-
-        _column_readers[ordinal] = reader.release();
+        std::unique_ptr<ColumnReader> reader;
+        RETURN_IF_ERROR(ColumnReader::create(
+            opts, _footer.columns(iter->second), _footer.num_rows(), _input_file.get(), &reader));
+        _column_readers[ordinal] = std::move(reader);
     }
     return Status::OK();
 }
@@ -204,13 +200,15 @@ Status Segment::_initial_column_readers() {
 Status Segment::new_column_iterator(uint32_t cid, ColumnIterator** iter) {
     if (_column_readers[cid] == nullptr) {
         const TabletColumn& tablet_column = _tablet_schema->column(cid);
-        if (!tablet_column.has_default_value()) {
+        if (!tablet_column.has_default_value() && !tablet_column.is_nullable()) {
             return Status::InternalError("invalid nonexistent column without default value.");
         }
         std::unique_ptr<DefaultValueColumnIterator> default_value_iter(
-                new DefaultValueColumnIterator(tablet_column.default_value(),
+                new DefaultValueColumnIterator(tablet_column.has_default_value(),
+                tablet_column.default_value(),
                 tablet_column.is_nullable(), tablet_column.type()));
-        RETURN_IF_ERROR(default_value_iter->init());
+        ColumnIteratorOptions iter_opts;
+        RETURN_IF_ERROR(default_value_iter->init(iter_opts));
         *iter = default_value_iter.release();
         return Status::OK();
     }

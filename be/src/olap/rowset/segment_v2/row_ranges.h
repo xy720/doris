@@ -113,6 +113,11 @@ class RowRanges {
 public:
     RowRanges() : _count(0) { }
 
+    void clear() {
+        _ranges.clear();
+        _count = 0;
+    }
+
     // Creates a new RowRanges object with the single range [0, row_count).
     static RowRanges create_single(uint64_t row_count) {
         RowRanges ranges;
@@ -257,6 +262,9 @@ private:
     // trying to union the specified range to the last ranges in the list. The specified range shall be larger(*) than
     // the last one or might be overlapped with some of the last ones.
     void add(const RowRange& range) {
+        if (range.count() == 0) {
+            return;
+        }
         RowRange range_to_add = range;
         for (int i = _ranges.size() - 1; i >= 0; --i) {
             const RowRange last = _ranges[i];

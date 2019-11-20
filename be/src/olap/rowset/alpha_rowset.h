@@ -40,10 +40,6 @@ class AlphaRowset : public Rowset {
 public:
     virtual ~AlphaRowset() {}
 
-    // this api is for lazy loading data
-    // always means that there are some io
-    OLAPStatus load(bool use_cache = true) override;
-
     OLAPStatus create_reader(std::shared_ptr<RowsetReader>* result) override;
 
     OLAPStatus split_range(const RowCursor& start_key,
@@ -76,17 +72,17 @@ protected:
 
     AlphaRowset(const TabletSchema* schema,
                 std::string rowset_path,
-                DataDir* data_dir,
                 RowsetMetaSharedPtr rowset_meta);
 
+    // init segment groups
     OLAPStatus init() override;
+
+    OLAPStatus do_load_once(bool use_cache) override ;
 
     // add custom logic when rowset is published
     void make_visible_extra(Version version, VersionHash version_hash) override;
 
 private:
-    OLAPStatus _init_segment_groups();
-
     std::shared_ptr<SegmentGroup> _segment_group_with_largest_size();
 
 private:

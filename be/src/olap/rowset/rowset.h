@@ -22,8 +22,9 @@
 #include <vector>
 
 #include "gen_cpp/olap_file.pb.h"
-#include "olap/new_status.h"
+#include "gutil/macros.h"
 #include "olap/rowset/rowset_meta.h"
+#include "util/once.h"
 
 namespace doris {
 
@@ -45,7 +46,10 @@ public:
 
     // Open all segment files in this rowset and load necessary metadata.
     // - `use_cache` : whether to use fd cache, only applicable to alpha rowset now
-    virtual OLAPStatus load(bool use_cache = true) = 0;
+    //
+    // May be called multiple times, subsequent calls will no-op.
+    // Derived class implements the load logic by overriding the `do_load_once()` method.
+    OLAPStatus load(bool use_cache = true);
 
     // returns OLAP_ERR_ROWSET_CREATE_READER when failed to create reader
     virtual OLAPStatus create_reader(std::shared_ptr<RowsetReader>* result) = 0;
@@ -63,7 +67,7 @@ public:
                                    uint64_t request_block_row_count,
                                    std::vector<OlapTuple>* ranges) = 0;
 
-    RowsetMetaSharedPtr rowset_meta() const { return _rowset_meta; }
+    const RowsetMetaSharedPtr& rowset_meta() const { return _rowset_meta; }
 
     bool is_pending() const { return _is_pending; }
 
@@ -129,33 +133,29 @@ public:
 protected:
     friend class RowsetFactory;
 
+    DISALLOW_COPY_AND_ASSIGN(Rowset);
     // this is non-public because all clients should use RowsetFactory to obtain pointer to initialized Rowset
     Rowset(const TabletSchema* schema,
            std::string rowset_path,
-           DataDir* data_dir,
            RowsetMetaSharedPtr rowset_meta);
 
     // this is non-public because all clients should use RowsetFactory to obtain pointer to initialized Rowset
     virtual OLAPStatus init() = 0;
 
-    bool is_inited() const { return _is_inited; }
-    void set_inited(bool inited) { _is_inited = inited; }
-    bool is_loaded() const { return _is_loaded; }
-    void set_loaded(bool loaded) { _is_loaded= loaded; }
+    // The actual implementation of load(). Guaranteed by to called exactly once.
+    virtual OLAPStatus do_load_once(bool use_cache) = 0;
 
     // allow subclass to add custom logic when rowset is being published
     virtual void make_visible_extra(Version version, VersionHash version_hash) {}
 
     const TabletSchema* _schema;
     std::string _rowset_path;
-    DataDir* _data_dir;
     RowsetMetaSharedPtr _rowset_meta;
     // init in constructor
     bool _is_pending;    // rowset is pending iff it's not in visible state
     bool _is_cumulative; // rowset is cumulative iff it's visible and start version < end version
 
-    bool _is_inited = false;
-    bool _is_loaded = false;
+    DorisCallOnce<OLAPStatus> _load_once;
     bool _need_delete_file = false;
 };
 

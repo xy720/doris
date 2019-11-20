@@ -27,6 +27,8 @@
 #include "olap/olap_common.h"
 #include "olap/types.h"
 #include "util/debug_util.h"
+#include "runtime/mem_tracker.h"
+#include "runtime/mem_pool.h"
 
 namespace doris {
 namespace segment_v2 {
@@ -44,17 +46,17 @@ public:
         const Slice *ptr = &slices[0];
         Status ret = page_builder.add(reinterpret_cast<const uint8_t *>(ptr), &count);
 
-        Slice s = page_builder.finish();
+        OwnedSlice s = page_builder.finish();
         ASSERT_EQ(slices.size(), page_builder.count());
         ASSERT_FALSE(page_builder.is_page_full());
 
         // construct dict page
-        Slice dict_slice;
+        OwnedSlice dict_slice;
         Status status = page_builder.get_dictionary_page(&dict_slice);
         ASSERT_TRUE(status.ok());
         PageDecoderOptions dict_decoder_options;
         std::unique_ptr<BinaryPlainPageDecoder> dict_page_decoder(
-                new BinaryPlainPageDecoder(dict_slice, dict_decoder_options));
+                new BinaryPlainPageDecoder(dict_slice.slice(), dict_decoder_options));
         status = dict_page_decoder->init();
         ASSERT_TRUE(status.ok());
         // because every slice is unique
@@ -62,7 +64,7 @@ public:
 
         // decode
         PageDecoderOptions decoder_options;
-        BinaryDictPageDecoder page_decoder(s, decoder_options);
+        BinaryDictPageDecoder page_decoder(s.slice(), decoder_options);
         page_decoder.set_dict_decoder(dict_page_decoder.get());
 
         status = page_decoder.init();
@@ -70,11 +72,12 @@ public:
         ASSERT_EQ(slices.size(), page_decoder.count());
 
         //check values
-        Arena arena;
+        MemTracker tracker;
+        MemPool pool(&tracker);
         TypeInfo* type_info = get_type_info(OLAP_FIELD_TYPE_VARCHAR);
         size_t size = slices.size();
-        Slice* values = reinterpret_cast<Slice*>(arena.Allocate(size * sizeof(Slice)));
-        ColumnBlock column_block(type_info, (uint8_t*)values, nullptr, size, &arena);
+        Slice* values = reinterpret_cast<Slice*>(pool.allocate(size * sizeof(Slice)));
+        ColumnBlock column_block(type_info, (uint8_t*)values, nullptr, size, &pool);
         ColumnBlockView block_view(&column_block);
 
         status = page_decoder.next_batch(&size, &block_view);
@@ -107,7 +110,7 @@ public:
         options.dict_page_size = 1 * 1024 * 1024;
         BinaryDictPageBuilder page_builder(options);
         size_t count = contents.size();
-        std::vector<Slice> results;
+        std::vector<OwnedSlice> results;
         std::vector<size_t> page_start_ids;
         size_t total_size = 0;
         page_start_ids.push_back(0);
@@ -116,29 +119,27 @@ public:
             const Slice* ptr = &contents[i];
             Status ret = page_builder.add(reinterpret_cast<const uint8_t *>(ptr), &add_num);
             if (page_builder.is_page_full()) {
-                Slice s = page_builder.finish();
-                total_size += s.size;
-                results.emplace_back(s);
-                page_builder.release();
+                OwnedSlice s = page_builder.finish();
+                total_size += s.slice().size;
+                results.emplace_back(std::move(s));
                 page_builder.reset();
                 page_start_ids.push_back(i + 1);
             }
             i += add_num;
         }
-        Slice s = page_builder.finish();
-        total_size += s.size;
-        results.emplace_back(s);
-        page_builder.release();
+        OwnedSlice s = page_builder.finish();
+        total_size += s.slice().size;
+        results.emplace_back(std::move(s));
 
         page_start_ids.push_back(count);
 
-        Slice dict_slice;
+        OwnedSlice dict_slice;
         Status status = page_builder.get_dictionary_page(&dict_slice);
         size_t data_size = total_size;
-        total_size += dict_slice.size;
+        total_size += dict_slice.slice().size;
         ASSERT_TRUE(status.ok());
         LOG(INFO) << "total size:" << total_size << ", data size:" << data_size
-                << ", dict size:" << dict_slice.size
+                << ", dict size:" << dict_slice.slice().size
                 << " result page size:" << results.size();
         
         // validate
@@ -149,22 +150,23 @@ public:
             //int slice_index = 1;
             PageDecoderOptions dict_decoder_options;
             std::unique_ptr<BinaryPlainPageDecoder> dict_page_decoder(
-                    new BinaryPlainPageDecoder(dict_slice, dict_decoder_options));
+                    new BinaryPlainPageDecoder(dict_slice.slice(), dict_decoder_options));
             status = dict_page_decoder->init();
             ASSERT_TRUE(status.ok());
 
             // decode
             PageDecoderOptions decoder_options;
-            BinaryDictPageDecoder page_decoder(results[slice_index], decoder_options);
+            BinaryDictPageDecoder page_decoder(results[slice_index].slice(), decoder_options);
             status = page_decoder.init();
             page_decoder.set_dict_decoder(dict_page_decoder.get());
             ASSERT_TRUE(status.ok());
 
             //check values
-            Arena arena;
+            MemTracker tracker;
+            MemPool pool(&tracker);
             TypeInfo* type_info = get_type_info(OLAP_FIELD_TYPE_VARCHAR);
-            Slice* values = reinterpret_cast<Slice*>(arena.Allocate(sizeof(Slice)));
-            ColumnBlock column_block(type_info, (uint8_t*)values, nullptr, 1, &arena);
+            Slice* values = reinterpret_cast<Slice*>(pool.allocate(sizeof(Slice)));
+            ColumnBlock column_block(type_info, (uint8_t*)values, nullptr, 1, &pool);
             ColumnBlockView block_view(&column_block);
 
             size_t num = 1;

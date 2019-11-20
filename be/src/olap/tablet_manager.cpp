@@ -52,6 +52,7 @@
 #include "util/time.h"
 #include "util/doris_metrics.h"
 #include "util/pretty_printer.h"
+#include "util/file_utils.h"
 
 using apache::thrift::ThriftDebugString;
 using boost::filesystem::canonical;
@@ -209,46 +210,6 @@ OLAPStatus TabletManager::_add_tablet_to_map(TTabletId tablet_id, SchemaHash sch
             << " tablet_id = " << tablet_id
             << " schema_hash = " << schema_hash;   
     return res;                              
-}
-
-// this method is called when engine restarts so that not add any locks
-void TabletManager::cancel_unfinished_schema_change() {
-    // Schema Change在引擎退出时schemachange信息还保存在在Header里，
-    // 引擎重启后，需清除schemachange信息，上层会重做
-    uint64_t canceled_num = 0;
-    LOG(INFO) << "begin to cancel unfinished schema change.";
-
-    for (const auto& tablet_instance : _tablet_map) {
-        for (TabletSharedPtr tablet : tablet_instance.second.table_arr) {
-            if (tablet == nullptr) {
-                LOG(WARNING) << "tablet does not exist. tablet_id=" << tablet_instance.first;
-                continue;
-            }
-            AlterTabletTaskSharedPtr alter_task = tablet->alter_task();
-            // if alter task's state == finished, could not do anything
-            if (alter_task == nullptr || alter_task->alter_state() == ALTER_FINISHED) {
-                continue;
-            }
-
-            OLAPStatus res = tablet->set_alter_state(ALTER_FAILED);
-            if (res != OLAP_SUCCESS) {
-                LOG(FATAL) << "fail to set alter state. res=" << res
-                        << ", base_tablet=" << tablet->full_name();
-                return;
-            }
-            res = tablet->save_meta();
-            if (res != OLAP_SUCCESS) {
-                LOG(FATAL) << "fail to save base tablet meta. res=" << res
-                        << ", base_tablet=" << tablet->full_name();
-                return;
-            }
-
-            LOG(INFO) << "cancel unfinished alter tablet task. base_tablet=" << tablet->full_name();
-            ++canceled_num;
-        }
-    }
-
-    LOG(INFO) << "finish to cancel unfinished schema change! canceled_num=" << canceled_num;
 }
 
 bool TabletManager::check_tablet_id_exist(TTabletId tablet_id) {
@@ -472,14 +433,16 @@ TabletSharedPtr TabletManager::_create_tablet_meta_and_dir(
         std::string tablet_dir = tablet_path.string();
         // because the tablet is removed async, so that the dir may still exist
         // when be receive create tablet again. For example redo schema change
-        if (check_dir_existed(schema_hash_dir)) {
+        if (FileUtils::check_exist(schema_hash_dir)) {
             LOG(WARNING) << "skip this dir because tablet path exist, path="<< schema_hash_dir;
             continue;
         } else {
             data_dir->add_pending_ids(TABLET_ID_PREFIX + std::to_string(request.tablet_id));
-            res = create_dirs(schema_hash_dir);
-            if (res != OLAP_SUCCESS) {
-                LOG(WARNING) << "create dir fail. [res=" << res << " path:" << schema_hash_dir;
+            Status ret = FileUtils::create_dir(schema_hash_dir);
+            if(!ret.ok()) {
+                LOG(WARNING) << "create dir fail. [res=" << res << " path:" << schema_hash_dir
+                             << " error: " << ret.to_string(); 
+                res = OLAP_ERR_CANNOT_CREATE_DIR;
                 continue;
             }
         }
@@ -487,9 +450,11 @@ TabletSharedPtr TabletManager::_create_tablet_meta_and_dir(
         tablet = Tablet::create_tablet_from_meta(tablet_meta, data_dir);
         if (tablet == nullptr) {
             LOG(WARNING) << "fail to load tablet from tablet_meta. root_path:" << data_dir->path();
-            res = remove_all_dir(tablet_dir);
-            if (res != OLAP_SUCCESS) {
-                LOG(WARNING) << "remove tablet dir:" << tablet_dir;
+            Status ret = FileUtils::remove_all(tablet_dir);
+            if (!ret.ok()) {
+                LOG(WARNING) << "remove tablet dir:" << tablet_dir 
+                             << ", error: " << ret.to_string();
+                res = OLAP_ERR_IO_ERROR;
             }
             continue;
         }
@@ -955,6 +920,11 @@ OLAPStatus TabletManager::report_tablet_info(TTabletInfo* tablet_info) {
 
 OLAPStatus TabletManager::report_all_tablets_info(std::map<TTabletId, TTablet>* tablets_info) {
     LOG(INFO) << "begin to process report all tablets info.";
+
+    // build the expired txn map first, outside the tablet map lock
+    std::map<TabletInfo, std::set<int64_t>> expire_txn_map;
+    StorageEngine::instance()->txn_manager()->build_expire_txn_map(&expire_txn_map);
+
     ReadLock rlock(&_tablet_map_lock);
     DorisMetrics::report_all_tablets_requests_total.increment(1);
 
@@ -976,11 +946,15 @@ OLAPStatus TabletManager::report_all_tablets_info(std::map<TTabletId, TTablet>* 
             TTabletInfo tablet_info;
             tablet_ptr->build_tablet_report_info(&tablet_info);
 
-            // report expire transaction
+            // find expire transaction corresponding to this tablet
+            TabletInfo tinfo = TabletInfo(tablet_ptr->tablet_id(), tablet_ptr->schema_hash(), tablet_ptr->tablet_uid());
             vector<int64_t> transaction_ids;
-            // TODO(ygl): tablet manager and txn manager may be dead lock
-            StorageEngine::instance()->txn_manager()->get_expire_txns(tablet_ptr->tablet_id(), 
-                tablet_ptr->schema_hash(), tablet_ptr->tablet_uid(), &transaction_ids);
+            auto find = expire_txn_map.find(tinfo);
+            if (find != expire_txn_map.end()) {
+                for(auto& it : find->second) {
+                    transaction_ids.push_back(it);
+                }
+            }
             tablet_info.__set_transaction_ids(transaction_ids);
 
             tablet.tablet_infos.push_back(tablet_info);
@@ -1060,7 +1034,7 @@ OLAPStatus TabletManager::start_trash_sweep() {
                     it = _shutdown_tablets.erase(it);
                     continue;
                 }
-                if (check_dir_existed((*it)->tablet_path())) {
+                if (FileUtils::check_exist((*it)->tablet_path())) {
                     // take snapshot of tablet meta
                     std::string meta_file = (*it)->tablet_path() + "/" + std::to_string((*it)->tablet_id()) + ".hdr";
                     (*it)->tablet_meta()->save(meta_file);
@@ -1083,7 +1057,7 @@ OLAPStatus TabletManager::start_trash_sweep() {
                 ++ clean_num;
             } else {
                 // if could not find tablet info in meta store, then check if dir existed
-                if (check_dir_existed((*it)->tablet_path())) {
+                if (FileUtils::check_exist((*it)->tablet_path())) {
                     LOG(WARNING) << "errors while load meta from store, skip this tablet" 
                                 << " tablet id " << (*it)->tablet_id()
                                 << " schema hash " << (*it)->schema_hash();
@@ -1230,11 +1204,10 @@ OLAPStatus TabletManager::_create_inital_rowset(
             context.tablet_id = tablet->tablet_id();
             context.partition_id = tablet->partition_id();
             context.tablet_schema_hash = tablet->schema_hash();
-            context.rowset_type = DEFAULT_ROWSET_TYPE;
+            context.rowset_type = StorageEngine::instance()->default_rowset_type();
             context.rowset_path_prefix = tablet->tablet_path();
             context.tablet_schema = &(tablet->tablet_schema());
             context.rowset_state = VISIBLE;
-            context.data_dir = tablet->data_dir();
             context.version = version;
             context.version_hash = request.version_hash;
 

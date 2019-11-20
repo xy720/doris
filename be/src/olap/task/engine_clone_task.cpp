@@ -25,6 +25,8 @@
 #include "olap/rowset/rowset.h"
 #include "olap/rowset/rowset_factory.h"
 
+#include "env/env.h"
+
 using std::set;
 using std::stringstream;
 
@@ -194,7 +196,7 @@ OLAPStatus EngineCloneTask::execute() {
             }
             // clone success, delete .hdr file because tablet meta is stored in rocksdb
             string cloned_meta_file = tablet_dir_stream.str() + "/" + std::to_string(_clone_req.tablet_id) + ".hdr";
-            remove_dir(cloned_meta_file);
+            FileUtils::remove(cloned_meta_file);
         }
         // Clean useless dir, if failed, ignore it.
         if (status != DORIS_SUCCESS && status != DORIS_CREATE_TABLE_EXIST) {
@@ -524,13 +526,13 @@ AgentStatus EngineCloneTask::_clone_copy(
                   << ", cost: " << total_time_ms << " ms"
                   << ", rate: " << copy_rate << " MB/s";
         if (make_snapshot_result.snapshot_version == 1) {
-            OLAPStatus convert_status = _convert_to_new_snapshot(data_dir, local_data_path, clone_req.tablet_id);
+            OLAPStatus convert_status = _convert_to_new_snapshot(local_data_path, clone_req.tablet_id);
             if (convert_status != OLAP_SUCCESS) {
                 status = DORIS_ERROR;
             }
         } 
         // change all rowset ids because they maybe its id same with local rowset
-        OLAPStatus convert_status = SnapshotManager::instance()->convert_rowset_ids(data_dir, 
+        OLAPStatus convert_status = SnapshotManager::instance()->convert_rowset_ids(
             local_data_path, clone_req.tablet_id, clone_req.schema_hash, tablet);
         if (convert_status != OLAP_SUCCESS) {
             status = DORIS_ERROR;
@@ -554,10 +556,10 @@ AgentStatus EngineCloneTask::_clone_copy(
     return status;
 }
 
-OLAPStatus EngineCloneTask::_convert_to_new_snapshot(DataDir& data_dir, const string& clone_dir, int64_t tablet_id) {
-    OLAPStatus res = OLAP_SUCCESS;   
+OLAPStatus EngineCloneTask::_convert_to_new_snapshot(const string& clone_dir, int64_t tablet_id) {
+    OLAPStatus res = OLAP_SUCCESS;
     // check clone dir existed
-    if (!check_dir_existed(clone_dir)) {
+    if (!FileUtils::check_exist(clone_dir)) {
         res = OLAP_ERR_DIR_NOT_EXIST;
         LOG(WARNING) << "clone dir not existed when clone. clone_dir=" << clone_dir.c_str();
         return res;
@@ -580,10 +582,11 @@ OLAPStatus EngineCloneTask::_convert_to_new_snapshot(DataDir& data_dir, const st
     }
 
     set<string> clone_files;
-    if ((res = dir_walk(clone_dir, NULL, &clone_files)) != OLAP_SUCCESS) {
-        LOG(WARNING) << "failed to dir walk when clone. [clone_dir=" << clone_dir << "]";
-        return res;
-    }
+    
+    RETURN_WITH_WARN_IF_ERROR(
+            FileUtils::list_dirs_files(clone_dir, NULL, &clone_files, Env::Default()),
+            OLAP_ERR_DISK_FAILURE,
+            "failed to dir walk when clone. clone_dir=" + clone_dir);
 
     try {
        olap_header_msg.CopyFrom(file_header.message());
@@ -594,7 +597,7 @@ OLAPStatus EngineCloneTask::_convert_to_new_snapshot(DataDir& data_dir, const st
     OlapSnapshotConverter converter;
     TabletMetaPB tablet_meta_pb;
     vector<RowsetMetaPB> pending_rowsets;
-    res = converter.to_new_snapshot(olap_header_msg, clone_dir, clone_dir, data_dir, &tablet_meta_pb, 
+    res = converter.to_new_snapshot(olap_header_msg, clone_dir, clone_dir, &tablet_meta_pb,
         &pending_rowsets, false);
     if (res != OLAP_SUCCESS) {
         LOG(WARNING) << "fail to convert snapshot to new format. dir='" << clone_dir;
@@ -606,8 +609,9 @@ OLAPStatus EngineCloneTask::_convert_to_new_snapshot(DataDir& data_dir, const st
         files_to_delete.push_back(full_file_path);
     }
     // remove all files
-    RETURN_NOT_OK(remove_files(files_to_delete));
-
+    RETURN_WITH_WARN_IF_ERROR(FileUtils::remove_paths(files_to_delete), OLAP_ERR_IO_ERROR,
+            "remove paths failed.")
+    
     res = TabletMeta::save(cloned_meta_file, tablet_meta_pb);
     if (res != OLAP_SUCCESS) {
         LOG(WARNING) << "fail to save converted tablet meta to dir='" << clone_dir;
@@ -631,7 +635,7 @@ OLAPStatus EngineCloneTask::_finish_clone(TabletSharedPtr tablet, const string& 
     tablet->obtain_header_wrlock();
     do {
         // check clone dir existed
-        if (!check_dir_existed(clone_dir)) {
+        if (!FileUtils::check_exist(clone_dir)) {
             res = OLAP_ERR_DIR_NOT_EXIST;
             LOG(WARNING) << "clone dir not existed when clone. clone_dir=" << clone_dir.c_str();
             break;
@@ -646,20 +650,26 @@ OLAPStatus EngineCloneTask::_finish_clone(TabletSharedPtr tablet, const string& 
             break;
         }
         // remove the cloned meta file
-        remove_dir(cloned_tablet_meta_file);
+        FileUtils::remove(cloned_tablet_meta_file);
 
         // TODO(ygl): convert old format file into rowset
         // check all files in /clone and /tablet
         set<string> clone_files;
-        if ((res = dir_walk(clone_dir, NULL, &clone_files)) != OLAP_SUCCESS) {
-            LOG(WARNING) << "failed to dir walk when clone. [clone_dir=" << clone_dir << "]";
+        Status ret = FileUtils::list_dirs_files(clone_dir, NULL, &clone_files, Env::Default());
+        if (!ret.ok()) {
+            LOG(WARNING) << "failed to dir walk when clone. [clone_dir=" << clone_dir << "]"
+                         << " error: " << ret.to_string();
+            res = OLAP_ERR_DISK_FAILURE;
             break;
         }
 
         set<string> local_files;
         string tablet_dir = tablet->tablet_path();
-        if ((res = dir_walk(tablet_dir, NULL, &local_files)) != OLAP_SUCCESS) {
-            LOG(WARNING) << "failed to dir walk when clone. [tablet_dir=" << tablet_dir << "]";
+        ret = FileUtils::list_dirs_files(tablet_dir, NULL, &local_files, Env::Default());
+        if (!ret.ok()) {
+            LOG(WARNING) << "failed to dir walk when clone. [tablet_dir=" << tablet_dir << "]"
+                         << " error: " << ret.to_string();
+            res = OLAP_ERR_DISK_FAILURE;
             break;
         }
 
@@ -704,7 +714,7 @@ OLAPStatus EngineCloneTask::_finish_clone(TabletSharedPtr tablet, const string& 
 
     // clear linked files if errors happen
     if (res != OLAP_SUCCESS) {
-        remove_files(linked_success_files);
+        FileUtils::remove_paths(linked_success_files);
     }
     tablet->release_header_lock();
     tablet->release_push_lock();
@@ -847,7 +857,6 @@ OLAPStatus EngineCloneTask::_clone_full_data(TabletSharedPtr tablet, TabletMeta*
         RowsetSharedPtr rowset_to_remove;
         auto s = RowsetFactory::create_rowset(&(cloned_tablet_meta->tablet_schema()),
                                               tablet->tablet_path(),
-                                              tablet->data_dir(),
                                               rs_meta_ptr,
                                               &rowset_to_remove);
         if (s != OLAP_SUCCESS) {

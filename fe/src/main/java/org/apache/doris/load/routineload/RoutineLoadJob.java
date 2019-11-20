@@ -46,6 +46,9 @@ import org.apache.doris.load.RoutineLoadDesc;
 import org.apache.doris.metric.MetricRepo;
 import org.apache.doris.persist.RoutineLoadOperation;
 import org.apache.doris.planner.StreamLoadPlanner;
+import org.apache.doris.qe.ConnectContext;
+import org.apache.doris.qe.SessionVariable;
+import org.apache.doris.qe.SqlModeHelper;
 import org.apache.doris.task.StreamLoadTask;
 import org.apache.doris.thrift.TExecPlanFragmentParams;
 import org.apache.doris.thrift.TUniqueId;
@@ -153,6 +156,10 @@ public abstract class RoutineLoadJob extends AbstractTxnStateChangeCallback impl
     // include strict mode
     protected Map<String, String> jobProperties = Maps.newHashMap();
 
+    // sessionVariable's name -> sessionVariable's value
+    // we persist these sessionVariables due to the session is not available when replaying the job.
+    protected Map<String, String> sessionVariables = Maps.newHashMap();
+
     /*
      * The following 3 variables control the max execute time of a single task.
      * The default max batch interval time is 10 secs.
@@ -227,6 +234,13 @@ public abstract class RoutineLoadJob extends AbstractTxnStateChangeCallback impl
         this.dbId = dbId;
         this.tableId = tableId;
         this.authCode = 0;
+
+        if (ConnectContext.get() != null) {
+            SessionVariable var = ConnectContext.get().getSessionVariable();
+            sessionVariables.put(SessionVariable.SQL_MODE, Long.toString(var.getSqlMode()));
+        } else {
+            sessionVariables.put(SessionVariable.SQL_MODE, String.valueOf(SqlModeHelper.MODE_DEFAULT));
+        }
     }
 
     protected void setOptional(CreateRoutineLoadStmt stmt) throws UserException {
@@ -414,15 +428,17 @@ public abstract class RoutineLoadJob extends AbstractTxnStateChangeCallback impl
         }
     }
 
-    // only check loading task
+    // RoutineLoadScheduler will run this method at fixed interval, and renew the timeout tasks
     public void processTimeoutTasks() {
         writeLock();
         try {
             List<RoutineLoadTaskInfo> runningTasks = new ArrayList<>(routineLoadTaskInfoList);
             for (RoutineLoadTaskInfo routineLoadTaskInfo : runningTasks) {
-                if (routineLoadTaskInfo.isRunning()
-                        && ((System.currentTimeMillis() - routineLoadTaskInfo.getExecuteStartTimeMs())
-                        > maxBatchIntervalS * 2 * 1000)) {
+                if (routineLoadTaskInfo.isTimeout()) {
+                    // here we simply discard the timeout task and create a new one.
+                    // the corresponding txn will be aborted by txn manager.
+                    // and after renew, the previous task is removed from routineLoadTaskInfoList,
+                    // so task can no longer be committed successfully.
                     RoutineLoadTaskInfo newTask = unprotectRenewTask(routineLoadTaskInfo);
                     Catalog.getCurrentCatalog().getRoutineLoadTaskScheduler().addTaskInQueue(newTask);
                 }
@@ -438,7 +454,7 @@ public abstract class RoutineLoadJob extends AbstractTxnStateChangeCallback impl
         return 0;
     }
 
-    public Map<Long, Integer> getBeIdToConcurrentTaskNum() {
+    public Map<Long, Integer> getBeCurrentTasksNumMap() {
         Map<Long, Integer> beIdConcurrentTasksNum = Maps.newHashMap();
         readLock();
         try {
@@ -662,6 +678,7 @@ public abstract class RoutineLoadJob extends AbstractTxnStateChangeCallback impl
         } finally {
             if (!passCheck) {
                 writeUnlock();
+                LOG.debug("unlock write lock of routine load job before check: {}", id);
             }
         }
     }
@@ -691,6 +708,7 @@ public abstract class RoutineLoadJob extends AbstractTxnStateChangeCallback impl
                     + " while transaction " + txnState.getTransactionId() + " has been committed", false /* not replay */);
         } finally {
             writeUnlock();
+            LOG.debug("unlock write lock of routine load job after committed: {}", id);
         }
     }
 
@@ -758,6 +776,7 @@ public abstract class RoutineLoadJob extends AbstractTxnStateChangeCallback impl
                              .build(), e);
         } finally {
             writeUnlock();
+            LOG.debug("unlock write lock of routine load job after aborted: {}", id);
         }
     }
 
@@ -846,7 +865,7 @@ public abstract class RoutineLoadJob extends AbstractTxnStateChangeCallback impl
             LOG.debug(new LogBuilder(LogKey.ROUTINE_LOAD_JOB, id)
                               .add("current_job_state", getState())
                               .add("desire_job_state", jobState)
-                              .add("msg", "job will be change to desire state")
+                              .add("msg", reason)
                               .build());
         }
         checkStateTransform(jobState);
@@ -1150,6 +1169,12 @@ public abstract class RoutineLoadJob extends AbstractTxnStateChangeCallback impl
             Text.writeString(out, entry.getKey());
             Text.writeString(out, entry.getValue());
         }
+
+        out.writeInt(sessionVariables.size());
+        for (Map.Entry<String, String> entry : sessionVariables.entrySet()) {
+            Text.writeString(out, entry.getKey());
+            Text.writeString(out, entry.getValue());
+        }
     }
 
     @Override
@@ -1209,8 +1234,21 @@ public abstract class RoutineLoadJob extends AbstractTxnStateChangeCallback impl
             jobProperties.put(LoadStmt.STRICT_MODE, Boolean.toString(false));
         }
 
+        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_66) {
+            int size = in.readInt();
+            for (int i = 0; i < size; i++) {
+                String key = Text.readString(in);
+                String value = Text.readString(in);
+                sessionVariables.put(key, value);
+            }
+        } else {
+            // old version of load does not have sqlmode, set it to default
+            sessionVariables.put(SessionVariable.SQL_MODE, String.valueOf(SqlModeHelper.MODE_DEFAULT));
+        }
+
         // parse the origin stmt to get routine load desc
-        SqlParser parser = new SqlParser(new SqlScanner(new StringReader(origStmt)));
+        SqlParser parser = new SqlParser(new SqlScanner(new StringReader(origStmt),
+                Long.valueOf(sessionVariables.get(SessionVariable.SQL_MODE))));
         CreateRoutineLoadStmt stmt = null;
         try {
             stmt = (CreateRoutineLoadStmt) parser.parse().value;

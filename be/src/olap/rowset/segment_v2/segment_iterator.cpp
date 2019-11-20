@@ -27,6 +27,7 @@
 #include "olap/row_cursor.h"
 #include "olap/short_key_index.h"
 #include "olap/column_predicate.h"
+#include "olap/row.h"
 
 using strings::Substitute;
 
@@ -52,13 +53,14 @@ SegmentIterator::~SegmentIterator() {
 
 Status SegmentIterator::_init() {
     DorisMetrics::segment_read_total.increment(1);
+    RETURN_IF_ERROR(_init_column_iterators());
     RETURN_IF_ERROR(_get_row_ranges_by_keys());
     RETURN_IF_ERROR(_get_row_ranges_by_column_conditions());
     if (!_row_ranges.is_empty()) {
         _cur_range_id = 0;
         _cur_rowid = _row_ranges.get_range_from(_cur_range_id);
     }
-    RETURN_IF_ERROR(_init_column_iterators());
+    RETURN_IF_ERROR(_seek_columns(_schema.column_ids(), _cur_rowid));
     return Status::OK();
 }
 
@@ -121,6 +123,9 @@ Status SegmentIterator::_prepare_seek(const StorageReadOptions::KeyRange& key_ra
     for (auto cid : _seek_schema->column_ids()) {
         if (_column_iterators[cid] == nullptr) {
             RETURN_IF_ERROR(_segment->new_column_iterator(cid, &_column_iterators[cid]));
+            ColumnIteratorOptions iter_opts;
+            iter_opts.stats = _opts.stats;
+            RETURN_IF_ERROR(_column_iterators[cid]->init(iter_opts));
         }
     }
 
@@ -133,11 +138,10 @@ Status SegmentIterator::_get_row_ranges_by_column_conditions() {
         return Status::OK();
     }
 
-    if (_opts.conditions != nullptr) {
-        RowRanges zone_map_row_ranges;
-        RETURN_IF_ERROR(_get_row_ranges_from_zone_map(&zone_map_row_ranges));
-        RowRanges::ranges_intersection(_row_ranges, zone_map_row_ranges, &_row_ranges);
-        // TODO(hkp): get row ranges from bloom filter and secondary index
+    if (_opts.conditions != nullptr || _opts.delete_conditions.size() > 0) {
+        RowRanges condition_row_ranges;
+        RETURN_IF_ERROR(_get_row_ranges_from_conditions(&condition_row_ranges));
+        RowRanges::ranges_intersection(_row_ranges, condition_row_ranges, &_row_ranges);
     }
 
     // TODO(hkp): calculate filter rate to decide whether to
@@ -145,11 +149,13 @@ Status SegmentIterator::_get_row_ranges_by_column_conditions() {
     return Status::OK();
 }
 
-Status SegmentIterator::_get_row_ranges_from_zone_map(RowRanges* zone_map_row_ranges) {
+Status SegmentIterator::_get_row_ranges_from_conditions(RowRanges* condition_row_ranges) {
     RowRanges origin_row_ranges = RowRanges::create_single(num_rows());
     std::set<int32_t> cids;
-    for (auto& column_condition : _opts.conditions->columns()) {
-        cids.insert(column_condition.first);
+    if (_opts.conditions != nullptr) {
+        for (auto& column_condition : _opts.conditions->columns()) {
+            cids.insert(column_condition.first);
+        }
     }
     std::map<int, std::vector<CondColumn*>> column_delete_conditions;
     for (auto& delete_condition : _opts.delete_conditions) {
@@ -160,20 +166,22 @@ Status SegmentIterator::_get_row_ranges_from_zone_map(RowRanges* zone_map_row_ra
         }
     }
     for (auto& cid : cids) {
-        // get row ranges from zone map
-        if (!_segment->_column_readers[cid]->has_zone_map()) {
-            // there is no zone map for this column
-            continue;
+        // get row ranges by conditions against zone map/bf indexes of this column,
+        RowRanges column_row_ranges = RowRanges::create_single(num_rows());
+        CondColumn* column_cond = nullptr;
+        if (_opts.conditions != nullptr) {
+            column_cond = _opts.conditions->get_column(cid);
         }
-        // get row ranges by zone map of this column
-        RowRanges column_zone_map_row_ranges;
-        _segment->_column_readers[cid]->get_row_ranges_by_zone_map(_opts.conditions->get_column(cid),
-                column_delete_conditions[cid], &column_zone_map_row_ranges);
-        // intersection different columns's row ranges to get final row ranges by zone map
-        RowRanges::ranges_intersection(origin_row_ranges, column_zone_map_row_ranges, &origin_row_ranges);
+        RETURN_IF_ERROR(
+            _column_iterators[cid]->get_row_ranges_by_conditions(
+                column_cond,
+                column_delete_conditions[cid],
+                &column_row_ranges));
+        // intersection different columns's row ranges to get final row ranges by conditions
+        RowRanges::ranges_intersection(origin_row_ranges, column_row_ranges, &origin_row_ranges);
     }
-    *zone_map_row_ranges = std::move(origin_row_ranges);
-    DorisMetrics::segment_rows_read_by_zone_map.increment(zone_map_row_ranges->count());
+    *condition_row_ranges = std::move(origin_row_ranges);
+    DorisMetrics::segment_rows_read_by_zone_map.increment(condition_row_ranges->count());
     return Status::OK();
 }
 
@@ -184,9 +192,10 @@ Status SegmentIterator::_init_column_iterators() {
     for (auto cid : _schema.column_ids()) {
         if (_column_iterators[cid] == nullptr) {
             RETURN_IF_ERROR(_segment->new_column_iterator(cid, &_column_iterators[cid]));
+            ColumnIteratorOptions iter_opts;
+            iter_opts.stats = _opts.stats;
+            RETURN_IF_ERROR(_column_iterators[cid]->init(iter_opts));
         }
-
-        _column_iterators[cid]->seek_to_ordinal(_cur_rowid);
     }
     return Status::OK();
 }
@@ -267,13 +276,11 @@ Status SegmentIterator::_lookup_ordinal(const RowCursor& key, bool is_include,
 
 // seek to the row and load that row to _key_cursor
 Status SegmentIterator::_seek_and_peek(rowid_t rowid) {
-    for (auto cid : _seek_schema->column_ids()) {
-        _column_iterators[cid]->seek_to_ordinal(rowid);
-    }
+    RETURN_IF_ERROR(_seek_columns(_seek_schema->column_ids(), rowid));
     size_t num_rows = 1;
-    // please note that usually RowBlockV2.clear() is called to free arena memory before reading the next block,
+    // please note that usually RowBlockV2.clear() is called to free MemPool memory before reading the next block,
     // but here since there won't be too many keys to seek, we don't call RowBlockV2.clear() so that we can use
-    // a single arena for all seeked keys.
+    // a single MemPool for all seeked keys.
     RETURN_IF_ERROR(_next_batch(_seek_block.get(), &num_rows));
     _seek_block->set_num_rows(num_rows);
     return Status::OK();
@@ -287,6 +294,7 @@ Status SegmentIterator::_next_batch(RowBlockV2* block, size_t* rows_read) {
         size_t num_rows = has_read ? first_read : *rows_read;
         auto column_block = block->column_block(cid);
         RETURN_IF_ERROR(_column_iterators[cid]->next_batch(&num_rows, &column_block));
+        block->set_delete_state(column_block.delete_state());
         if (!has_read) {
             has_read = true;
             first_read = num_rows;
@@ -301,7 +309,16 @@ Status SegmentIterator::_next_batch(RowBlockV2* block, size_t* rows_read) {
     return Status::OK();
 }
 
+Status SegmentIterator::_seek_columns(const std::vector<ColumnId>& column_ids, rowid_t pos) {
+    SCOPED_RAW_TIMER(&_opts.stats->block_seek_ns);
+    for (auto cid : column_ids) {
+        RETURN_IF_ERROR(_column_iterators[cid]->seek_to_ordinal(pos));
+    }
+    return Status::OK();
+}
+
 Status SegmentIterator::next_batch(RowBlockV2* block) {
+    SCOPED_RAW_TIMER(&_opts.stats->block_load_ns);
     if (UNLIKELY(!_inited)) {
         RETURN_IF_ERROR(_init());
         _inited = true;
@@ -318,7 +335,7 @@ Status SegmentIterator::next_batch(RowBlockV2* block) {
             // step to next row range
             ++_cur_range_id;
             // current row range is read over, trying to read from next range
-            if (_cur_range_id >= _row_ranges.range_size() - 1) {
+            if (_cur_range_id > _row_ranges.range_size() - 1) {
                 block->set_num_rows(0);
                 return Status::EndOfFile("no more data in segment");
             }
@@ -327,9 +344,7 @@ Status SegmentIterator::next_batch(RowBlockV2* block) {
                 continue;
             }
             _cur_rowid = _row_ranges.get_range_from(_cur_range_id);
-            for (auto cid : block->schema()->column_ids()) {
-                RETURN_IF_ERROR(_column_iterators[cid]->seek_to_ordinal(_cur_rowid));
-            }
+            RETURN_IF_ERROR(_seek_columns(block->schema()->column_ids(), _cur_rowid));
             break;
         }
     }
@@ -339,7 +354,10 @@ Status SegmentIterator::next_batch(RowBlockV2* block) {
     RETURN_IF_ERROR(_next_batch(block, &rows_to_read));
     _cur_rowid += rows_to_read;
     block->set_num_rows(rows_to_read);
-
+    block->set_selected_size(rows_to_read);
+    // update raw_rows_read counter
+    // judge nullptr for unit test case
+    _opts.stats->raw_rows_read += block->num_rows();
     if (block->num_rows() == 0) {
         return Status::EndOfFile("no more data in segment");
     }
@@ -349,15 +367,18 @@ Status SegmentIterator::next_batch(RowBlockV2* block) {
     if (_opts.column_predicates != nullptr) {
         // init selection position index
         uint16_t selected_size = block->selected_size();
+        uint16_t original_size = selected_size;
+        SCOPED_RAW_TIMER(&_opts.stats->vec_cond_ns);
         for (auto column_predicate : *_opts.column_predicates) {
             auto column_block = block->column_block(column_predicate->column_id());
             column_predicate->evaluate(&column_block, block->selection_vector(), &selected_size);
         }
         block->set_selected_size(selected_size);
+        _opts.stats->rows_vec_cond_filtered += original_size - selected_size;
     }
+    ++_opts.stats->blocks_load;
     return Status::OK();
 }
-
 
 }
 }

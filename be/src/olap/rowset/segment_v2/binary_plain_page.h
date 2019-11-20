@@ -28,7 +28,6 @@
 
 #pragma once
 
-#include "util/arena.h"
 #include "util/coding.h"
 #include "util/faststring.h"
 #include "olap/olap_common.h"
@@ -36,6 +35,7 @@
 #include "olap/rowset/segment_v2/page_decoder.h"
 #include "olap/rowset/segment_v2/options.h"
 #include "olap/types.h"
+#include "runtime/mem_pool.h"
 
 namespace doris {
 namespace segment_v2 {
@@ -78,16 +78,15 @@ public:
         return Status::OK();
     }
 
-    Slice finish() override {
+    OwnedSlice finish() override {
+        DCHECK(!_finished);
         _finished = true;
-
         // Set up trailer
-        for (int i = 0; i < _offsets.size(); i++) {
-            put_fixed32_le(&_buffer, _offsets[i]);
+        for (uint32_t _offset : _offsets) {
+            put_fixed32_le(&_buffer, _offset);
         }
         put_fixed32_le(&_buffer, _offsets.size());
-
-        return Slice(_buffer);
+        return _buffer.build();
     }
 
     void reset() override {
@@ -99,22 +98,12 @@ public:
         _finished = false;
     }
 
-    size_t count() const {
+    size_t count() const override {
         return _offsets.size();
     }
 
     uint64_t size() const override {
         return _size_estimate;
-    }
-
-    // this api will release the memory ownership of encoded data
-    // Note:
-    //     release() should be called after finish
-    //     reset() should be called after this function before reuse the builder
-    void release() override {
-        uint8_t* ret = _buffer.release();
-        _buffer.reserve(_options.data_page_size);
-        (void) ret;
     }
 
     void update_prepared_size(size_t added_size) {
@@ -183,7 +172,7 @@ public:
             Slice elem(string_at_index(_cur_idx));
             out->size = elem.size;
             if (elem.size != 0) {
-                out->data = reinterpret_cast<char*>(dst->arena()->Allocate(elem.size * sizeof(uint8_t)));
+                out->data = reinterpret_cast<char*>(dst->pool()->allocate(elem.size * sizeof(uint8_t)));
                 memcpy(out->data, elem.data, elem.size);
             }
         }

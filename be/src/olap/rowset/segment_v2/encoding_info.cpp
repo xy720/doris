@@ -18,9 +18,11 @@
 #include "olap/rowset/segment_v2/encoding_info.h"
 
 #include "olap/olap_common.h"
-#include "olap/rowset/segment_v2/bitshuffle_page.h"
-#include "olap/rowset/segment_v2/rle_page.h"
 #include "olap/rowset/segment_v2/binary_dict_page.h"
+#include "olap/rowset/segment_v2/binary_plain_page.h"
+#include "olap/rowset/segment_v2/bitshuffle_page.h"
+#include "olap/rowset/segment_v2/plain_page.h"
+#include "olap/rowset/segment_v2/rle_page.h"
 #include "gutil/strings/substitute.h"
 
 namespace doris {
@@ -38,9 +40,23 @@ struct TypeEncodingTraits { };
 template<FieldType type>
 struct TypeEncodingTraits<type, PLAIN_ENCODING> {
     static Status create_page_builder(const PageBuilderOptions& opts, PageBuilder** builder) {
+        *builder = new PlainPageBuilder<type>(opts);
         return Status::OK();
     }
     static Status create_page_decoder(const Slice& data, const PageDecoderOptions& opts, PageDecoder** decoder) {
+        *decoder = new PlainPageDecoder<type>(data, opts);
+        return Status::OK();
+    }
+};
+
+template<FieldType type>
+struct TypeEncodingTraits<type, BINARY_PLAIN_ENCODING> {
+    static Status create_page_builder(const PageBuilderOptions& opts, PageBuilder** builder) {
+        *builder = new BinaryPlainPageBuilder(opts);
+        return Status::OK();
+    }
+    static Status create_page_decoder(const Slice& data, const PageDecoderOptions& opts, PageDecoder** decoder) {
+        *decoder = new BinaryPlainPageDecoder(data, opts);
         return Status::OK();
     }
 };
@@ -137,9 +153,10 @@ EncodingInfoResolver::EncodingInfoResolver() {
     _add_map<OLAP_FIELD_TYPE_DOUBLE, BIT_SHUFFLE>();
     _add_map<OLAP_FIELD_TYPE_DOUBLE, PLAIN_ENCODING>();
     _add_map<OLAP_FIELD_TYPE_CHAR, DICT_ENCODING>();
-    _add_map<OLAP_FIELD_TYPE_CHAR, PLAIN_ENCODING>();
+    _add_map<OLAP_FIELD_TYPE_CHAR, BINARY_PLAIN_ENCODING>();
     _add_map<OLAP_FIELD_TYPE_VARCHAR, DICT_ENCODING>();
-    _add_map<OLAP_FIELD_TYPE_VARCHAR, PLAIN_ENCODING>();
+    _add_map<OLAP_FIELD_TYPE_VARCHAR, BINARY_PLAIN_ENCODING>();
+    _add_map<OLAP_FIELD_TYPE_HLL, BINARY_PLAIN_ENCODING>();
     _add_map<OLAP_FIELD_TYPE_BOOL, RLE>();
     _add_map<OLAP_FIELD_TYPE_BOOL, BIT_SHUFFLE>();
     _add_map<OLAP_FIELD_TYPE_BOOL, PLAIN_ENCODING>();
@@ -149,6 +166,7 @@ EncodingInfoResolver::EncodingInfoResolver() {
     _add_map<OLAP_FIELD_TYPE_DATETIME, PLAIN_ENCODING>();
     _add_map<OLAP_FIELD_TYPE_DECIMAL, BIT_SHUFFLE>();
     _add_map<OLAP_FIELD_TYPE_DECIMAL, PLAIN_ENCODING>();
+    _add_map<OLAP_FIELD_TYPE_OBJECT, BINARY_PLAIN_ENCODING>();
 }
 
 EncodingInfoResolver::~EncodingInfoResolver() {

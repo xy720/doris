@@ -131,7 +131,9 @@ public class HeartbeatMgr extends Daemon {
             try {
                 // the heartbeat rpc's timeout is 5 seconds, so we will not be blocked here very long.
                 HeartbeatResponse response = future.get();
-                LOG.info("get heartbeat response: {}", response);
+                if (response.getStatus() != HbStatus.OK) {
+                    LOG.warn("get bad heartbeat response: {}", response);
+                }
                 isChanged = handleHbResponse(response, false);
 
                 if (isChanged) {
@@ -259,6 +261,16 @@ public class HeartbeatMgr extends Daemon {
 
         @Override
         public HeartbeatResponse call() {
+            if (fe.getHost().equals(Catalog.getInstance().getSelfNode().first)) {
+                // heartbeat to self
+                if (Catalog.getInstance().isReady()) {
+                    return new FrontendHbResponse(fe.getNodeName(), Config.query_port, Config.rpc_port,
+                            Catalog.getInstance().getReplayedJournalId(), System.currentTimeMillis());
+                } else {
+                    return new FrontendHbResponse(fe.getNodeName(), "not ready");
+                }
+            }
+
             String url = "http://" + fe.getHost() + ":" + Config.http_port
                     + "/api/bootstrap?cluster_id=" + clusterId + "&token=" + token;
             try {
@@ -266,7 +278,7 @@ public class HeartbeatMgr extends Daemon {
                 /*
                  * return:
                  * {"replayedJournalId":191224,"queryPort":9131,"rpcPort":9121,"status":"OK","msg":"Success"}
-                 * {"replayedJournalId":0,"queryPort":0,"rpcPort":0,"status":"FAILED","msg":"unfinished"}
+                 * {"replayedJournalId":0,"queryPort":0,"rpcPort":0,"status":"FAILED","msg":"not ready"}
                  */
                 JSONObject root = new JSONObject(result);
                 String status = root.getString("status");
@@ -336,3 +348,4 @@ public class HeartbeatMgr extends Daemon {
     }
 
 }
+

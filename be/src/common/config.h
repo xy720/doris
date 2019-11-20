@@ -64,8 +64,6 @@ namespace config {
     CONF_Int32(push_worker_count_high_priority, "3");
     // the count of thread to publish version
     CONF_Int32(publish_version_worker_count, "2");
-    // the count of thread to clear alter task
-    CONF_Int32(clear_alter_task_worker_count, "1");
     // the count of thread to clear transaction task
     CONF_Int32(clear_transaction_task_worker_count, "1");
     // the count of thread to delete
@@ -436,6 +434,10 @@ namespace config {
     // max consumer num in one data consumer group, for routine load
     CONF_Int32(max_consumer_num_per_group, "3");
 
+    // the size of thread pool for routine load task.
+    // this should be larger than FE config 'max_concurrent_task_num_per_be' (default 5)
+    CONF_Int32(routine_load_thread_pool_size, "10");
+
     // Is set to true, index loading failure will not causing BE exit,
     // and the tablet will be marked as bad, so that FE will try to repair it.
     CONF_Bool(auto_recover_index_loading_failure, "false");
@@ -481,6 +483,19 @@ namespace config {
     // config for tablet meta checkpoint
     CONF_Int32(tablet_meta_checkpoint_min_new_rowsets_num, "10");
     CONF_Int32(tablet_meta_checkpoint_min_interval_secs, "600");
+
+    // config for default rowset type
+    // Valid configs: ALPHA, BETA
+    CONF_String(default_rowset_type, "ALPHA");
+    CONF_String(compaction_rowset_type, "ALPHA");
+
+    // brpc config
+    CONF_Int64(brpc_max_body_size, "67108864")
+
+    // max number of txns in txn manager
+    // this is a self protection to avoid too many txns saving in manager
+    CONF_Int64(max_runnings_transactions, "200");
+
 } // namespace config
 
 } // namespace doris

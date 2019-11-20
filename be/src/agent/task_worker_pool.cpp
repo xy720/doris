@@ -44,9 +44,7 @@
 #include "olap/data_dir.h"
 #include "olap/snapshot_manager.h"
 #include "olap/task/engine_checksum_task.h"
-#include "olap/task/engine_clear_alter_task.h"
 #include "olap/task/engine_clone_task.h"
-#include "olap/task/engine_schema_change_task.h"
 #include "olap/task/engine_alter_tablet_task.h"
 #include "olap/task/engine_batch_load_task.h"
 #include "olap/task/engine_storage_migration_task.h"
@@ -135,10 +133,6 @@ void TaskWorkerPool::start() {
     case TaskWorkerType::PUBLISH_VERSION:
         _worker_count = config::publish_version_worker_count;
         _callback_function = _publish_version_worker_thread_callback;
-        break;
-    case TaskWorkerType::CLEAR_ALTER_TASK:
-        _worker_count = config::clear_alter_task_worker_count;
-        _callback_function = _clear_alter_task_worker_thread_callback;
         break;
     case TaskWorkerType::CLEAR_TRANSACTION_TASK:
         _worker_count = config::clear_transaction_task_worker_count;
@@ -564,8 +558,6 @@ void* TaskWorkerPool::_alter_tablet_worker_thread_callback(void* arg_this) {
             TFinishTaskRequest finish_task_request;
             TTaskType::type task_type = agent_task_req.task_type;
             switch (task_type) {
-            case TTaskType::SCHEMA_CHANGE:
-            case TTaskType::ROLLUP:
             case TTaskType::ALTER:
                 worker_pool_this->_alter_tablet(worker_pool_this,
                                             agent_task_req,
@@ -598,12 +590,6 @@ void TaskWorkerPool::_alter_tablet(
 
     string process_name;
     switch (task_type) {
-    case TTaskType::ROLLUP:
-        process_name = "roll up";
-        break;
-    case TTaskType::SCHEMA_CHANGE:
-        process_name = "schema change";
-        break;
     case TTaskType::ALTER:
         process_name = "alter";
         break;
@@ -622,18 +608,10 @@ void TaskWorkerPool::_alter_tablet(
     TTabletId new_tablet_id;
     TSchemaHash new_schema_hash = 0;
     if (status == DORIS_SUCCESS) {
-        OLAPStatus sc_status = OLAP_SUCCESS;
-        if (task_type == TTaskType::ALTER) {
-            new_tablet_id = agent_task_req.alter_tablet_req_v2.new_tablet_id;
-            new_schema_hash = agent_task_req.alter_tablet_req_v2.new_schema_hash;
-            EngineAlterTabletTask engine_task(agent_task_req.alter_tablet_req_v2, signature, task_type, &error_msgs, process_name);
-            sc_status = worker_pool_this->_env->storage_engine()->execute_task(&engine_task);
-        } else {
-            new_tablet_id = agent_task_req.alter_tablet_req.new_tablet_req.tablet_id;
-            new_schema_hash = agent_task_req.alter_tablet_req.new_tablet_req.tablet_schema.schema_hash;
-            EngineSchemaChangeTask engine_task(agent_task_req.alter_tablet_req, signature, task_type, &error_msgs, process_name);
-            sc_status = worker_pool_this->_env->storage_engine()->execute_task(&engine_task);
-        }
+        new_tablet_id = agent_task_req.alter_tablet_req_v2.new_tablet_id;
+        new_schema_hash = agent_task_req.alter_tablet_req_v2.new_schema_hash;
+        EngineAlterTabletTask engine_task(agent_task_req.alter_tablet_req_v2, signature, task_type, &error_msgs, process_name);
+        OLAPStatus sc_status = worker_pool_this->_env->storage_engine()->execute_task(&engine_task);
         if (sc_status != OLAP_SUCCESS) {
             status = DORIS_ERROR;
         } else {
@@ -886,57 +864,6 @@ void* TaskWorkerPool::_publish_version_worker_thread_callback(void* arg_this) {
     return (void*)0;
 }
 
-void* TaskWorkerPool::_clear_alter_task_worker_thread_callback(void* arg_this) {
-
-    TaskWorkerPool* worker_pool_this = (TaskWorkerPool*)arg_this;
-#ifndef BE_TEST
-    while (true) {
-#endif
-        TAgentTaskRequest agent_task_req;
-        TClearAlterTaskRequest clear_alter_task_req;
-        {
-            lock_guard<Mutex> worker_thread_lock(worker_pool_this->_worker_thread_lock);
-            while (worker_pool_this->_tasks.empty()) {
-                worker_pool_this->_worker_thread_condition_lock.wait();
-            }
-
-            agent_task_req = worker_pool_this->_tasks.front();
-            clear_alter_task_req = agent_task_req.clear_alter_task_req;
-            worker_pool_this->_tasks.pop_front();
-        }
-        LOG(INFO) << "get clear alter task task, signature:" << agent_task_req.signature;
-
-        TStatusCode::type status_code = TStatusCode::OK;
-        vector<string> error_msgs;
-        TStatus task_status;
-        EngineClearAlterTask engine_task(clear_alter_task_req);
-        OLAPStatus clear_status = worker_pool_this->_env->storage_engine()->execute_task(&engine_task);
-        if (clear_status != OLAPStatus::OLAP_SUCCESS) {
-            OLAP_LOG_WARNING("clear alter task failed. [signature: %ld status=%d]",
-                             agent_task_req.signature, clear_status);
-            error_msgs.push_back("clear alter task failed");
-            status_code = TStatusCode::RUNTIME_ERROR;
-        } else {
-            LOG(INFO) << "clear alter task success. signature:" << agent_task_req.signature;
-        }
-
-        task_status.__set_status_code(status_code);
-        task_status.__set_error_msgs(error_msgs);
-
-        TFinishTaskRequest finish_task_request;
-        finish_task_request.__set_task_status(task_status);
-        finish_task_request.__set_backend(worker_pool_this->_backend);
-        finish_task_request.__set_task_type(agent_task_req.task_type);
-        finish_task_request.__set_signature(agent_task_req.signature);
-
-        worker_pool_this->_finish_task(finish_task_request);
-        worker_pool_this->_remove_task_info(agent_task_req.task_type, agent_task_req.signature, "");
-#ifndef BE_TEST
-    }
-#endif
-    return (void*)0;
-}
-
 void* TaskWorkerPool::_clear_transaction_task_worker_thread_callback(void* arg_this) {
 
     TaskWorkerPool* worker_pool_this = (TaskWorkerPool*)arg_this;
@@ -956,7 +883,8 @@ void* TaskWorkerPool::_clear_transaction_task_worker_thread_callback(void* arg_t
             worker_pool_this->_tasks.pop_front();
         }
         LOG(INFO) << "get clear transaction task task, signature:" << agent_task_req.signature
-                  << ", transaction_id:" << clear_transaction_task_req.transaction_id;
+                  << ", transaction_id: " << clear_transaction_task_req.transaction_id
+                  << ", partition id size: " << clear_transaction_task_req.partition_id.size();
 
         TStatusCode::type status_code = TStatusCode::OK;
         vector<string> error_msgs;
@@ -966,13 +894,18 @@ void* TaskWorkerPool::_clear_transaction_task_worker_thread_callback(void* arg_t
             // transaction_id should be greater than zero.
             // If it is not greater than zero, no need to execute
             // the following clear_transaction_task() function.
-            worker_pool_this->_env->storage_engine()->clear_transaction_task(
-                    clear_transaction_task_req.transaction_id, clear_transaction_task_req.partition_id);
+            if (!clear_transaction_task_req.partition_id.empty()) {
+                worker_pool_this->_env->storage_engine()->clear_transaction_task(
+                        clear_transaction_task_req.transaction_id, clear_transaction_task_req.partition_id);
+            } else {
+                worker_pool_this->_env->storage_engine()->clear_transaction_task(
+                        clear_transaction_task_req.transaction_id);
+            }
             LOG(INFO) << "finish to clear transaction task. signature:" << agent_task_req.signature
-                      << ", transaction_id:" << clear_transaction_task_req.transaction_id;
+                      << ", transaction_id: " << clear_transaction_task_req.transaction_id;
         } else {
             LOG(WARNING) << "invalid transaction id: " << clear_transaction_task_req.transaction_id
-                         << ", signature:" << agent_task_req.signature;
+                         << ", signature: " << agent_task_req.signature;
         }
 
         task_status.__set_status_code(status_code);

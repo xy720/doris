@@ -21,11 +21,9 @@ namespace doris {
 
 Rowset::Rowset(const TabletSchema *schema,
                std::string rowset_path,
-               DataDir *data_dir,
                RowsetMetaSharedPtr rowset_meta)
         : _schema(schema),
          _rowset_path(std::move(rowset_path)),
-         _data_dir(data_dir),
          _rowset_meta(std::move(rowset_meta)) {
 
     _is_pending = !_rowset_meta->has_version();
@@ -35,6 +33,10 @@ Rowset::Rowset(const TabletSchema *schema,
         Version version = _rowset_meta->version();
         _is_cumulative = version.first != version.second;
     }
+}
+
+OLAPStatus Rowset::load(bool use_cache) {
+    return _load_once.call([this, use_cache] { return do_load_once(use_cache); });
 }
 
 void Rowset::make_visible(Version version, VersionHash version_hash) {

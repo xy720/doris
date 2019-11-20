@@ -86,8 +86,9 @@ public:
                                   const bool is_schema_change_tablet,
                                   const TabletSharedPtr ref_tablet);
 
+    void clear_transaction_task(const TTransactionId transaction_id);
     void clear_transaction_task(const TTransactionId transaction_id,
-                                const std::vector<TPartitionId> partition_ids);
+                                const std::vector<TPartitionId>& partition_ids);
 
     // Instance should be inited from create_instance
     // MUST NOT be called in other circumstances.
@@ -206,6 +207,10 @@ public:
 
     MemTableFlushExecutor* memtable_flush_executor() { return _memtable_flush_executor; }
 
+    RowsetTypePB default_rowset_type() const { return _default_rowset_type; }
+
+    RowsetTypePB compaction_rowset_type() const { return _compaction_rowset_type; }
+
 private:
 
     OLAPStatus _check_file_descriptor_number();
@@ -258,6 +263,9 @@ private:
     void* _path_scan_thread_callback(void* arg);
 
     void* _tablet_checkpoint_callback(void* arg);
+
+    // parse the default rowset type config to RowsetTypePB
+    void _parse_default_rowset_type();
 
 private:
 
@@ -356,6 +364,13 @@ private:
     std::unique_ptr<RowsetIdGenerator> _rowset_id_generator;
 
     MemTableFlushExecutor* _memtable_flush_executor;
+
+    // default rowset type for load
+    // used to decide the type of new loaded data
+    RowsetTypePB _default_rowset_type;
+    // default rowset type for compaction.
+    // used to control the the process of converting old data
+    RowsetTypePB _compaction_rowset_type;
 
     DISALLOW_COPY_AND_ASSIGN(StorageEngine);
 };

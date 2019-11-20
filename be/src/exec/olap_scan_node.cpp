@@ -139,6 +139,9 @@ void OlapScanNode::_init_counter(RuntimeState* state) {
     _index_load_timer = ADD_TIMER(_runtime_profile, "IndexLoadTime");
 
     _scan_timer = ADD_TIMER(_runtime_profile, "ScanTime");
+
+    _total_pages_num_counter = ADD_COUNTER(_runtime_profile, "TotalPagesNum", TUnit::UNIT);
+    _cached_pages_num_counter = ADD_COUNTER(_runtime_profile, "CachedPagesNum", TUnit::UNIT);
 }
 
 Status OlapScanNode::prepare(RuntimeState* state) {
@@ -190,9 +193,10 @@ Status OlapScanNode::open(RuntimeState* state) {
     SCOPED_TIMER(_runtime_profile->total_time_counter());
     RETURN_IF_CANCELLED(state);
     RETURN_IF_ERROR(ExecNode::open(state));
-
+   
     for (int conj_idx = 0; conj_idx < _conjunct_ctxs.size(); ++conj_idx) {
         // if conjunct is constant, compute direct and set eos = true
+
         if (_conjunct_ctxs[conj_idx]->root()->is_constant()) {
             void* value = _conjunct_ctxs[conj_idx]->get_value(NULL);
             if (value == NULL || *reinterpret_cast<bool*>(value) == false) {

@@ -22,7 +22,6 @@
 #include "olap/row_block2.h"
 #include "olap/row_cursor_cell.h"
 #include "olap/row.h"
-#include "util/arena.h"
 
 namespace doris {
 
@@ -95,6 +94,7 @@ Status AutoIncrementIterator::next_batch(RowBlockV2* block) {
     }
     block->set_num_rows(row_idx);
     block->set_selected_size(row_idx);
+    block->set_delete_state(DEL_PARTIAL_SATISFIED);
     if (row_idx > 0) {
         return Status::OK();
     }
@@ -139,6 +139,8 @@ public:
     // Only when this function return true, current_row()
     // will return a valid row
     bool valid() const { return _valid; }
+
+    int is_partial_delete() const { return _block.delete_state() == DEL_PARTIAL_SATISFIED; }
 
 private:
     // Load next block into _block
@@ -261,8 +263,12 @@ Status MergeIterator::next_batch(RowBlockV2* block) {
 
         RowBlockRow dst_row = block->row(row_idx);
         // copy current row to block
-        copy_row(&dst_row, ctx->current_row(), block->arena());
+        copy_row(&dst_row, ctx->current_row(), block->pool());
 
+        // TODO(hkp): refactor conditions and filter rows here with delete conditions
+        if (ctx->is_partial_delete()) {
+            block->set_delete_state(DEL_PARTIAL_SATISFIED);
+        }
         RETURN_IF_ERROR(ctx->advance());
         if (ctx->valid()) {
             _merge_heap->push(ctx);

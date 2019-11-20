@@ -146,7 +146,6 @@ RowsetSharedPtr BetaRowsetWriter::build() {
     RowsetSharedPtr rowset;
     auto status = RowsetFactory::create_rowset(_context.tablet_schema,
                                                _context.rowset_path_prefix,
-                                               _context.data_dir,
                                                _rowset_meta,
                                                &rowset);
     if (status != OLAP_SUCCESS) {
@@ -165,6 +164,7 @@ OLAPStatus BetaRowsetWriter::_create_segment_writer() {
     auto s = _segment_writer->init(config::push_write_mbytes_per_sec);
     if (!s.ok()) {
         LOG(WARNING) << "failed to init segment writer: " << s.to_string();
+        _segment_writer.reset(nullptr);
         return OLAP_ERR_INIT_FAILED;
     }
     _num_segment++;

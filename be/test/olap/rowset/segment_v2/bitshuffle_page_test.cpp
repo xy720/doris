@@ -22,7 +22,8 @@
 #include "olap/rowset/segment_v2/page_builder.h"
 #include "olap/rowset/segment_v2/page_decoder.h"
 #include "olap/rowset/segment_v2/bitshuffle_page.h"
-#include "util/arena.h"
+#include "runtime/mem_pool.h"
+#include "runtime/mem_tracker.h"
 #include "util/logging.h"
 
 using doris::segment_v2::PageBuilderOptions;
@@ -35,9 +36,10 @@ public:
 
     template<FieldType type, class PageDecoderType>
     void copy_one(PageDecoderType* decoder, typename TypeTraits<type>::CppType* ret) {
-        Arena arena;
+        MemTracker tracker;
+        MemPool pool(&tracker);
         uint8_t null_bitmap = 0;
-        ColumnBlock block(get_type_info(type), (uint8_t*)ret, &null_bitmap, 1, &arena);
+        ColumnBlock block(get_type_info(type), (uint8_t*)ret, &null_bitmap, 1, &pool);
         ColumnBlockView column_block_view(&block);
 
         size_t n = 1;
@@ -54,21 +56,22 @@ public:
         PageBuilderType page_builder(options);
 
         page_builder.add(reinterpret_cast<const uint8_t *>(src), &size);
-        Slice s = page_builder.finish();
-        LOG(INFO) << "RLE Encoded size for 10k values: " << s.size
+        OwnedSlice s = page_builder.finish();
+        LOG(INFO) << "RLE Encoded size for 10k values: " << s.slice().size
                 << ", original size:" << size * sizeof(CppType);
 
         segment_v2::PageDecoderOptions decoder_options;
-        PageDecoderType page_decoder(s, decoder_options);
+        PageDecoderType page_decoder(s.slice(), decoder_options);
         Status status = page_decoder.init();
         ASSERT_TRUE(status.ok());
         ASSERT_EQ(0, page_decoder.current_index());
 
-        Arena arena;
+        MemTracker tracker;
+        MemPool pool(&tracker);
 
-        CppType* values = reinterpret_cast<CppType*>(arena.Allocate(size * sizeof(CppType)));
-        uint8_t* null_bitmap = reinterpret_cast<uint8_t*>(arena.Allocate(BitmapSize(size)));
-        ColumnBlock block(get_type_info(Type), (uint8_t*)values, null_bitmap, size, &arena);
+        CppType* values = reinterpret_cast<CppType*>(pool.allocate(size * sizeof(CppType)));
+        uint8_t* null_bitmap = reinterpret_cast<uint8_t*>(pool.allocate(BitmapSize(size)));
+        ColumnBlock block(get_type_info(Type), (uint8_t*)values, null_bitmap, size, &pool);
         ColumnBlockView column_block_view(&block);
 
         status = page_decoder.next_batch(&size, &column_block_view);

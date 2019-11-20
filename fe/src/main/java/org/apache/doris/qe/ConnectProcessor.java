@@ -339,6 +339,12 @@ public class ConnectProcessor {
         if (request.isSetTime_zone()) {
             ctx.getSessionVariable().setTimeZone(request.getTime_zone());                       
         }
+        if (request.isSetStmt_id()) {
+            ctx.setForwardedStmtId(request.getStmt_id());
+        }
+        if (request.isSetSqlMode()) {
+            ctx.getSessionVariable().setSqlMode(request.sqlMode);
+        }
 
         ctx.setThreadLocalInfo();
 

@@ -115,7 +115,9 @@ StorageEngine::StorageEngine(const EngineOptions& options)
         _is_report_tablet_already(false), 
         _tablet_manager(new TabletManager()),
         _txn_manager(new TxnManager()),
-        _rowset_id_generator(new UniqueRowsetIdGenerator(options.backend_uid)) {
+        _rowset_id_generator(new UniqueRowsetIdGenerator(options.backend_uid)),
+        _default_rowset_type(ALPHA_ROWSET),
+        _compaction_rowset_type(ALPHA_ROWSET) {
     if (_s_instance == nullptr) {
         _s_instance = this;
     }
@@ -196,11 +198,11 @@ OLAPStatus StorageEngine::open() {
 
     auto dirs = get_stores();
     load_data_dirs(dirs);
-    // 取消未完成的SchemaChange任务
-    _tablet_manager->cancel_unfinished_schema_change();
 
     _memtable_flush_executor = new MemTableFlushExecutor();
     _memtable_flush_executor->init(dirs);
+
+    _parse_default_rowset_type();
 
     return OLAP_SUCCESS;
 }
@@ -475,8 +477,15 @@ OLAPStatus StorageEngine::clear() {
     return OLAP_SUCCESS;
 }
 
+void StorageEngine::clear_transaction_task(const TTransactionId transaction_id) {
+    // clear transaction task may not contains partitions ids, we should get partition id from txn manager.
+    std::vector<int64_t> partition_ids;
+    StorageEngine::instance()->txn_manager()->get_partition_ids(transaction_id, &partition_ids);
+    clear_transaction_task(transaction_id, partition_ids);
+}
+
 void StorageEngine::clear_transaction_task(const TTransactionId transaction_id,
-                                        const vector<TPartitionId> partition_ids) {
+        const vector<TPartitionId>& partition_ids) {
     LOG(INFO) << "begin to clear transaction task. transaction_id=" <<  transaction_id;
 
     for (const TPartitionId& partition_id : partition_ids) {
@@ -688,7 +697,7 @@ void StorageEngine::_clean_unused_txns() {
 OLAPStatus StorageEngine::_do_sweep(
         const string& scan_root, const time_t& local_now, const int32_t expire) {
     OLAPStatus res = OLAP_SUCCESS;
-    if (!check_dir_existed(scan_root)) {
+    if (!FileUtils::check_exist(scan_root)) {
         // dir not existed. no need to sweep trash.
         return res;
     }
@@ -718,8 +727,10 @@ OLAPStatus StorageEngine::_do_sweep(
             VLOG(10) << "get actual expire time " << actual_expire << " of dir: " << dir_name;
 
             if (difftime(local_now, mktime(&local_tm_create)) >= actual_expire) {
-                if (remove_all_dir(path_name) != OLAP_SUCCESS) {
-                    LOG(WARNING) << "fail to remove file or directory. path=" << path_name;
+                Status ret = FileUtils::remove_all(path_name);
+                if (!ret.ok()) {
+                    LOG(WARNING) << "fail to remove file or directory. path=" << path_name
+                                 << ", error=" << ret.to_string();
                     res = OLAP_ERR_OS_ERROR;
                     continue;
                 }
@@ -731,6 +742,25 @@ OLAPStatus StorageEngine::_do_sweep(
     }
 
     return res;
+}
+
+// invalid rowset type config will return ALPHA_ROWSET for system to run smoothly
+void StorageEngine::_parse_default_rowset_type() {
+    std::string default_rowset_type_config = config::default_rowset_type;
+    boost::to_upper(default_rowset_type_config);
+    if (default_rowset_type_config == "BETA") {
+        _default_rowset_type = BETA_ROWSET;
+    } else {
+        _default_rowset_type = ALPHA_ROWSET;
+    }
+
+    std::string compaction_rowset_type_config = config::compaction_rowset_type;
+    boost::to_upper(compaction_rowset_type_config);
+    if (compaction_rowset_type_config == "BETA") {
+        _compaction_rowset_type = BETA_ROWSET;
+    } else {
+        _compaction_rowset_type = ALPHA_ROWSET;
+    }
 }
 
 void StorageEngine::start_delete_unused_rowset() {

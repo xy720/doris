@@ -88,10 +88,6 @@ AgentServer::AgentServer(ExecEnv* exec_env,
             TaskWorkerPool::TaskWorkerType::PUBLISH_VERSION,
             _exec_env,
             master_info);
-    _clear_alter_task_workers = new TaskWorkerPool(
-            TaskWorkerPool::TaskWorkerType::CLEAR_ALTER_TASK,
-            _exec_env,
-            master_info);
     _clear_transaction_task_workers = new TaskWorkerPool(
             TaskWorkerPool::TaskWorkerType::CLEAR_TRANSACTION_TASK,
             exec_env,
@@ -161,7 +157,6 @@ AgentServer::AgentServer(ExecEnv* exec_env,
     _drop_tablet_workers->start();
     _push_workers->start();
     _publish_version_workers->start();
-    _clear_alter_task_workers->start();
     _clear_transaction_task_workers->start();
     _delete_workers->start();
     _alter_tablet_workers->start();
@@ -197,9 +192,6 @@ AgentServer::~AgentServer() {
     }
     if (_publish_version_workers != NULL) {
         delete _publish_version_workers;
-    }
-    if (_clear_alter_task_workers != NULL) {
-        delete _clear_alter_task_workers;
     }
     if (_clear_transaction_task_workers != NULL) {
         delete _clear_transaction_task_workers;
@@ -313,13 +305,6 @@ void AgentServer::submit_tasks(
                 status_code = TStatusCode::ANALYSIS_ERROR;
             }
             break;
-        case TTaskType::CLEAR_ALTER_TASK:
-            if (task.__isset.clear_alter_task_req) {
-                _clear_alter_task_workers->submit_task(task);
-            } else {
-                status_code = TStatusCode::ANALYSIS_ERROR;
-            }
-            break;
         case TTaskType::CLEAR_TRANSACTION_TASK:
             if (task.__isset.clear_transaction_task_req) {
                 _clear_transaction_task_workers->submit_task(task);
@@ -327,8 +312,6 @@ void AgentServer::submit_tasks(
                 status_code = TStatusCode::ANALYSIS_ERROR;
             }
             break;
-        case TTaskType::ROLLUP:
-        case TTaskType::SCHEMA_CHANGE:
         case TTaskType::ALTER:
             if (task.__isset.alter_tablet_req || task.__isset.alter_tablet_req_v2) {
                 _alter_tablet_workers->submit_task(task);

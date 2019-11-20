@@ -323,9 +323,9 @@ public class DeployManager extends Daemon {
             return;
         }
 
-        if (!catalog.isMaster()) {
-            LOG.warn("This is not the Master FE. Exit deply manager");
-            exit();
+        if (!Catalog.getCurrentCatalog().isReady()) {
+            // this deploy manager thread is started before catalog is ready.
+            // so we have to wait the catalog to be ready.
             return;
         }
 
@@ -630,7 +630,7 @@ public class DeployManager extends Daemon {
     }
 
     private boolean isSelf(String ip, Integer port) {
-        if (catalog.getMasterIp() == ip && Config.edit_log_port == port) {
+        if (catalog.getMasterIp().equals(ip) && Config.edit_log_port == port) {
             return true;
         }
         return false;

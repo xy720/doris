@@ -31,7 +31,10 @@
 #include "runtime/tuple.h"
 #include "runtime/descriptor_helper.h"
 #include "runtime/exec_env.h"
+#include "runtime/mem_pool.h"
+#include "runtime/mem_tracker.h"
 #include "util/logging.h"
+#include "util/file_utils.h"
 #include "olap/options.h"
 #include "olap/tablet_meta_manager.h"
 
@@ -50,8 +53,8 @@ void set_up() {
     char buffer[MAX_PATH_LEN];
     getcwd(buffer, MAX_PATH_LEN);
     config::storage_root_path = std::string(buffer) + "/data_test";
-    remove_all_dir(config::storage_root_path);
-    create_dir(config::storage_root_path);
+    FileUtils::remove_all(config::storage_root_path);
+    FileUtils::create_dir(config::storage_root_path);
     std::vector<StorePath> paths;
     paths.emplace_back(config::storage_root_path, -1);
 
@@ -69,7 +72,7 @@ void tear_down() {
     delete k_engine;
     k_engine = nullptr;
     system("rm -rf ./data_test");
-    remove_all_dir(std::string(getenv("DORIS_HOME")) + UNUSED_PREFIX);
+    FileUtils::remove_all(std::string(getenv("DORIS_HOME")) + UNUSED_PREFIX);
     delete k_mem_tracker;
 }
 
@@ -345,10 +348,11 @@ TEST_F(TestDeltaWriter, write) {
     DeltaWriter::open(&write_req, k_mem_tracker, &delta_writer); 
     ASSERT_NE(delta_writer, nullptr);
 
-    Arena arena;
+    MemTracker tracker;
+    MemPool pool(&tracker);
     // Tuple 1
     {
-        Tuple* tuple = reinterpret_cast<Tuple*>(arena.Allocate(tuple_desc->byte_size()));
+        Tuple* tuple = reinterpret_cast<Tuple*>(pool.allocate(tuple_desc->byte_size()));
         memset(tuple, 0, tuple_desc->byte_size());
         *(int8_t*)(tuple->get_slot(slots[0]->tuple_offset())) = -127;
         *(int16_t*)(tuple->get_slot(slots[1]->tuple_offset())) = -32767;
@@ -362,12 +366,12 @@ TEST_F(TestDeltaWriter, write) {
         ((DateTimeValue*)(tuple->get_slot(slots[6]->tuple_offset())))->from_date_str("2636-08-16 19:39:43", 19); 
 
         StringValue* char_ptr = (StringValue*)(tuple->get_slot(slots[7]->tuple_offset()));
-        char_ptr->ptr = arena.Allocate(4);
+        char_ptr->ptr = (char*)pool.allocate(4);
         memcpy(char_ptr->ptr, "abcd", 4);
         char_ptr->len = 4; 
 
         StringValue* var_ptr = (StringValue*)(tuple->get_slot(slots[8]->tuple_offset()));
-        var_ptr->ptr = arena.Allocate(5);
+        var_ptr->ptr = (char*)pool.allocate(5);
         memcpy(var_ptr->ptr, "abcde", 5);
         var_ptr->len = 5; 
 
@@ -385,12 +389,12 @@ TEST_F(TestDeltaWriter, write) {
         ((DateTimeValue*)(tuple->get_slot(slots[16]->tuple_offset())))->from_date_str("2636-08-16 19:39:43", 19); 
 
         char_ptr = (StringValue*)(tuple->get_slot(slots[17]->tuple_offset()));
-        char_ptr->ptr = arena.Allocate(4);
+        char_ptr->ptr = (char*)pool.allocate(4);
         memcpy(char_ptr->ptr, "abcd", 4);
         char_ptr->len = 4; 
 
         var_ptr = (StringValue*)(tuple->get_slot(slots[18]->tuple_offset()));
-        var_ptr->ptr = arena.Allocate(5);
+        var_ptr->ptr = (char*)pool.allocate(5);
         memcpy(var_ptr->ptr, "abcde", 5);
         var_ptr->len = 5;
 

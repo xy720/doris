@@ -139,7 +139,8 @@ enum FieldType {
     OLAP_FIELD_TYPE_UNKNOWN = 21,       // UNKNOW Type
     OLAP_FIELD_TYPE_NONE = 22,
     OLAP_FIELD_TYPE_HLL = 23,
-    OLAP_FIELD_TYPE_BOOL = 24
+    OLAP_FIELD_TYPE_BOOL = 24,
+    OLAP_FIELD_TYPE_OBJECT = 25
 };
 
 // 定义Field支持的所有聚集方法
@@ -154,7 +155,9 @@ enum FieldAggregationMethod {
     OLAP_FIELD_AGGREGATION_REPLACE = 4,
     OLAP_FIELD_AGGREGATION_HLL_UNION = 5,
     OLAP_FIELD_AGGREGATION_UNKNOWN = 6,
-    OLAP_FIELD_AGGREGATION_BITMAP_UNION = 7
+    OLAP_FIELD_AGGREGATION_BITMAP_UNION = 7,
+    // Replace if and only if added value is not null
+    OLAP_FIELD_AGGREGATION_REPLACE_IF_NOT_NULL = 8,
 };
 
 // 压缩算法类型
@@ -229,6 +232,7 @@ struct OlapReaderStatistics {
     int64_t decompress_ns = 0;
     int64_t uncompressed_bytes_read = 0;
 
+    // total read bytes in memory
     int64_t bytes_read = 0;
 
     int64_t block_load_ns = 0;
@@ -246,6 +250,9 @@ struct OlapReaderStatistics {
     int64_t rows_del_filtered = 0;
 
     int64_t index_load_ns = 0;
+
+    int64_t total_pages_num = 0;
+    int64_t cached_pages_num = 0;
 };
 
 typedef uint32_t ColumnId;

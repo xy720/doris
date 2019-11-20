@@ -34,7 +34,6 @@
 #include "util/mem_util.hpp"
 #include "util/slice.h"
 #include "util/types.h"
-#include "util/arena.h"
 
 namespace doris {
 
@@ -54,10 +53,6 @@ public:
 
     inline void deep_copy(void* dest, const void* src, MemPool* mem_pool) const {
         _deep_copy(dest, src, mem_pool);
-    }
-
-    inline void deep_copy_with_arena(void* dest, const void* src, Arena* arena) const {
-        _deep_copy_with_arena(dest, src, arena);
     }
 
     inline void direct_copy(void* dest, const void* src) const {
@@ -83,7 +78,6 @@ private:
 
     void (*_shallow_copy)(void* dest, const void* src);
     void (*_deep_copy)(void* dest, const void* src, MemPool* mem_pool);
-    void (*_deep_copy_with_arena)(void* dest, const void* src, Arena* arena);
     void (*_direct_copy)(void* dest, const void* src);
 
     OLAPStatus (*_from_string)(void* buf, const std::string& scan_key);
@@ -162,6 +156,9 @@ template<> struct CppTypeTraits<OLAP_FIELD_TYPE_VARCHAR> {
 template<> struct CppTypeTraits<OLAP_FIELD_TYPE_HLL> {
     using CppType = Slice;
 };
+template<> struct CppTypeTraits<OLAP_FIELD_TYPE_OBJECT> {
+    using CppType = Slice;
+};
 
 template<FieldType field_type>
 struct BaseFieldtypeTraits : public CppTypeTraits<field_type> {
@@ -190,10 +187,6 @@ struct BaseFieldtypeTraits : public CppTypeTraits<field_type> {
     }
 
     static inline void deep_copy(void* dest, const void* src, MemPool* mem_pool) {
-        *reinterpret_cast<CppType*>(dest) = *reinterpret_cast<const CppType*>(src);
-    }
-
-    static inline void deep_copy_with_arena(void* dest, const void* src, Arena* arena) {
         *reinterpret_cast<CppType*>(dest) = *reinterpret_cast<const CppType*>(src);
     }
 
@@ -341,9 +334,6 @@ struct FieldTypeTraits<OLAP_FIELD_TYPE_LARGEINT> : public BaseFieldtypeTraits<OL
         *reinterpret_cast<PackedInt128*>(dest) = *reinterpret_cast<const PackedInt128*>(src);
     }
     static void deep_copy(void* dest, const void* src, MemPool* mem_pool) {
-        *reinterpret_cast<PackedInt128*>(dest) = *reinterpret_cast<const PackedInt128*>(src);
-    }
-    static void deep_copy_with_arena(void* dest, const void* src, Arena* arena) {
         *reinterpret_cast<PackedInt128*>(dest) = *reinterpret_cast<const PackedInt128*>(src);
     }
     static void direct_copy(void* dest, const void* src) {
@@ -541,13 +531,6 @@ struct FieldTypeTraits<OLAP_FIELD_TYPE_CHAR> : public BaseFieldtypeTraits<OLAP_F
         memory_copy(l_slice->data, r_slice->data, r_slice->size);
         l_slice->size = r_slice->size;
     }
-    static void deep_copy_with_arena(void* dest, const void* src, Arena* arena) {
-        auto l_slice = reinterpret_cast<Slice*>(dest);
-        auto r_slice = reinterpret_cast<const Slice*>(src);
-        l_slice->data = reinterpret_cast<char*>(arena->Allocate(r_slice->size));
-        memory_copy(l_slice->data, r_slice->data, r_slice->size);
-        l_slice->size = r_slice->size;
-    }
     static void direct_copy(void* dest, const void* src) {
         auto l_slice = reinterpret_cast<Slice*>(dest);
         auto r_slice = reinterpret_cast<const Slice*>(src);
@@ -594,6 +577,15 @@ template<>
 struct FieldTypeTraits<OLAP_FIELD_TYPE_HLL> : public FieldTypeTraits<OLAP_FIELD_TYPE_VARCHAR> {
     /*
      * Hyperloglog type only used as value, so
+     * cmp/from_string/set_to_max/set_to_min function
+     * in this struct has no significance
+     */
+};
+
+template<>
+struct FieldTypeTraits<OLAP_FIELD_TYPE_OBJECT> : public FieldTypeTraits<OLAP_FIELD_TYPE_VARCHAR> {
+    /*
+     * Object type only used as value, so
      * cmp/from_string/set_to_max/set_to_min function
      * in this struct has no significance
      */

@@ -20,6 +20,7 @@
 #include <set>
 #include <stdio.h>  // for remove()
 #include <unistd.h> // for link()
+#include <util/file_utils.h>
 #include "gutil/strings/substitute.h"
 #include "olap/rowset/beta_rowset_reader.h"
 #include "olap/utils.h"
@@ -32,48 +33,33 @@ std::string BetaRowset::segment_file_path(const std::string& dir, const RowsetId
 
 BetaRowset::BetaRowset(const TabletSchema* schema,
                        string rowset_path,
-                       DataDir* data_dir,
                        RowsetMetaSharedPtr rowset_meta)
-    : Rowset(schema, std::move(rowset_path), data_dir, std::move(rowset_meta)) {
+    : Rowset(schema, std::move(rowset_path), std::move(rowset_meta)) {
 }
 
 OLAPStatus BetaRowset::init() {
-    if (is_inited()) {
-        return OLAP_SUCCESS;
-    }
-    for (int seg_id = 0; seg_id < num_segments(); ++seg_id) {
-        std::string seg_path = segment_file_path(_rowset_path, rowset_id(), seg_id);
-        _segments.emplace_back(new segment_v2::Segment(seg_path, seg_id, _schema));
-    }
-    set_inited(true);
-    return OLAP_SUCCESS;
+    return OLAP_SUCCESS; // no op
 }
 
 // `use_cache` is ignored because beta rowset doesn't support fd cache now
-OLAPStatus BetaRowset::load(bool use_cache) {
-    DCHECK(is_inited()) << "should init() rowset " << unique_id() << " before load()";
-    if (is_loaded()) {
-        return OLAP_SUCCESS;
-    }
-    for (auto& seg : _segments) {
-        auto s = seg->open();
+OLAPStatus BetaRowset::do_load_once(bool use_cache) {
+    // open all segments under the current rowset
+    for (int seg_id = 0; seg_id < num_segments(); ++seg_id) {
+        std::string seg_path = segment_file_path(_rowset_path, rowset_id(), seg_id);
+        std::shared_ptr<segment_v2::Segment> segment;
+        auto s = segment_v2::Segment::open(seg_path, seg_id, _schema, &segment);
         if (!s.ok()) {
-            LOG(WARNING) << "failed to open segment " << seg->id() << " under rowset " << unique_id()
+            LOG(WARNING) << "failed to open segment " << seg_path << " under rowset " << unique_id()
                          << " : " << s.to_string();
             return OLAP_ERR_ROWSET_LOAD_FAILED;
         }
+        _segments.push_back(std::move(segment));
     }
-    set_loaded(true);
     return OLAP_SUCCESS;
 }
 
 OLAPStatus BetaRowset::create_reader(RowsetReaderSharedPtr* result) {
-    if (!is_loaded()) {
-        OLAPStatus status = load();
-        if (status != OLAP_SUCCESS) {
-            return OLAP_ERR_ROWSET_CREATE_READER;
-        }
-    }
+    RETURN_NOT_OK(load());
     result->reset(new BetaRowsetReader(std::static_pointer_cast<BetaRowset>(shared_from_this())));
     return OLAP_SUCCESS;
 }
@@ -111,7 +97,7 @@ OLAPStatus BetaRowset::remove() {
 OLAPStatus BetaRowset::link_files_to(const std::string& dir, RowsetId new_rowset_id) {
     for (int i = 0; i < num_segments(); ++i) {
         std::string dst_link_path = segment_file_path(dir, new_rowset_id, i);
-        if (check_dir_existed(dst_link_path)) {
+        if (FileUtils::check_exist(dst_link_path)) {
             LOG(WARNING) << "failed to create hard link, file already exist: " << dst_link_path;
             return OLAP_ERR_FILE_ALREADY_EXIST;
         }
@@ -128,7 +114,7 @@ OLAPStatus BetaRowset::link_files_to(const std::string& dir, RowsetId new_rowset
 OLAPStatus BetaRowset::copy_files_to(const std::string& dir) {
     for (int i = 0; i < num_segments(); ++i) {
         std::string dst_path = segment_file_path(dir, rowset_id(), i);
-        if (check_dir_existed(dst_path)) {
+        if (FileUtils::check_exist(dst_path)) {
             LOG(WARNING) << "file already exist: " << dst_path;
             return OLAP_ERR_FILE_ALREADY_EXIST;
         }

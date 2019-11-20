@@ -28,7 +28,8 @@
 #include "olap/rowset/segment_v2/options.h"
 #include "olap/rowset/segment_v2/common.h"
 #include "olap/column_block.h"
-#include "util/arena.h"
+#include "runtime/mem_pool.h"
+#include "runtime/mem_tracker.h"
 #include "gen_cpp/segment_v2.pb.h"
 #include "gutil/hash/string_hash.h"
 
@@ -57,7 +58,7 @@ public:
 
     Status add(const uint8_t* vals, size_t* count) override;
 
-    Slice finish() override;
+    OwnedSlice finish() override;
 
     void reset() override;
 
@@ -65,16 +66,7 @@ public:
 
     uint64_t size() const override;
 
-    Status get_dictionary_page(Slice* dictionary_page) override;
-
-    // this api will release the memory ownership of encoded data
-    // Note:
-    //     release() should be called after finish
-    //     reset() should be called after this function before reuse the builder
-    void release() override {
-        uint8_t* ret = _buffer.release();
-        (void)ret;
-    }
+    Status get_dictionary_page(OwnedSlice* dictionary_page) override;
 
 private:
     PageBuilderOptions _options;
@@ -94,7 +86,9 @@ private:
     std::unordered_map<Slice, uint32_t, HashOfSlice> _dictionary;
     // used to remember the insertion order of dict keys
     std::vector<Slice> _dict_items;
-    Arena _arena;
+    // TODO(zc): rethink about this mem pool
+    MemTracker _tracker;
+    MemPool _pool;
     faststring _buffer;
 };
 

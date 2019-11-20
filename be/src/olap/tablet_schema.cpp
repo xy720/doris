@@ -70,6 +70,8 @@ FieldType TabletColumn::get_field_type_by_string(const std::string& type_str) {
         type = OLAP_FIELD_TYPE_LIST;
     } else if (0 == upper_type_str.compare("MAP")) {
         type = OLAP_FIELD_TYPE_MAP;
+    } else if (0 == upper_type_str.compare("OBJECT")) {
+        type = OLAP_FIELD_TYPE_OBJECT;
     } else {
         LOG(WARNING) << "invalid type string. [type='" << type_str << "']";
         type = OLAP_FIELD_TYPE_UNKNOWN;
@@ -93,6 +95,8 @@ FieldAggregationMethod TabletColumn::get_aggregation_type_by_string(const std::s
         aggregation_type = OLAP_FIELD_AGGREGATION_MAX;
     } else if (0 == upper_str.compare("REPLACE")) {
         aggregation_type = OLAP_FIELD_AGGREGATION_REPLACE;
+    } else if (0 == upper_str.compare("REPLACE_IF_NOT_NULL")) {
+        aggregation_type = OLAP_FIELD_AGGREGATION_REPLACE_IF_NOT_NULL;
     } else if (0 == upper_str.compare("HLL_UNION")) {
         aggregation_type = OLAP_FIELD_AGGREGATION_HLL_UNION;
     } else if (0 == upper_str.compare("BITMAP_UNION")) {
@@ -160,6 +164,7 @@ std::string TabletColumn::get_string_by_field_type(FieldType type) {
 
         case OLAP_FIELD_TYPE_BOOL:
             return "BOOLEAN";
+
         case OLAP_FIELD_TYPE_HLL:
             return "HLL";
 
@@ -171,6 +176,9 @@ std::string TabletColumn::get_string_by_field_type(FieldType type) {
 
         case OLAP_FIELD_TYPE_MAP:
             return "MAP";
+
+        case OLAP_FIELD_TYPE_OBJECT:
+            return "OBJECT";
 
         default:
             return "UNKNOWN";
@@ -193,6 +201,9 @@ std::string TabletColumn::get_string_by_aggregation_type(FieldAggregationMethod 
 
         case OLAP_FIELD_AGGREGATION_REPLACE:
             return "REPLACE";
+
+        case OLAP_FIELD_AGGREGATION_REPLACE_IF_NOT_NULL:
+            return "REPLACE_IF_NOT_NULL";
 
         case OLAP_FIELD_AGGREGATION_HLL_UNION:
             return "HLL_UNION";
@@ -226,6 +237,8 @@ uint32_t TabletColumn::get_field_length_by_type(TPrimitiveType::type type, uint3
             return 4;
         case TPrimitiveType::DOUBLE:
             return 8;
+        case TPrimitiveType::OBJECT:
+            return 16;
         case TPrimitiveType::CHAR:
             return string_length;
         case TPrimitiveType::VARCHAR:

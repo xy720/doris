@@ -27,17 +27,23 @@
 namespace doris {
 
 BetaRowsetReader::BetaRowsetReader(BetaRowsetSharedPtr rowset)
-    : _rowset(std::move(rowset)) {
+    : _rowset(std::move(rowset)), _stats(&_owned_stats) {
 }
 
 OLAPStatus BetaRowsetReader::init(RowsetReaderContext* read_context) {
     _context = read_context;
-
+    if (_context->stats != nullptr) {
+        // schema change/compaction should use owned_stats
+        // When doing schema change/compaction,
+        // only statistics of this RowsetReader is necessary.
+        _stats = _context->stats;
+    }
     // SegmentIterator will load seek columns on demand
     Schema schema(_context->tablet_schema->columns(), *(_context->return_columns));
 
     // convert RowsetReaderContext to StorageReadOptions
     StorageReadOptions read_options;
+    read_options.stats = _stats;
     read_options.conditions = read_context->conditions;
     if (read_context->lower_bound_keys != nullptr) {
         for (int i = 0; i < read_context->lower_bound_keys->size(); ++i) {
@@ -107,37 +113,26 @@ OLAPStatus BetaRowsetReader::init(RowsetReaderContext* read_context) {
 OLAPStatus BetaRowsetReader::next_block(RowBlock** block) {
     // read next input block
     _input_block->clear();
-    auto s = _iterator->next_batch(_input_block.get());
-    if (!s.ok()) {
-        if (s.is_end_of_file()) {
-            *block = nullptr;
-            return OLAP_ERR_DATA_EOF;
-        }
-        LOG(WARNING) << "failed to read next block: " << s.to_string();
-        return OLAP_ERR_ROWSET_READ_FAILED;
-    }
-    // convert to output block
-    _output_block->clear();
-    size_t rows_read = 0;
-    uint16_t* selection_vector = _input_block->selection_vector();
-    for (size_t i = 0; i < _input_block->selected_size(); ++i) {
-        uint16_t row_idx = selection_vector[i];
-        // shallow copy row from input block to output block
-        _output_block->get_row(row_idx, _row.get());
-        // this copy function will copy return_columns' row to seek_columns's row_cursor
-        s = _input_block->copy_to_row_cursor(row_idx, _row.get());
+    {
+        SCOPED_RAW_TIMER(&_stats->block_fetch_ns);
+        auto s = _iterator->next_batch(_input_block.get());
         if (!s.ok()) {
-            LOG(WARNING) << "failed to copy row: " << s.to_string();
+            if (s.is_end_of_file()) {
+                *block = nullptr;
+                return OLAP_ERR_DATA_EOF;
+            }
+            LOG(WARNING) << "failed to read next block: " << s.to_string();
             return OLAP_ERR_ROWSET_READ_FAILED;
         }
-        ++rows_read;
     }
-    _output_block->set_pos(0);
-    _output_block->set_limit(rows_read);
-    _output_block->finalize(rows_read);
+
+    // convert to output block
+    _output_block->clear();
+    {
+        SCOPED_RAW_TIMER(&_stats->block_convert_ns);
+        _input_block->convert_to_row_block(_row.get(), _output_block.get());
+    }
     *block = _output_block.get();
-    // update raw_rows_read counter
-    _context->stats->raw_rows_read += _input_block->num_rows();
     return OLAP_SUCCESS;
 }
 

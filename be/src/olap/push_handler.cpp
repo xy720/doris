@@ -93,8 +93,8 @@ OLAPStatus PushHandler::_do_streaming_ingestion(
   PUniqueId load_id;
   load_id.set_hi(0);
   load_id.set_lo(0);
-  OLAPStatus res = StorageEngine::instance()->txn_manager()->prepare_txn(request.partition_id,
-      tablet, request.transaction_id, load_id);
+  RETURN_NOT_OK(StorageEngine::instance()->txn_manager()->prepare_txn(request.partition_id,
+      tablet, request.transaction_id, load_id));
 
   // prepare txn will be always successful
   // if current tablet is under schema change, origin tablet is successful and
@@ -140,8 +140,8 @@ OLAPStatus PushHandler::_do_streaming_ingestion(
         PUniqueId load_id;
         load_id.set_hi(0);
         load_id.set_lo(0);
-        res = StorageEngine::instance()->txn_manager()->prepare_txn(request.partition_id,
-            related_tablet, request.transaction_id, load_id);
+        RETURN_NOT_OK(StorageEngine::instance()->txn_manager()->prepare_txn(request.partition_id,
+            related_tablet, request.transaction_id, load_id));
         // prepare txn will always be successful
         tablet_vars->push_back(TabletVars());
         TabletVars& new_item = tablet_vars->back();
@@ -158,6 +158,7 @@ OLAPStatus PushHandler::_do_streaming_ingestion(
   // not call validate request here, because realtime load does not
   // contain version info
 
+  OLAPStatus res;
   // check delete condition if push for delete
   std::queue<DeletePredicatePB> del_preds;
   if (push_type == PUSH_FOR_DELETE) {
@@ -315,11 +316,10 @@ OLAPStatus PushHandler::_convert(TabletSharedPtr cur_tablet,
         context.tablet_id = cur_tablet->tablet_id();
         context.partition_id = _request.partition_id;
         context.tablet_schema_hash = cur_tablet->schema_hash();
-        context.rowset_type = DEFAULT_ROWSET_TYPE;
+        context.rowset_type = StorageEngine::instance()->default_rowset_type();
         context.rowset_path_prefix = cur_tablet->tablet_path();
         context.tablet_schema = &(cur_tablet->tablet_schema());
         context.rowset_state = PREPARED;
-        context.data_dir = cur_tablet->data_dir();
         context.txn_id = _request.transaction_id;
         context.load_id = load_id;
 

@@ -36,7 +36,8 @@
 #include "olap/rowset/rowset_id_generator.h"
 #include "olap/rowset/rowset_writer.h"
 
-using boost::filesystem::canonical;
+#include "env/env.h"
+
 using boost::filesystem::copy_file;
 using boost::filesystem::copy_option;
 using boost::filesystem::path;
@@ -101,13 +102,15 @@ OLAPStatus SnapshotManager::release_snapshot(const string& snapshot_path) {
     // 否则认为是非法请求，返回错误结果
     auto stores = StorageEngine::instance()->get_stores();
     for (auto store : stores) {
-        path boost_root_path(store->path());
-        string abs_path = canonical(boost_root_path).string();
+        std::string abs_path;
+        RETURN_WITH_WARN_IF_ERROR(FileUtils::canonicalize(store->path(), &abs_path),
+                                  OLAP_ERR_DIR_NOT_EXIST,
+                                  "canonical path " + store->path() + "failed");
 
         if (snapshot_path.compare(0, abs_path.size(), abs_path) == 0
                 && snapshot_path.compare(abs_path.size(),
                         SNAPSHOT_PREFIX.size(), SNAPSHOT_PREFIX) == 0) {
-            remove_all_dir(snapshot_path);
+            FileUtils::remove_all(snapshot_path);
             LOG(INFO) << "success to release snapshot path. [path='" << snapshot_path << "']";
 
             return OLAP_SUCCESS;
@@ -119,11 +122,11 @@ OLAPStatus SnapshotManager::release_snapshot(const string& snapshot_path) {
 }
 
 // TODO support beta rowset
-OLAPStatus SnapshotManager::convert_rowset_ids(DataDir& data_dir, const string& clone_dir, int64_t tablet_id, 
+OLAPStatus SnapshotManager::convert_rowset_ids(const string& clone_dir, int64_t tablet_id,
     const int32_t& schema_hash, TabletSharedPtr tablet) {
     OLAPStatus res = OLAP_SUCCESS;   
     // check clone dir existed
-    if (!check_dir_existed(clone_dir)) {
+    if (!FileUtils::check_exist(clone_dir)) {
         res = OLAP_ERR_DIR_NOT_EXIST;
         LOG(WARNING) << "clone dir not existed when convert rowsetids. clone_dir=" 
                      << clone_dir;
@@ -161,7 +164,7 @@ OLAPStatus SnapshotManager::convert_rowset_ids(DataDir& data_dir, const string& 
     for (auto& visible_rowset : cloned_tablet_meta_pb.rs_metas()) {
         RowsetMetaPB* rowset_meta = new_tablet_meta_pb.add_rs_metas();
         RowsetId rowset_id = StorageEngine::instance()->next_rowset_id();
-        RETURN_NOT_OK(_rename_rowset_id(visible_rowset, clone_dir, data_dir, tablet_schema, rowset_id, rowset_meta));
+        RETURN_NOT_OK(_rename_rowset_id(visible_rowset, clone_dir, tablet_schema, rowset_id, rowset_meta));
         rowset_meta->set_tablet_id(tablet_id);
         rowset_meta->set_tablet_schema_hash(schema_hash);
         Version rowset_version = {visible_rowset.start_version(), visible_rowset.end_version()};
@@ -178,7 +181,7 @@ OLAPStatus SnapshotManager::convert_rowset_ids(DataDir& data_dir, const string& 
         }
         RowsetMetaPB* rowset_meta = new_tablet_meta_pb.add_inc_rs_metas();
         RowsetId rowset_id = StorageEngine::instance()->next_rowset_id();
-        RETURN_NOT_OK(_rename_rowset_id(inc_rowset, clone_dir, data_dir, tablet_schema, rowset_id, rowset_meta));
+        RETURN_NOT_OK(_rename_rowset_id(inc_rowset, clone_dir, tablet_schema, rowset_id, rowset_meta));
         rowset_meta->set_tablet_id(tablet_id);
         rowset_meta->set_tablet_schema_hash(schema_hash);
     }
@@ -193,13 +196,13 @@ OLAPStatus SnapshotManager::convert_rowset_ids(DataDir& data_dir, const string& 
 }
 
 OLAPStatus SnapshotManager::_rename_rowset_id(const RowsetMetaPB& rs_meta_pb, const string& new_path, 
-    DataDir& data_dir, TabletSchema& tablet_schema, const RowsetId& rowset_id, RowsetMetaPB* new_rs_meta_pb) {
+        TabletSchema& tablet_schema, const RowsetId& rowset_id, RowsetMetaPB* new_rs_meta_pb) {
     OLAPStatus res = OLAP_SUCCESS;
     // TODO use factory to obtain RowsetMeta when SnapshotManager::convert_rowset_ids supports beta rowset
     RowsetMetaSharedPtr alpha_rowset_meta(new AlphaRowsetMeta());
     alpha_rowset_meta->init_from_pb(rs_meta_pb);
     RowsetSharedPtr org_rowset;
-    RETURN_NOT_OK(RowsetFactory::create_rowset(&tablet_schema, new_path, &data_dir, alpha_rowset_meta, &org_rowset));
+    RETURN_NOT_OK(RowsetFactory::create_rowset(&tablet_schema, new_path, alpha_rowset_meta, &org_rowset));
     // do not use cache to load index
     // because the index file may conflict
     // and the cached fd may be invalid
@@ -214,7 +217,6 @@ OLAPStatus SnapshotManager::_rename_rowset_id(const RowsetMetaPB& rs_meta_pb, co
     context.rowset_path_prefix = new_path;
     context.tablet_schema = &tablet_schema;
     context.rowset_state = org_rowset_meta->rowset_state();
-    context.data_dir = &data_dir;
     context.version = org_rowset_meta->version();
     context.version_hash = org_rowset_meta->version_hash();
 
@@ -330,13 +332,18 @@ OLAPStatus SnapshotManager::_create_snapshot_files(
     string schema_full_path = get_schema_hash_full_path(
             ref_tablet, snapshot_id_path);
     string header_path = _get_header_full_path(ref_tablet, schema_full_path);
-    if (check_dir_existed(schema_full_path)) {
+    if (FileUtils::check_exist(schema_full_path)) {
         VLOG(10) << "remove the old schema_full_path.";
-        remove_all_dir(schema_full_path);
+        FileUtils::remove_all(schema_full_path);
     }
-    create_dirs(schema_full_path);
-    path boost_path(snapshot_id_path);
-    string snapshot_id = canonical(boost_path).string();
+
+    RETURN_WITH_WARN_IF_ERROR(FileUtils::create_dir(schema_full_path), OLAP_ERR_CANNOT_CREATE_DIR,
+            "create path " + schema_full_path + "failed");
+
+    string snapshot_id;
+    RETURN_WITH_WARN_IF_ERROR(FileUtils::canonicalize(snapshot_id_path, &snapshot_id), OLAP_ERR_CANNOT_CREATE_DIR,
+                              "canonicalize path " + snapshot_id_path + " failed");
+    
     do {
         TabletMetaSharedPtr new_tablet_meta(new (nothrow) TabletMeta());
         if (new_tablet_meta == nullptr) {
@@ -447,9 +454,12 @@ OLAPStatus SnapshotManager::_create_snapshot_files(
         }
         if (snapshot_version < PREFERRED_SNAPSHOT_VERSION) {
             set<string> exist_old_files;
-            if ((res = dir_walk(schema_full_path, nullptr, &exist_old_files)) != OLAP_SUCCESS) {
+            Status ret = FileUtils::list_dirs_files(schema_full_path, nullptr, &exist_old_files,
+                                       Env::Default());
+            if (!ret.ok()) { 
+                res = OLAP_ERR_DISK_FAILURE;
                 LOG(WARNING) << "failed to dir walk when convert old files. dir=" 
-                             << schema_full_path;
+                             << schema_full_path << ", error:" << ret.to_string();
                 break;
             }
             OlapSnapshotConverter converter;
@@ -467,8 +477,10 @@ OLAPStatus SnapshotManager::_create_snapshot_files(
                 files_to_delete.push_back(full_file_path);
             }
             // remove all files
-            res = remove_files(files_to_delete);
-            if (res != OLAP_SUCCESS) {
+            ret = FileUtils::remove_paths(files_to_delete);
+            if (!ret.ok()) {
+                res = OLAP_ERR_IO_ERROR;
+                LOG(WARNING) << "remove paths failed. error: " << ret.to_string(); 
                 break;
             }
             // save new header to snapshot header path
@@ -509,9 +521,9 @@ OLAPStatus SnapshotManager::_create_snapshot_files(
         LOG(WARNING) << "fail to make snapshot, try to delete the snapshot path. path="
                      << snapshot_id_path.c_str();
 
-        if (check_dir_existed(snapshot_id_path)) {
+        if (FileUtils::check_exist(snapshot_id_path)) {
             VLOG(3) << "remove snapshot path. [path=" << snapshot_id_path << "]";
-            remove_all_dir(snapshot_id_path);
+            FileUtils::remove_all(snapshot_id_path);
         }
     } else {
         *snapshot_path = snapshot_id;

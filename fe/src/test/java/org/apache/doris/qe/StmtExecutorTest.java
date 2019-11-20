@@ -61,6 +61,7 @@ import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
 import java.util.List;
 import java.util.SortedMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import java_cup.runtime.Symbol;
 
@@ -104,6 +105,7 @@ public class StmtExecutorTest {
         EasyMock.expect(ctx.getConnectScheduler()).andReturn(scheduler).anyTimes();
         EasyMock.expect(ctx.getConnectionId()).andReturn(1).anyTimes();
         EasyMock.expect(ctx.getQualifiedUser()).andReturn("testUser").anyTimes();
+        EasyMock.expect(ctx.getForwardedStmtId()).andReturn(123L).anyTimes();
         ctx.setKilled();
         EasyMock.expectLastCall().anyTimes();
         ctx.updateReturnRows(EasyMock.anyInt());
@@ -171,7 +173,7 @@ public class StmtExecutorTest {
         Catalog catalog = Catalog.getInstance();
         Field field = catalog.getClass().getDeclaredField("canRead");
         field.setAccessible(true);
-        field.setBoolean(catalog, true);
+        field.set(catalog, new AtomicBoolean(true));
 
         PowerMock.mockStatic(Catalog.class);
         EasyMock.expect(Catalog.getInstance()).andReturn(catalog).anyTimes();

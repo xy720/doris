@@ -73,7 +73,8 @@ enum TPrimitiveType {
   VARCHAR,
   HLL,
   DECIMALV2,
-  TIME
+  TIME,
+  OBJECT
 }
 
 enum TTypeNodeType {
@@ -130,7 +131,8 @@ enum TAggregationType {
     REPLACE,
     HLL_UNION,
     NONE,
-    BITMAP_UNION
+    BITMAP_UNION,
+    REPLACE_IF_NOT_NULL
 }
 
 enum TPushType {
@@ -145,8 +147,8 @@ enum TTaskType {
     PUSH,
     CLONE,
     STORAGE_MEDIUM_MIGRATE,
-    ROLLUP,
-    SCHEMA_CHANGE,
+    ROLLUP, // Deprecated
+    SCHEMA_CHANGE,  // Deprecated
     CANCEL_DELETE,  // Deprecated
     MAKE_SNAPSHOT,
     RELEASE_SNAPSHOT,
@@ -154,7 +156,7 @@ enum TTaskType {
     UPLOAD,
     DOWNLOAD,
     CLEAR_REMOTE_FILE,
-    MOVE
+    MOVE,
     REALTIME_PUSH,
     PUBLISH_VERSION,
     CLEAR_ALTER_TASK,

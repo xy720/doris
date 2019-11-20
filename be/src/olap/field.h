@@ -52,12 +52,16 @@ public:
     virtual ~Field() = default;
 
     inline size_t size() const { return _type_info->size(); }
+    inline int32_t length() const { return _length; }
     inline size_t field_size() const { return size() + 1; }
     inline size_t index_size() const { return _index_size; }
 
     virtual inline void set_to_max(char* buf) const { return _type_info->set_to_max(buf); }
     inline void set_to_min(char* buf) const { return _type_info->set_to_min(buf); }
-    virtual inline char* allocate_value_from_arena(Arena* arena) const { return arena->Allocate(_type_info->size()); }
+
+    // This function allocate memory from pool, other than allocate_memory
+    // reserve memory from continuous memory.
+    virtual inline char* allocate_value(MemPool* pool) const { return (char*)pool->allocate(_type_info->size()); }
 
     inline void agg_update(RowCursorCell* dest, const RowCursorCell& src, MemPool* mem_pool = nullptr) const {
         _agg_info->update(dest, src, mem_pool);
@@ -172,18 +176,6 @@ public:
         _type_info->deep_copy(dst->mutable_cell_ptr(), src.cell_ptr(), pool);
     }
 
-    template<typename DstCellType, typename SrcCellType>
-    void deep_copy(DstCellType* dst,
-                   const SrcCellType& src,
-                   Arena* arena) const {
-        bool is_null = src.is_null();
-        dst->set_is_null(is_null);
-        if (is_null) {
-            return;
-        }
-        _type_info->deep_copy_with_arena(dst->mutable_cell_ptr(), src.cell_ptr(), arena);
-    }
-
     // deep copy filed content from `src` to `dst` without null-byte
     inline void deep_copy_content(char* dst, const char* src, MemPool* mem_pool) const {
         _type_info->deep_copy(dst, src, mem_pool);
@@ -193,11 +185,6 @@ public:
     // for string like type, shallow copy only copies Slice, not the actual data pointed by slice.
     inline void shallow_copy_content(char* dst, const char* src) const {
         _type_info->shallow_copy(dst, src);
-    }
-
-    // copy filed content from src to dest without nullbyte
-    inline void deep_copy_content(char* dest, const char* src, Arena* arena) const {
-        _type_info->deep_copy_with_arena(dest, src, arena);
     }
 
     // Copy srouce content to destination in index format.
@@ -240,8 +227,8 @@ public:
         _key_coder->encode_ascending(value, _index_size, buf);
     }
     
-    Status decode_ascending(Slice* encoded_key, uint8_t* cell_ptr, Arena* arena) const {
-        return _key_coder->decode_ascending(encoded_key, _index_size, cell_ptr, arena);
+    Status decode_ascending(Slice* encoded_key, uint8_t* cell_ptr, MemPool* pool) const {
+        return _key_coder->decode_ascending(encoded_key, _index_size, cell_ptr, pool);
     }
 private:
     // Field的最大长度，单位为字节，通常等于length， 变长字符串不同
@@ -256,11 +243,11 @@ protected:
     // 除字符串外，其它类型都是确定的
     uint32_t _length;
 
-    char* allocate_string_value_from_arena(Arena* arena) const {
-        char* type_value = arena->Allocate(sizeof(Slice));
+    char* allocate_string_value(MemPool* pool) const {
+        char* type_value = (char*)pool->allocate(sizeof(Slice));
         auto slice = reinterpret_cast<Slice*>(type_value);
         slice->size = _length;
-        slice->data = arena->Allocate(slice->size);
+        slice->data = (char*)pool->allocate(slice->size);
         return type_value;
     };
 };
@@ -383,8 +370,8 @@ public:
         return new CharField(*this);
     }
 
-    char* allocate_value_from_arena(Arena* arena) const override {
-        return Field::allocate_string_value_from_arena(arena);
+    char* allocate_value(MemPool* pool) const override {
+        return Field::allocate_string_value(pool);
     }
 
     void set_to_max(char* ch) const override {
@@ -416,8 +403,8 @@ public:
         return new VarcharField(*this);
     }
 
-    char* allocate_value_from_arena(Arena* arena) const override {
-        return Field::allocate_string_value_from_arena(arena);
+    char* allocate_value(MemPool* pool) const override {
+        return Field::allocate_string_value(pool);
     }
 
     void set_to_max(char* ch) const override {
@@ -491,6 +478,7 @@ public:
             case OLAP_FIELD_AGGREGATION_MIN:
             case OLAP_FIELD_AGGREGATION_MAX:
             case OLAP_FIELD_AGGREGATION_REPLACE:
+            case OLAP_FIELD_AGGREGATION_REPLACE_IF_NOT_NULL:
                 switch (column.type()) {
                     case OLAP_FIELD_TYPE_CHAR:
                         return new CharField(column);

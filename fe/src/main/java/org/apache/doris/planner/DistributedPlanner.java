@@ -18,6 +18,7 @@
 package org.apache.doris.planner;
 
 import org.apache.doris.analysis.AggregateInfo;
+import org.apache.doris.analysis.BinaryPredicate;
 import org.apache.doris.analysis.Expr;
 import org.apache.doris.analysis.InsertStmt;
 import org.apache.doris.analysis.JoinOperator;
@@ -33,7 +34,6 @@ import org.apache.doris.catalog.OlapTable;
 import org.apache.doris.catalog.Table;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.Config;
-import org.apache.doris.common.Pair;
 import org.apache.doris.common.UserException;
 import org.apache.doris.qe.ConnectContext;
 import org.apache.doris.thrift.TPartitionType;
@@ -297,10 +297,12 @@ public class DistributedPlanner {
             rhsDataSize = Math.round((double) rhsTree.getCardinality() * rhsTree.getAvgRowSize());
             broadcastCost = rhsDataSize * leftChildFragment.getNumNodes();
         }
-        LOG.info("broadcast: cost=" + Long.toString(broadcastCost));
-        LOG.info("card=" + Long.toString(rhsTree.getCardinality())
-                + " row_size=" + Float.toString(rhsTree.getAvgRowSize())
-                + " #nodes=" + Integer.toString(leftChildFragment.getNumNodes()));
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("broadcast: cost=" + Long.toString(broadcastCost));
+            LOG.debug("card=" + Long.toString(rhsTree.getCardinality()) + " row_size="
+                    + Float.toString(rhsTree.getAvgRowSize()) + " #nodes="
+                    + Integer.toString(leftChildFragment.getNumNodes()));
+        }
 
         // repartition: both left- and rightChildFragment are partitioned on the
         // join exprs
@@ -313,14 +315,14 @@ public class DistributedPlanner {
                     (double) lhsTree.getCardinality() * lhsTree.getAvgRowSize() + (double) rhsTree
                             .getCardinality() * rhsTree.getAvgRowSize());
         }
-        LOG.info("partition: cost=" + Long.toString(partitionCost));
-        LOG.info(
-                "lhs card=" + Long.toString(lhsTree.getCardinality()) + " row_size=" + Float.toString(
-                        lhsTree.getAvgRowSize()));
-        LOG.info(
-                "rhs card=" + Long.toString(rhsTree.getCardinality()) + " row_size=" + Float.toString(
-                        rhsTree.getAvgRowSize()));
-        LOG.info(rhsTree.getExplainString());
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("partition: cost=" + Long.toString(partitionCost));
+            LOG.debug("lhs card=" + Long.toString(lhsTree.getCardinality()) + " row_size="
+                    + Float.toString(lhsTree.getAvgRowSize()));
+            LOG.debug("rhs card=" + Long.toString(rhsTree.getCardinality()) + " row_size="
+                    + Float.toString(rhsTree.getAvgRowSize()));
+            LOG.debug(rhsTree.getExplainString());
+        }
 
         boolean doBroadcast;
         // we do a broadcast join if
@@ -382,13 +384,13 @@ public class DistributedPlanner {
             // TODO: create equivalence classes based on equality predicates
 
             // first, extract join exprs
-            List<Pair<Expr, Expr>> eqJoinConjuncts = node.getEqJoinConjuncts();
+            List<BinaryPredicate> eqJoinConjuncts = node.getEqJoinConjuncts();
             List<Expr> lhsJoinExprs = Lists.newArrayList();
             List<Expr> rhsJoinExprs = Lists.newArrayList();
-            for (Pair<Expr, Expr> pair : eqJoinConjuncts) {
+            for (BinaryPredicate eqJoinPredicate : eqJoinConjuncts) {
                 // no remapping necessary
-                lhsJoinExprs.add(pair.first.clone(null));
-                rhsJoinExprs.add(pair.second.clone(null));
+                lhsJoinExprs.add(eqJoinPredicate.getChild(0).clone(null));
+                rhsJoinExprs.add(eqJoinPredicate.getChild(1).clone(null));
             }
 
             // create the parent fragment containing the HashJoin node
@@ -487,14 +489,16 @@ public class DistributedPlanner {
             List<Column> leftColumns = ((HashDistributionInfo) leftDistribution).getDistributionColumns();
             List<Column> rightColumns = ((HashDistributionInfo) rightDistribution).getDistributionColumns();
 
-            List<Pair<Expr, Expr>> eqJoinConjuncts = node.getEqJoinConjuncts();
-            for (Pair<Expr, Expr> eqJoinPredicate : eqJoinConjuncts) {
-                if (eqJoinPredicate.first.unwrapSlotRef() == null || eqJoinPredicate.second.unwrapSlotRef() == null) {
+            List<BinaryPredicate> eqJoinConjuncts = node.getEqJoinConjuncts();
+            for (BinaryPredicate eqJoinPredicate : eqJoinConjuncts) {
+                Expr lhsJoinExpr = eqJoinPredicate.getChild(0);
+                Expr rhsJoinExpr = eqJoinPredicate.getChild(1);
+                if (lhsJoinExpr.unwrapSlotRef() == null || rhsJoinExpr.unwrapSlotRef() == null) {
                     continue;
                 }
 
-                SlotDescriptor leftSlot = eqJoinPredicate.first.unwrapSlotRef().getDesc();
-                SlotDescriptor rightSlot = eqJoinPredicate.second.unwrapSlotRef().getDesc();
+                SlotDescriptor leftSlot = lhsJoinExpr.unwrapSlotRef().getDesc();
+                SlotDescriptor rightSlot = rhsJoinExpr.unwrapSlotRef().getDesc();
 
                 //3 the eqJoinConjuncts must contain the distributionColumns
                 if (leftColumns.contains(leftSlot.getColumn()) && rightColumns.contains(rightSlot.getColumn())) {
