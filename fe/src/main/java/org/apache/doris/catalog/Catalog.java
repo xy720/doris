@@ -4785,7 +4785,6 @@ public class Catalog {
             throw new DdlException("Table name[" + newTableName + "] is already used");
         }
 
-<<<<<<< HEAD
         // check if rollup has same name
         if (table.getType() == TableType.OLAP) {
             OlapTable olapTable = (OlapTable) table;
@@ -4795,9 +4794,6 @@ public class Catalog {
                 }
             }
         }
-=======
-        table.setName(newTableName);
->>>>>>> fdbda05f... commit 3: [alter view as] statement
 
         table.setName(newTableName);
 
@@ -4829,8 +4825,6 @@ public class Catalog {
         }
     }
 
-<<<<<<< HEAD
-=======
     public void modifyViewDef(Database db, View view, String inlineViewDef) throws DdlException {
         String viewName = view.getName();
 
@@ -4875,7 +4869,6 @@ public class Catalog {
         }
     }
 
->>>>>>> fdbda05f... commit 3: [alter view as] statement
     // the invoker should keep db write lock
     public void modifyTableColocate(Database db, OlapTable table, String colocateGroup, boolean isReplay,
             GroupId assignedGroupId)
