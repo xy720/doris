@@ -266,6 +266,34 @@ public class Alter {
         }
     }
 
+    public void processAlterView(AlterViewStmt stmt) throws UserException {
+        TableName dbTableName = stmt.getTbl();
+        String dbName = dbTableName.getDb();
+
+        Database db = Catalog.getInstance().getDb(dbName);
+        if (db == null) {
+            ErrorReport.reportDdlException(ErrorCode.ERR_BAD_DB_ERROR, dbName);
+        }
+
+        String tableName = dbTableName.getTbl();
+        db.writeLock();
+        try {
+            Table table = db.getTable(tableName);
+            if (table == null) {
+                ErrorReport.reportDdlException(ErrorCode.ERR_BAD_TABLE_ERROR, tableName);
+            }
+
+            if (table.getType() != TableType.VIEW) {
+                throw new DdlException("The specified table [" + tableName + "] is not a view");
+            }
+
+            View view = (View) table;
+            Catalog.getInstance().modifyViewDef(db, view, stmt.getInlineViewDef());
+        } finally {
+            db.writeUnlock();
+        }
+    }
+
     public void processAlterCluster(AlterSystemStmt stmt) throws UserException {
         clusterHandler.process(Arrays.asList(stmt.getAlterClause()), stmt.getClusterName(), null, null);
     }

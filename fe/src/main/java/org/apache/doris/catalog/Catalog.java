@@ -4785,6 +4785,7 @@ public class Catalog {
             throw new DdlException("Table name[" + newTableName + "] is already used");
         }
 
+<<<<<<< HEAD
         // check if rollup has same name
         if (table.getType() == TableType.OLAP) {
             OlapTable olapTable = (OlapTable) table;
@@ -4794,6 +4795,9 @@ public class Catalog {
                 }
             }
         }
+=======
+        table.setName(newTableName);
+>>>>>>> fdbda05f... commit 3: [alter view as] statement
 
         table.setName(newTableName);
 
@@ -4825,6 +4829,41 @@ public class Catalog {
         }
     }
 
+<<<<<<< HEAD
+=======
+    public void modifyViewDef(Database db, View view, String inlineViewDef) throws DdlException {
+        String viewName = view.getName();
+
+        db.dropTable(viewName);
+        view.setInlineViewDef(inlineViewDef);
+        db.createTable(view);
+
+        TableInfo tableInfo = TableInfo.createForModifyViewDef(db.getId(), view.getId(), inlineViewDef);
+        editLog.logModifyViewDef(tableInfo);
+        LOG.info("modify view[{}] definition to {}", viewName, inlineViewDef);
+    }
+
+    public void replayModifyViewDef(TableInfo tableInfo) throws DdlException {
+        long dbId = tableInfo.getDbId();
+        long tableId = tableInfo.getTableId();
+        String inlineViewDef = tableInfo.getInlineViewDef();
+
+        Database db = getDb(dbId);
+        db.writeLock();
+        try {
+            View view = (View) db.getTable(tableId);
+            String viewName = view.getName();
+            db.dropTable(viewName);
+            view.setInlineViewDef(inlineViewDef);
+            db.createTable(view);
+
+            LOG.info("replay modify view[{}] definition to {}", viewName, inlineViewDef);
+        } finally {
+            db.writeUnlock();
+        }
+    }
+
+>>>>>>> fdbda05f... commit 3: [alter view as] statement
     // the invoker should keep db write lock
     public void modifyTableColocate(Database db, OlapTable table, String colocateGroup, boolean isReplay,
             GroupId assignedGroupId)
