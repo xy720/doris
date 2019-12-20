@@ -4836,6 +4836,12 @@ public class Catalog {
 
         db.dropTable(viewName);
         view.setInlineViewDef(inlineViewDef);
+        try {
+            view.init();
+        } catch (UserException e) {
+            throw new DdlException("failed to init view stmt", e);
+        }
+
         db.createTable(view);
 
         TableInfo tableInfo = TableInfo.createForModifyViewDef(db.getId(), view.getId(), inlineViewDef);
@@ -4855,6 +4861,12 @@ public class Catalog {
             String viewName = view.getName();
             db.dropTable(viewName);
             view.setInlineViewDef(inlineViewDef);
+            try {
+                view.init();
+            } catch (UserException e) {
+                throw new DdlException("failed to init view stmt", e);
+            }
+
             db.createTable(view);
 
             LOG.info("replay modify view[{}] definition to {}", viewName, inlineViewDef);
