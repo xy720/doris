@@ -529,12 +529,15 @@ under the License.
             <version>2.3.0</version>
         </dependency>
 
+<<<<<<< HEAD
         <dependency>
             <groupId>org.roaringbitmap</groupId>
             <artifactId>RoaringBitmap</artifactId>
             <version>0.8.13</version>
         </dependency>
 
+=======
+>>>>>>> Create spark load job in FE and submit spark etl job
         <!-- spark -->
         <!-- https://mvnrepository.com/artifact/org.apache.spark/spark-launcher_2.12 -->
         <dependency>

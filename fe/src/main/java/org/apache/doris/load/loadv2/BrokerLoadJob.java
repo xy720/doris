@@ -327,48 +327,7 @@ public class BrokerLoadJob extends BulkLoadJob {
     public void write(DataOutput out) throws IOException {
         super.write(out);
         brokerDesc.write(out);
-<<<<<<< HEAD
-        originStmt.write(out);
-
-        out.writeInt(sessionVariables.size());
-        for (Map.Entry<String, String> entry : sessionVariables.entrySet()) {
-            Text.writeString(out, entry.getKey());
-            Text.writeString(out, entry.getValue());
-        }
-    }
-
-    public void readFields(DataInput in) throws IOException {
-        super.readFields(in);
-        brokerDesc = BrokerDesc.read(in);
-        if (Catalog.getCurrentCatalogJournalVersion() < FeMetaVersion.VERSION_61) {
-            fileGroupAggInfo.readFields(in);
-        }
-
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_58) {
-            if (Catalog.getCurrentCatalogJournalVersion() < FeMetaVersion.VERSION_76) {
-                String stmt = Text.readString(in);
-                originStmt = new OriginStatement(stmt, 0);
-            } else {
-                originStmt = OriginStatement.read(in);
-            }
-        } else {
-            originStmt = new OriginStatement("", 0);
-        }
-        // The origin stmt does not be analyzed in here.
-        // The reason is that it will thrown MetaNotFoundException when the tableId could not be found by tableName.
-        // The origin stmt will be analyzed after the replay is completed.
-
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_66) {
-            int size = in.readInt();
-            for (int i = 0; i < size; i++) {
-                String key = Text.readString(in);
-                String value = Text.readString(in);
-                sessionVariables.put(key, value);
-            }
-        } else {
-            // old version of load does not have sqlmode, set it to default
-            sessionVariables.put(SessionVariable.SQL_MODE, String.valueOf(SqlModeHelper.MODE_DEFAULT));
-    }
+   }
 
     public void readFields(DataInput in) throws IOException {
         super.readFields(in, brokerDesc);
