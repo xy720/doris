@@ -325,7 +325,6 @@ public class BrokerLoadJob extends BulkLoadJob {
     @Override
     public void write(DataOutput out) throws IOException {
         super.write(out);
-        brokerDesc.write(out);
     }
 
     public void readFields(DataInput in) throws IOException {
