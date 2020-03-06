@@ -441,7 +441,7 @@ public abstract class LoadJob extends AbstractTxnStateChangeCallback implements 
                 executeUnknown();
                 break;
             case ETL:
-                //executeETL();
+                executeEtl();
                 break;
             case LOADING:
                 executeLoad();
@@ -462,6 +462,11 @@ public abstract class LoadJob extends AbstractTxnStateChangeCallback implements 
         // can be remove due to label expiration so soon as possible
         finishTimestamp = createTimestamp;
         state = JobState.UNKNOWN;
+    }
+
+    private void executeEtl() {
+        // etlStartTime?
+        state = JobState.ETL;
     }
 
     private void executeLoad() {
