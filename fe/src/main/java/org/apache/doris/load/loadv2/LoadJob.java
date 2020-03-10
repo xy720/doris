@@ -389,9 +389,8 @@ public abstract class LoadJob extends AbstractTxnStateChangeCallback implements 
         beginTxn();
         unprotectedExecuteJob();
 
-        if (jobType == EtlJobType.SPARK) {
-            unprotectedUpdateState(JobState.ETL);
-        } else {
+        // update spark load job state from PENDING to ETL when pending task is finished
+        if (jobType != EtlJobType.SPARK) {
             unprotectedUpdateState(JobState.LOADING);
         }
     }
@@ -440,9 +439,6 @@ public abstract class LoadJob extends AbstractTxnStateChangeCallback implements 
             case UNKNOWN:
                 executeUnknown();
                 break;
-            case ETL:
-                executeEtl();
-                break;
             case LOADING:
                 executeLoad();
                 break;
@@ -462,11 +458,6 @@ public abstract class LoadJob extends AbstractTxnStateChangeCallback implements 
         // can be remove due to label expiration so soon as possible
         finishTimestamp = createTimestamp;
         state = JobState.UNKNOWN;
-    }
-
-    private void executeEtl() {
-        // etlStartTime?
-        state = JobState.ETL;
     }
 
     private void executeLoad() {
