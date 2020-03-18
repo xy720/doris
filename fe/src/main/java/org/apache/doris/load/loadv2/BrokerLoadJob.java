@@ -61,7 +61,7 @@ public class BrokerLoadJob extends BulkLoadJob {
     private static final Logger LOG = LogManager.getLogger(BrokerLoadJob.class);
 
     // input params
-    private BrokerDesc brokerDesc;
+    // private BrokerDesc brokerDesc;
 
     // only for log replay
     public BrokerLoadJob() {
@@ -327,13 +327,10 @@ public class BrokerLoadJob extends BulkLoadJob {
     public void write(DataOutput out) throws IOException {
         super.write(out);
         brokerDesc.write(out);
-   }
+    }
 
     public void readFields(DataInput in) throws IOException {
-        super.readFields(in, brokerDesc);
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_75) {
-            brokerDesc = BrokerDesc.read(in);
-        }
+        super.readFields(in);
     }
 
 }
