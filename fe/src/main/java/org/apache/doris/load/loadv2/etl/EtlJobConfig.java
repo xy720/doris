@@ -153,14 +153,6 @@ public class EtlJobConfig implements Serializable {
                 '}';
     }
 
-    public String getOutputPath() {
-        return outputPath;
-    }
-
-    public void setOutputPath(String outputPath) {
-        this.outputPath = outputPath;
-    }
-
     public static String getOutputPath(String hdfsDefaultName, String outputPath, long dbId,
                                        String loadLabel, long taskSignature) {
         return String.format(ETL_OUTPUT_PATH_FORMAT, hdfsDefaultName, outputPath, dbId, loadLabel, taskSignature);
