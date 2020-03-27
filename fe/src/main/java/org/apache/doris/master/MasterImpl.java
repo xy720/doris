@@ -348,7 +348,7 @@ public class MasterImpl {
                                                                        task.getDbId());
             // handle load job
             // TODO yiguolei: why delete should check request version and task version?
-            if (pushTask.getPushType() == TPushType.LOAD || pushTask.getPushType() == TPushType.LOAD_DELETE) {
+           	if (pushTask.getPushType() == TPushType.LOAD || pushTask.getPushType() == TPushType.LOAD_DELETE) {
                 long loadJobId = pushTask.getLoadJobId();
                 LoadJob job = Catalog.getInstance().getLoadInstance().getLoadJob(loadJobId);
                 if (job == null) {
@@ -377,6 +377,22 @@ public class MasterImpl {
                         pushTask.countDownLatch(backendId, pushTabletId);
                     }
                 }
+            } else if (pushTask.getPushType() == TPushType.LOAD_V2) {
+                long loadJobId = pushTask.getLoadJobId();
+                org.apache.doris.load.loadv2.LoadJob job = Catalog.getCurrentCatalog().getLoadManager().getLoadJob(loadJobId);
+                if (job == null) {
+                    throw new MetaNotFoundException("cannot find load job, job[" + loadJobId + "]");
+                }
+                for (TTabletInfo tTabletInfo : finishTabletInfos) {
+                    checkReplica(olapTable, partition, backendId, pushIndexId, pushTabletId,
+                                 tTabletInfo, pushState);
+                    Replica replica = findRelatedReplica(olapTable, partition,
+                                                         backendId, tTabletInfo);
+                    // if the replica is under schema change, could not find the replica with aim schema hash
+                    if (replica != null) {
+                        ((SparkLoadJob) job).addFinishedReplica(replica.getId(), pushTabletId, backendId);
+                    }
+                }  
             }
             
             AgentTaskQueue.removeTask(backendId, TTaskType.REALTIME_PUSH, signature);
