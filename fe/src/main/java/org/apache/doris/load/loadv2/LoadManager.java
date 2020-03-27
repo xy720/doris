@@ -509,6 +509,10 @@ public class LoadManager implements Writable{
         }
     }
 
+    public LoadJob getLoadJob(long jobId) {
+        return idToLoadJob.get(jobId);
+    }
+
     public void prepareJobs() {
         analyzeLoadJobs();
         submitJobs();
