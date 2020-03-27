@@ -19,6 +19,8 @@ package org.apache.doris.load.loadv2.etl;
 
 import com.google.common.collect.Lists;
 
+import java.io.Serializable;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 
@@ -111,7 +113,7 @@ import java.util.Map;
  * 	"label": "label0"
  * }
  */
-public class EtlJobConfig {
+public class EtlJobConfig implements Serializable {
     // global dict
     public static final String GLOBAL_DICT_TABLE_NAME = "doris_global_dict_table_%d";
     public static final String DISTINCT_KEY_TABLE_NAME = "doris_distinct_key_table_%d_%s";
@@ -125,10 +127,10 @@ public class EtlJobConfig {
     // config
     public static final String JOB_CONFIG_FILE_NAME = "jobconfig.json";
 
-    Map<Long, EtlTable> tables;
-    String outputPath;
-    String outputFilePattern;
-    String label;
+    public Map<Long, EtlTable> tables;
+    public String outputPath;
+    public String outputFilePattern;
+    public String label;
     // private EtlErrorHubInfo hubInfo;
 
     public EtlJobConfig(Map<Long, EtlTable> tables, String outputFilePattern, String label) {
@@ -175,10 +177,10 @@ public class EtlJobConfig {
         return fileName.substring(fileName.indexOf(".") + 1);
     }
 
-    public static class EtlTable {
-        List<EtlIndex> indexes;
-        EtlPartitionInfo partitionInfo;
-        List<EtlFileGroup> fileGroups;
+    public static class EtlTable implements Serializable {
+        public List<EtlIndex> indexes;
+        public EtlPartitionInfo partitionInfo;
+        public List<EtlFileGroup> fileGroups;
 
         public EtlTable(List<EtlIndex> etlIndexes, EtlPartitionInfo etlPartitionInfo) {
             this.indexes = etlIndexes;
@@ -200,16 +202,16 @@ public class EtlJobConfig {
         }
     }
 
-    public static class EtlColumn {
-        String columnName;
-        String columnType;
-        boolean isAllowNull;
-        boolean isKey;
-        String aggregationType;
-        String defaultValue;
-        int stringLength;
-        int precision;
-        int scale;
+    public static class EtlColumn implements Serializable {
+        public String columnName;
+        public String columnType;
+        public boolean isAllowNull;
+        public boolean isKey;
+        public String aggregationType;
+        public String defaultValue;
+        public int stringLength;
+        public int precision;
+        public int scale;
 
         public EtlColumn(String columnName, String columnType, boolean isAllowNull, boolean isKey,
                          String aggregationType, String defaultValue, int stringLength, int precision, int scale) {
@@ -240,12 +242,26 @@ public class EtlJobConfig {
         }
     }
 
-    public static class EtlIndex {
-        long indexId;
-        List<EtlColumn> columns;
-        int schemaHash;
-        String indexType;
-        boolean isBaseIndex;
+    public static class EtlIndexComparator implements Comparator<EtlIndex> {
+        @Override
+        public int compare(EtlIndex a, EtlIndex b) {
+            int diff = a.columns.size() - b.columns.size();
+            if (diff == 0) {
+                return 0;
+            } else if (diff > 0) {
+                return 1;
+            } else {
+                return -1;
+            }
+        }
+    }
+
+    public static class EtlIndex implements Serializable {
+        public long indexId;
+        public List<EtlColumn> columns;
+        public int schemaHash;
+        public String indexType;
+        public boolean isBaseIndex;
 
         public EtlIndex(long indexId, List<EtlColumn> etlColumns, int schemaHash,
                         String indexType, boolean isBaseIndex) {
@@ -268,11 +284,11 @@ public class EtlJobConfig {
         }
     }
 
-    public static class EtlPartitionInfo {
-        String partitionType;
-        List<String> partitionColumnRefs;
-        List<String> distributionColumnRefs;
-        List<EtlPartition> partitions;
+    public static class EtlPartitionInfo implements Serializable {
+        public String partitionType;
+        public List<String> partitionColumnRefs;
+        public List<String> distributionColumnRefs;
+        public List<EtlPartition> partitions;
 
         public EtlPartitionInfo(String partitionType, List<String> partitionColumnRefs,
                                 List<String> distributionColumnRefs, List<EtlPartition> etlPartitions) {
@@ -293,12 +309,12 @@ public class EtlJobConfig {
         }
     }
 
-    public static class EtlPartition {
-        long partitionId;
-        List<Object> startKeys;
-        List<Object> endKeys;
-        boolean isMaxPartition;
-        int bucketNum;
+    public static class EtlPartition implements Serializable {
+        public long partitionId;
+        public List<Object> startKeys;
+        public List<Object> endKeys;
+        public boolean isMaxPartition;
+        public int bucketNum;
 
         public EtlPartition(long partitionId, List<Object> startKeys, List<Object> endKeys,
                             boolean isMaxPartition, int bucketNum) {
@@ -321,19 +337,18 @@ public class EtlJobConfig {
         }
     }
 
-    public static class EtlFileGroup {
-        List<String> filePaths;
-        List<String> fileFieldNames;
-        List<String> columnsFromPath;
-        String columnSeparator;
-        String lineDelimiter;
-        boolean isNegative;
-        String fileFormat;
-        Map<String, EtlColumnMapping> columnMappings;
-        String where;
-        List<Long> partitions;
-
-        String hiveTableName;
+    public static class EtlFileGroup implements Serializable {
+        public List<String> filePaths;
+        public List<String> fileFieldNames;
+        public List<String> columnsFromPath;
+        public String columnSeparator;
+        public String lineDelimiter;
+        public boolean isNegative;
+        public String fileFormat;
+        public Map<String, EtlColumnMapping> columnMappings;
+        public String where;
+        public List<Long> partitions;
+        public String hiveTableName;
 
         public EtlFileGroup(List<String> filePaths, List<String> fileFieldNames, List<String> columnsFromPath,
                             String columnSeparator, String lineDelimiter, boolean isNegative, String fileFormat,
@@ -372,7 +387,7 @@ public class EtlJobConfig {
         }
     }
 
-    public static class EtlColumnMapping {
+    public static class EtlColumnMapping implements Serializable {
         String functionName;
         List<String> args;
 
