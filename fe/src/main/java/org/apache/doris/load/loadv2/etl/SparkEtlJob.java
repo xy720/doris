@@ -17,7 +17,7 @@
 
 package org.apache.doris.load.loadv2.etl;
 
-import org.apache.doris.load.loadv2.dpp.SparkDpp;
+//import org.apache.doris.load.loadv2.dpp.SparkDpp;
 import org.apache.doris.load.loadv2.etl.EtlJobConfig.EtlColumn;
 import org.apache.doris.load.loadv2.etl.EtlJobConfig.EtlFileGroup;
 import org.apache.doris.load.loadv2.etl.EtlJobConfig.EtlIndex;
@@ -108,9 +108,9 @@ public class SparkEtlJob {
         }
     }
 
-    private void processDataFromPathes() {
-        SparkDpp sparkDpp = new SparkDpp(etlJobConfig);
-        sparkDpp.doDpp();
+    private void processDataFromPaths() {
+        //SparkDpp sparkDpp = new SparkDpp(etlJobConfig);
+        //sparkDpp.doDpp();
     }
 
     private void buildGlobalDictAndEncodeSourceTable(EtlTable table, long tableId, SparkSession spark) {
@@ -186,7 +186,7 @@ public class SparkEtlJob {
         if (hasBitMapColumns) {
             processDataFromHiveTable();
         } else {
-            processDataFromPathes();
+            processDataFromPaths();
         }
     }
 
