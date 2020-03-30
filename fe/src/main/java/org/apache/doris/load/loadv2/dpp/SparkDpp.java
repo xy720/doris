@@ -342,12 +342,11 @@ public final class SparkDpp implements java.io.Serializable {
                         int bucketId = Integer.parseInt(bucketKey[1]);
                         String path = String.format(pathPattern, tableId, partitionId, indexMeta.indexId,
                                 bucketId, indexMeta.schemaHash);
-                        path = path + ".parquet";
                         GroupWriteSupport.setSchema(index_schema, conf);
                         writer = new ParquetWriter<Group>(new Path(path), new GroupWriteSupport(),
                                 CompressionCodecName.SNAPPY, 1024, 1024, 512,
                                 true, false,
-                                ParquetProperties.WriterVersion.PARQUET_2_0, conf);
+                                ParquetProperties.WriterVersion.PARQUET_1_0, conf);
                         if(writer != null){
                             System.out.println("[HdfsOperate]>> initialize writer succeed! path:" + path);
                         }

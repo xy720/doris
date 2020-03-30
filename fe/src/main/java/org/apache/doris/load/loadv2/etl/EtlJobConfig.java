@@ -378,8 +378,8 @@ public class EtlJobConfig implements Serializable {
     }
 
     public static class EtlColumnMapping implements Serializable {
-        String functionName;
-        List<String> args;
+        public String functionName;
+        public List<String> args;
 
         public EtlColumnMapping(String functionName, List<String> args) {
             this.functionName = functionName;
