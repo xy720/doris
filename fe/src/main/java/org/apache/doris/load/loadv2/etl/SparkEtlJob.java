@@ -108,7 +108,7 @@ public class SparkEtlJob {
         }
     }
 
-    private void processDataFromPathes() {
+    private void processDataFromPaths() {
         SparkDpp sparkDpp = new SparkDpp(etlJobConfig);
         sparkDpp.doDpp();
     }
