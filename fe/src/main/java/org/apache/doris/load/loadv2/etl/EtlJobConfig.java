@@ -342,7 +342,6 @@ public class EtlJobConfig implements Serializable {
         public Map<String, EtlColumnMapping> columnMappings;
         public String where;
         public List<Long> partitions;
-
         public String hiveTableName;
 
         public EtlFileGroup(List<String> filePaths, List<String> fileFieldNames, List<String> columnsFromPath,
@@ -379,8 +378,8 @@ public class EtlJobConfig implements Serializable {
     }
 
     public static class EtlColumnMapping implements Serializable {
-        public String functionName;
-        public List<String> args;
+        String functionName;
+        List<String> args;
 
         public EtlColumnMapping(String functionName, List<String> args) {
             this.functionName = functionName;
