@@ -26,12 +26,14 @@ import org.apache.doris.analysis.TupleDescriptor;
 import org.apache.doris.catalog.Catalog;
 import org.apache.doris.catalog.Column;
 import org.apache.doris.catalog.Database;
+import org.apache.doris.catalog.EtlCluster;
 import org.apache.doris.catalog.FsBroker;
 import org.apache.doris.catalog.MaterializedIndex;
 import org.apache.doris.catalog.MaterializedIndex.IndexExtState;
 import org.apache.doris.catalog.OlapTable;
 import org.apache.doris.catalog.Partition;
 import org.apache.doris.catalog.Replica;
+import org.apache.doris.catalog.SparkEtlCluster;
 import org.apache.doris.catalog.Table;
 import org.apache.doris.catalog.Table.TableType;
 import org.apache.doris.catalog.Tablet;
@@ -117,6 +119,7 @@ public class SparkLoadJob extends BulkLoadJob {
     private Map<Long, ReplicaPersistInfo> replicaPersistInfos = Maps.newHashMap();
 
     // not persist
+    private SparkEtlCluster etlCluster;
     private Map<Long, Set<Long>> tableToLoadPartitions = Maps.newHashMap();
     private Map<Long, PushBrokerReaderParams> indexToPushBrokerReaderParams = Maps.newHashMap();
     private Map<Long, Integer> indexToSchemaHash = Maps.newHashMap();
@@ -224,10 +227,41 @@ public class SparkLoadJob extends BulkLoadJob {
         }
     }
 
+    private void prepareEtlInfos() throws LoadException {
+        // etl cluster
+        String clusterName = etlClusterDesc.getName();
+        EtlCluster oriEtlCluster = Catalog.getCurrentCatalog().getEtlClusterMgr().getEtlCluster(clusterName);
+        if (oriEtlCluster == null) {
+            throw new LoadException("Etl cluster does not exist. name: " + clusterName);
+        }
+
+        Preconditions.checkState(oriEtlCluster instanceof SparkEtlCluster);
+        etlCluster = ((SparkEtlCluster) oriEtlCluster).getCopiedEtlCluster();
+        try {
+            etlCluster.update(etlClusterDesc);
+        } catch (DdlException e) {
+            throw new LoadException(e.getMessage(), e);
+        }
+
+        // broker desc
+        Map<String, String> brokerProperties = Maps.newHashMap();
+        for (Map.Entry<String, String> entry : etlClusterDesc.getProperties().entrySet()) {
+            String key = entry.getKey();
+            if (key.startsWith(EtlClusterDesc.BROKER_PROPERTY_KEY_PREFIX)) {
+                brokerProperties.put(key.substring(key.indexOf(".") + 1), entry.getValue());
+            }
+        }
+        brokerDesc = new BrokerDesc(etlCluster.getBroker(), brokerProperties);
+    }
+
     @Override
     protected void unprotectedExecuteJob() throws LoadException {
+        // merge infos
+        prepareEtlInfos();
+
+        // create pending task
         LoadTask task = new SparkLoadPendingTask(this, fileGroupAggInfo.getAggKeyToFileGroups(),
-                                                 etlClusterDesc);
+                                                 etlCluster, brokerDesc);
         task.init();
         idToTasks.put(task.getSignature(), task);
         Catalog.getCurrentCatalog().getLoadTaskScheduler().submit(task);
@@ -334,7 +368,6 @@ public class SparkLoadJob extends BulkLoadJob {
         // checkDataQuality
 
         // etl output files
-        BrokerDesc brokerDesc = new BrokerDesc(etlClusterDesc.getProperties().get("broker"), null);
         Map<String, Long> filePathToSize = handler.getEtlFilePaths(etlOutputPath, brokerDesc);
 
         updateToLoadingState(etlStatus, filePathToSize);

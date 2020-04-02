@@ -17,7 +17,7 @@
 
 package org.apache.doris.load.loadv2;
 
-import org.apache.doris.analysis.EtlClusterDesc;
+import org.apache.doris.analysis.BrokerDesc;
 import org.apache.doris.analysis.LiteralExpr;
 import org.apache.doris.catalog.Catalog;
 import org.apache.doris.catalog.Column;
@@ -32,6 +32,7 @@ import org.apache.doris.catalog.PartitionKey;
 import org.apache.doris.catalog.PartitionType;
 import org.apache.doris.catalog.PrimitiveType;
 import org.apache.doris.catalog.RangePartitionInfo;
+import org.apache.doris.catalog.SparkEtlCluster;
 import org.apache.doris.common.LoadException;
 import org.apache.doris.common.Pair;
 import org.apache.doris.load.BrokerFileGroup;
@@ -69,7 +70,8 @@ public class SparkLoadPendingTask extends LoadTask {
     private static final Logger LOG = LogManager.getLogger(SparkLoadPendingTask.class);
 
     private final Map<FileGroupAggKey, List<BrokerFileGroup>> aggKeyToBrokerFileGroups;
-    private final EtlClusterDesc etlClusterDesc;
+    private final SparkEtlCluster etlCluster;
+    private final BrokerDesc brokerDesc;
     private final long dbId;
     private final String loadLabel;
     private final long loadJobId;
@@ -77,12 +79,13 @@ public class SparkLoadPendingTask extends LoadTask {
 
     public SparkLoadPendingTask(SparkLoadJob loadTaskCallback,
                                 Map<FileGroupAggKey, List<BrokerFileGroup>> aggKeyToBrokerFileGroups,
-                                EtlClusterDesc etlClusterDesc) {
+                                SparkEtlCluster etlCluster, BrokerDesc brokerDesc) {
         super(loadTaskCallback);
         this.retryTime = 3;
         this.attachment = new SparkPendingTaskAttachment(signature);
         this.aggKeyToBrokerFileGroups = aggKeyToBrokerFileGroups;
-        this.etlClusterDesc = etlClusterDesc;
+        this.etlCluster = etlCluster;
+        this.brokerDesc = brokerDesc;
         this.dbId = loadTaskCallback.getDbId();
         this.loadJobId = loadTaskCallback.getId();
         this.loadLabel = loadTaskCallback.getLabel();
@@ -97,17 +100,11 @@ public class SparkLoadPendingTask extends LoadTask {
 
     private void submitEtlJob() throws LoadException {
         // retry different output path
-        String outputPath = etlClusterDesc.getProperties().get("output_path");
-        String hdfsDefaultName = etlClusterDesc.getProperties().get("fs.default.name");
-        etlJobConfig.outputPath = EtlJobConfig.getOutputPath(hdfsDefaultName, outputPath, dbId, loadLabel, signature);
-
-        // spark configs
-        String sparkMaster = etlClusterDesc.getProperties().get("spark.master");
-        Map<String, String> sparkConfigs = Maps.newHashMap();
+        etlJobConfig.outputPath = EtlJobConfig.getOutputPath(etlCluster.getHdfsEtlPath(), dbId, loadLabel, signature);
 
         // handler submit etl job
         SparkEtlJobHandler handler = new SparkEtlJobHandler();
-        SparkAppHandle handle = handler.submitEtlJob(loadJobId, loadLabel, sparkMaster, sparkConfigs, configToJson());
+        SparkAppHandle handle = handler.submitEtlJob(loadJobId, loadLabel, etlCluster, brokerDesc, configToJson());
         ((SparkPendingTaskAttachment) attachment).setHandle(handle);
         ((SparkPendingTaskAttachment) attachment).setOutputPath(etlJobConfig.outputPath);
         LOG.info("submit spark etl job success. attachment: {}", attachment);
@@ -122,12 +119,7 @@ public class SparkLoadPendingTask extends LoadTask {
 
     @Override
     public void init() throws LoadException {
-        prepareEtlClusterInfos();
         createEtlJobConf();
-    }
-
-    private void prepareEtlClusterInfos() {
-        // etlClusterDesc properties merge with cluster infos in user property
     }
 
     private void createEtlJobConf() throws LoadException {

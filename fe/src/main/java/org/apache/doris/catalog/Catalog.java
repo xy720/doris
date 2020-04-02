@@ -355,6 +355,7 @@ public class Catalog {
 
     private PullLoadJobMgr pullLoadJobMgr;
     private BrokerMgr brokerMgr;
+    private EtlClusterMgr etlClusterMgr;
 
     private GlobalTransactionMgr globalTransactionMgr;
 
@@ -490,6 +491,7 @@ public class Catalog {
 
         this.pullLoadJobMgr = new PullLoadJobMgr();
         this.brokerMgr = new BrokerMgr();
+        this.etlClusterMgr = new EtlClusterMgr();
 
         this.globalTransactionMgr = new GlobalTransactionMgr(this);
         this.tabletStatMgr = new TabletStatMgr();
@@ -558,6 +560,10 @@ public class Catalog {
 
     public BrokerMgr getBrokerMgr() {
         return brokerMgr;
+    }
+
+    public EtlClusterMgr getEtlClusterMgr() {
+        return etlClusterMgr;
     }
 
     public static GlobalTransactionMgr getCurrentGlobalTransactionMgr() {

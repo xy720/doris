@@ -56,9 +56,6 @@ public class BrokerLoadJob extends BulkLoadJob {
 
     private static final Logger LOG = LogManager.getLogger(BrokerLoadJob.class);
 
-    // input params
-    // private BrokerDesc brokerDesc;
-
     // only for log replay
     public BrokerLoadJob() {
         super();

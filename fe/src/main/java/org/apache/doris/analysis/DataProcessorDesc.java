@@ -18,6 +18,7 @@
 package org.apache.doris.analysis;
 
 import org.apache.doris.common.AnalysisException;
+import org.apache.doris.common.DdlException;
 import org.apache.doris.common.io.Text;
 import org.apache.doris.common.io.Writable;
 
@@ -53,7 +54,7 @@ public abstract class DataProcessorDesc implements Writable {
     public void analyze() throws AnalysisException {
     }
 
-    abstract public EtlJobType getEtlJobType();
+    public abstract EtlJobType getEtlJobType() throws DdlException;
 
     @Override
     public void write(DataOutput out) throws IOException {

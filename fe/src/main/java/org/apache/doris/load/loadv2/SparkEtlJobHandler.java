@@ -19,6 +19,7 @@ package org.apache.doris.load.loadv2;
 
 import org.apache.doris.PaloFe;
 import org.apache.doris.analysis.BrokerDesc;
+import org.apache.doris.catalog.SparkEtlCluster;
 import org.apache.doris.common.LoadException;
 import org.apache.doris.common.UserException;
 import org.apache.doris.common.util.BrokerUtil;
@@ -59,6 +60,7 @@ public class SparkEtlJobHandler {
     private static final String JOB_CONFIG_DIR = PaloFe.DORIS_HOME_DIR + "/temp/job_conf";
     private static final String APP_RESOURCE = PaloFe.DORIS_HOME_DIR + "/lib/palo-fe.jar";
     private static final String MAIN_CLASS = "org.apache.doris.load.loadv2.etl.SparkEtlJob";
+    private static final String SPARK_DEPLOY_MODE = "cluster";
     private static final String ETL_JOB_NAME = "doris__%s";
     // http://host:port/api/v1/applications/appid/jobs
     private static final String STATUS_URL = "%s/api/v1/applications/%s/jobs";
@@ -74,8 +76,8 @@ public class SparkEtlJobHandler {
         public void infoChanged(SparkAppHandle sparkAppHandle) {}
     }
 
-    public SparkAppHandle submitEtlJob(long loadJobId, String loadLabel, String sparkMaster,
-                                       Map<String, String> sparkConfigs, String jobJsonConfig) throws LoadException {
+    public SparkAppHandle submitEtlJob(long loadJobId, String loadLabel, SparkEtlCluster etlCluster,
+                                       BrokerDesc brokerDesc, String jobJsonConfig) throws LoadException {
         // check outputPath exist
 
         // create job config file
@@ -89,16 +91,15 @@ public class SparkEtlJobHandler {
 
         // spark cluster config
         SparkLauncher launcher = new SparkLauncher();
-        launcher = launcher.setMaster(sparkMaster)
-                //.setDeployMode("cluster")
+        launcher.setMaster(etlCluster.getMaster())
+                .setDeployMode(SPARK_DEPLOY_MODE)
                 .setAppResource(APP_RESOURCE)
                 .setMainClass(MAIN_CLASS)
                 .setAppName(String.format(ETL_JOB_NAME, loadLabel))
                 .addFile(configFilePath);
-                //.addSparkArg("--jars", "")
-                //addSparkArg("--files", "")
-        for (Map.Entry<String, String> entry : sparkConfigs.entrySet()) {
-            launcher = launcher.setConf(entry.getKey(), entry.getValue());
+        // spark args: --jars, --files
+        for (Map.Entry<String, String> entry : etlCluster.getSparkArgsMap().entrySet()) {
+            launcher.addSparkArg("--" + entry.getKey(), entry.getValue());
         }
 
         // start app
