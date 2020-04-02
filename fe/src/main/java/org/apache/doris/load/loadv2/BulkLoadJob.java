@@ -62,13 +62,12 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * parent of BrokerLoadJob and SparkLoadJob from load stmt
+ * parent class of BrokerLoadJob and SparkLoadJob from load stmt
  */
 public abstract class BulkLoadJob extends LoadJob {
     private static final Logger LOG = LogManager.getLogger(BulkLoadJob.class);
 
     // input params
-    // TODO: move to BrokerLoadJob
     protected BrokerDesc brokerDesc;
     // this param is used to persist the expr of columns
     // the origin stmt is persisted instead of columns expr

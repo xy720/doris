@@ -119,8 +119,8 @@ public class EtlJobConfig implements Serializable {
     public static final String DISTINCT_KEY_TABLE_NAME = "doris_distinct_key_table_%d_%s";
     public static final String DORIS_INTERMEDIATE_HIVE_TABLE_NAME = "doris_intermediate_hive_table_%d_%s";
 
-    // hdfs://host:port/outputPath/dbId/loadLabel/PendingTaskSignature
-    private static final String ETL_OUTPUT_PATH_FORMAT = "%s%s/%d/%s/%d";
+    // hdfsEtlPath/output/dbId/loadLabel/PendingTaskSignature
+    private static final String ETL_OUTPUT_PATH_FORMAT = "%s/output/%d/%s/%d";
     private static final String ETL_OUTPUT_FILE_NAME_DESC = "label.tableId.partitionId.indexId.bucket.schemaHash.parquet";
     // tableId.partitionId.indexId.bucket.schemaHash
     public static final String ETL_OUTPUT_FILE_NAME_NO_LABEL_SUFFIX_FORMAT = "%d.%d.%d.%d.%d";
@@ -153,9 +153,8 @@ public class EtlJobConfig implements Serializable {
                 '}';
     }
 
-    public static String getOutputPath(String hdfsDefaultName, String outputPath, long dbId,
-                                       String loadLabel, long taskSignature) {
-        return String.format(ETL_OUTPUT_PATH_FORMAT, hdfsDefaultName, outputPath, dbId, loadLabel, taskSignature);
+    public static String getOutputPath(String hdfsEtlPath, long dbId, String loadLabel, long taskSignature) {
+        return String.format(ETL_OUTPUT_PATH_FORMAT, hdfsEtlPath, dbId, loadLabel, taskSignature);
     }
 
     public static String getTabletMetaStr(String filePath) throws Exception {
