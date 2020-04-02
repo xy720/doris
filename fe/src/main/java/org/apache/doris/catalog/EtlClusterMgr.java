@@ -122,6 +122,18 @@ public class EtlClusterMgr {
         }
     }
 
+    public List<List<String>> getEtlClustersInfo() {
+        lock.lock();
+        try {
+            if (procNode == null) {
+                procNode = new EtlClusterProcNode();
+            }
+            return procNode.fetchResult().getRows();
+        } finally {
+            lock.unlock();
+        }
+    }
+
     public EtlClusterProcNode getProcNode() {
         lock.lock();
         try {
