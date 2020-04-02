@@ -2131,6 +2131,10 @@ show_param ::=
     {:
         RESULT = new ShowBrokerStmt();
     :}
+    | KW_LOAD KW_CLUSTER
+    {:
+        RESULT = new ShowEtlClusterStmt();
+    :}
     | KW_BACKENDS
     {:
         RESULT = new ShowBackendsStmt();

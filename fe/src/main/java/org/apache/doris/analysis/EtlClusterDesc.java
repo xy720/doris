@@ -57,7 +57,7 @@ public class EtlClusterDesc extends DataProcessorDesc {
 
         // check etl cluster exist
         if (!Catalog.getCurrentCatalog().getEtlClusterMgr().containsEtlCluster(getName())) {
-            throw new AnalysisException("Etl cluster does not exist. name: {}" + getName());
+            throw new AnalysisException("Etl cluster does not exist. name: " + getName());
         }
     }
 
@@ -65,7 +65,7 @@ public class EtlClusterDesc extends DataProcessorDesc {
     public EtlJobType getEtlJobType() throws DdlException {
         EtlCluster etlCluster = Catalog.getCurrentCatalog().getEtlClusterMgr().getEtlCluster(getName());
         if (etlCluster == null) {
-            throw new DdlException("Etl cluster does not exist. name: {}" + getName());
+            throw new DdlException("Etl cluster does not exist. name: " + getName());
         }
 
         if (etlCluster.getType() == EtlClusterType.SPARK) {

@@ -331,7 +331,8 @@ public class SparkLoadJob extends BulkLoadJob {
         Preconditions.checkNotNull(sparkAppHandle);
         SparkEtlJobHandler handler = new SparkEtlJobHandler();
         EtlStatus status = handler.getEtlJobStatus(sparkAppHandle, id,
-                                                   etlClusterDesc.getProperties().get("spark.status_server"));
+                                                   etlClusterDesc.getProperties().getOrDefault("spark.status_server",
+                                                                                               "http://127.0.0.1:4040"));
         switch (status.getState()) {
             case RUNNING:
                 updateEtlStatusInternal(status);
