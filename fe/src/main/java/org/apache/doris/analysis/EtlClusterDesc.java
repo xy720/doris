@@ -35,7 +35,7 @@ import java.util.Map;
 // (
 //     "hdfs_etl_path"="hdfs://127.0.0.1:10000/tmp/doris",
 //     "master"="yarn",
-//     "spark_args"="jars=xxx.jar,yyy.jar;files=/tmp/aaa,/tmp/bbb",
+//     "spark_args"="--jars=xxx.jar,yyy.jar;--files=/tmp/aaa,/tmp/bbb",
 //     "broker"="broker0",
 //     "broker.user"="xxx",
 //     "broker.password"="yyy"

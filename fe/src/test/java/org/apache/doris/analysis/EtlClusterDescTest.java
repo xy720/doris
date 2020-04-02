@@ -18,6 +18,7 @@
 package org.apache.doris.analysis;
 
 import org.apache.doris.common.AnalysisException;
+import org.apache.doris.common.DdlException;
 import org.apache.doris.load.EtlJobType;
 
 import com.google.common.collect.Maps;
@@ -29,7 +30,7 @@ import java.util.Map;
 public class EtlClusterDescTest {
 
     @Test
-    public void testNormal() throws AnalysisException {
+    public void testNormal() throws AnalysisException, DdlException {
         String clusterName = "spark.cluster0";
 
         Map<String, String> properties = Maps.newHashMap();

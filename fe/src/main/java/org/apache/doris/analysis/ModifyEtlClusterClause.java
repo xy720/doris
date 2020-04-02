@@ -29,7 +29,7 @@ import java.util.Map;
 // (
 //     "type" = "spark",
 //     "master" = "yarn",
-//     "spark_args" = "jars=xxx.jar,yyy.jar;files=/tmp/aaa,/tmp/bbb",
+//     "spark_args" = "--jars=xxx.jar,yyy.jar;--files=/tmp/aaa,/tmp/bbb",
 //     "hdfs_etl_path" = "hdfs://127.0.0.1:10000/tmp/doris",
 //     "broker" = "broker0"
 // );
@@ -116,6 +116,6 @@ public class ModifyEtlClusterClause extends AlterClause {
 
     @Override
     public Map<String, String> getProperties() {
-        throw new NotImplementedException();
+        return properties;
     }
 }

@@ -99,7 +99,7 @@ public class SparkEtlJobHandler {
                 .addFile(configFilePath);
         // spark args: --jars, --files
         for (Map.Entry<String, String> entry : etlCluster.getSparkArgsMap().entrySet()) {
-            launcher.addSparkArg("--" + entry.getKey(), entry.getValue());
+            launcher.addSparkArg(entry.getKey(), entry.getValue());
         }
 
         // start app
