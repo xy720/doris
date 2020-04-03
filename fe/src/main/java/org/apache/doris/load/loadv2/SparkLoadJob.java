@@ -132,7 +132,7 @@ public class SparkLoadJob extends BulkLoadJob {
         TBrokerScanRange tBrokerScanRange;
         TDescriptorTable tDescriptorTable;
 
-        public void init(List<Column> columns, EtlClusterDesc etlClusterDesc) throws UserException {
+        public void init(List<Column> columns, BrokerDesc brokerDesc) throws UserException {
             Analyzer analyzer = new Analyzer(Catalog.getInstance(), null);
             DescriptorTable descTable = analyzer.getDescTbl();
 
@@ -167,17 +167,14 @@ public class SparkLoadJob extends BulkLoadJob {
             PlanNodeId planNodeId = new PlanNodeId(0);
             BrokerScanNode scanNode = new BrokerScanNode(planNodeId, tupleDesc, "BrokerScanNode",
                                                          fileStatusesList, fileStatusesList.size());
-            scanNode.setLoadInfo(-1, -1, indexTable,
-                                 new BrokerDesc(etlClusterDesc.getProperties().get("broker"), null),
-                                 fileGroups, false);
+            scanNode.setLoadInfo(-1, -1, indexTable, brokerDesc, fileGroups, false);
             scanNode.init(analyzer);
             scanNode.finalize(analyzer);
 
             tBrokerScanRange = new TBrokerScanRange();
             tBrokerScanRange.setParams(scanNode.getTBrokerScanRangeParams(0));
             // broker address
-            FsBroker fsBroker = Catalog.getCurrentCatalog().getBrokerMgr().getBroker(
-                    etlClusterDesc.getProperties().get("broker"), "");
+            FsBroker fsBroker = Catalog.getCurrentCatalog().getBrokerMgr().getAnyBroker(brokerDesc.getName());
             tBrokerScanRange.setBroker_addresses(Lists.newArrayList(new TNetworkAddress(fsBroker.ip, fsBroker.port)));
             // broker range desc
             TBrokerRangeDesc tBrokerRangeDesc = new TBrokerRangeDesc();
@@ -427,7 +424,7 @@ public class SparkLoadJob extends BulkLoadJob {
     private PushBrokerReaderParams getPushBrokerReaderParams(OlapTable table, long indexId) throws UserException {
         if (!indexToPushBrokerReaderParams.containsKey(indexId)) {
             PushBrokerReaderParams pushBrokerReaderParams = new PushBrokerReaderParams();
-            pushBrokerReaderParams.init(table.getSchemaByIndexId(indexId), etlClusterDesc);
+            pushBrokerReaderParams.init(table.getSchemaByIndexId(indexId), brokerDesc);
             indexToPushBrokerReaderParams.put(indexId, pushBrokerReaderParams);
         }
         return indexToPushBrokerReaderParams.get(indexId);
