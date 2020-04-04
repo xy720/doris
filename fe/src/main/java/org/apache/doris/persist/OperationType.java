@@ -155,6 +155,9 @@ public class OperationType {
     public static final short OP_CREATE_LOAD_JOB = 230;
     // this finish op include finished and cancelled
     public static final short OP_END_LOAD_JOB = 231;
+    // etl cluster
+    public static final short OP_ADD_ETL_CLUSTER = 232;
+    public static final short OP_DROP_ETL_CLUSTER = 233;
 
     // small files 251~260
     public static final short OP_CREATE_SMALL_FILE = 251;
