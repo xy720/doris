@@ -18,6 +18,7 @@
 package org.apache.doris.persist.gson;
 
 import org.apache.doris.catalog.DistributionInfo;
+import org.apache.doris.catalog.EtlCluster;
 import org.apache.doris.catalog.HashDistributionInfo;
 import org.apache.doris.catalog.RandomDistributionInfo;
 import org.apache.doris.catalog.ScalarType;
@@ -48,6 +49,7 @@ import com.google.gson.annotations.SerializedName;
 import com.google.gson.reflect.TypeToken;
 import com.google.gson.stream.JsonReader;
 import com.google.gson.stream.JsonWriter;
+import org.apache.doris.catalog.SparkEtlCluster;
 
 import java.io.IOException;
 import java.lang.reflect.Method;
@@ -86,6 +88,11 @@ public class GsonUtils {
             .registerSubtype(HashDistributionInfo.class, HashDistributionInfo.class.getSimpleName())
             .registerSubtype(RandomDistributionInfo.class, RandomDistributionInfo.class.getSimpleName());
 
+    // runtime adapter for class "EtlCluster"
+    private static RuntimeTypeAdapterFactory<EtlCluster> etlClusterTypeAdapterFactory = RuntimeTypeAdapterFactory
+            .of(EtlCluster.class, "clazz")
+            .registerSubtype(SparkEtlCluster.class, SparkEtlCluster.class.getSimpleName());
+
     // the builder of GSON instance.
     // Add any other adapters if necessary.
     private static final GsonBuilder GSON_BUILDER = new GsonBuilder()
@@ -95,7 +102,8 @@ public class GsonUtils {
             .registerTypeHierarchyAdapter(Multimap.class, new GuavaMultimapAdapter())
             .registerTypeAdapterFactory(new PostProcessTypeAdapterFactory())
             .registerTypeAdapterFactory(columnTypeAdapterFactory)
-            .registerTypeAdapterFactory(distributionInfoTypeAdapterFactory);
+            .registerTypeAdapterFactory(distributionInfoTypeAdapterFactory)
+            .registerTypeAdapterFactory(etlClusterTypeAdapterFactory);
 
     // this instance is thread-safe.
     public static final Gson GSON = GSON_BUILDER.create();
