@@ -40,12 +40,19 @@ public class EtlStatus implements Writable {
     // not persist
     private Map<String, Long> fileMap;
 
+    // for spark not persist
+    // 0 - 100
+    private int progress;
+    private String failMsg;
+
     public EtlStatus() {
         this.state = TEtlState.RUNNING;
         this.trackingUrl = DEFAULT_TRACKING_URL;
         this.stats = Maps.newHashMap();
         this.counters = Maps.newHashMap();
         this.fileMap = Maps.newHashMap();
+        this.progress = 0;
+        this.failMsg = "";
     }
 
     public TEtlState getState() {
@@ -101,16 +108,41 @@ public class EtlStatus implements Writable {
         this.fileMap.putAll(fileMap);
     }
 
+    public int getProgress() {
+        return progress;
+    }
+
+    public void setProgress(int progress) {
+        this.progress = progress;
+    }
+
+    public String getFailMsg() {
+        return failMsg;
+    }
+
+    public void setFailMsg(String failMsg) {
+        this.failMsg = failMsg;
+    }
+
     public void reset() {
         this.stats.clear();
         this.counters.clear();
         this.fileMap.clear();
+        this.progress = 0;
+        this.failMsg = "";
     }
 
     @Override
     public String toString() {
-        return "EtlTaskStatus [state=" + state + ", trackingUrl=" + trackingUrl + ", stats=" + stats + ", counters="
-                + counters + "]";
+        return "EtlStatus{" +
+                "state=" + state +
+                ", trackingUrl='" + trackingUrl + '\'' +
+                ", stats=" + stats +
+                ", counters=" + counters +
+                ", fileMap=" + fileMap +
+                ", progress=" + progress +
+                ", failMsg='" + failMsg + '\'' +
+                '}';
     }
 
     public void write(DataOutput out) throws IOException {
