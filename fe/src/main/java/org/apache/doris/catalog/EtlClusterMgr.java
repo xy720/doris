@@ -81,11 +81,21 @@ public class EtlClusterMgr {
             EtlCluster etlCluster = EtlCluster.fromClause(clause);
             nameToEtlCluster.put(clusterName, etlCluster);
             // log add
-            // Catalog.getInstance().getEditLog().logAddBroker(new ModifyBrokerInfo(name, addedBrokerAddress));
+            Catalog.getInstance().getEditLog().logAddEtlCluster(etlCluster);
             LOG.info("add etl cluster success. cluster: {}", etlCluster);
         } finally {
             lock.unlock();
         }
+    }
+
+    public void replayAddEtlCluster(EtlCluster etlCluster) {
+        lock.lock();
+        try {
+            nameToEtlCluster.put(etlCluster.getName(), etlCluster);
+        } finally {
+            lock.unlock();
+        }
+
     }
 
     public void dropEtlCluster(String name) throws DdlException {
@@ -97,8 +107,17 @@ public class EtlClusterMgr {
 
             nameToEtlCluster.remove(name);
             // log drop
-            // Catalog.getInstance().getEditLog().logDropBroker(new ModifyBrokerInfo(name, dropedAddressList));
+            Catalog.getInstance().getEditLog().logDropEtlCluster(name);
             LOG.info("drop etl cluster success. cluster name: {}", name);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    public void replayDropEtlCluster(String name) {
+        lock.lock();
+        try {
+            nameToEtlCluster.remove(name);
         } finally {
             lock.unlock();
         }
