@@ -513,7 +513,7 @@ public abstract class LoadJob extends AbstractTxnStateChangeCallback implements 
         }
     }
 
-    private void checkAuth(String command) throws DdlException {
+    protected void checkAuth(String command) throws DdlException {
         if (authorizationInfo == null) {
             // use the old method to check priv
             checkAuthWithoutAuthInfo(command);
@@ -688,9 +688,6 @@ public abstract class LoadJob extends AbstractTxnStateChangeCallback implements 
                     break;
                 case CANCELLED:
                     jobInfo.add("ETL:N/A; LOAD:N/A");
-                    break;
-                case ETL:
-                    jobInfo.add("ETL:" + progress + "%; LOAD:0%");
                     break;
                 default:
                     jobInfo.add("ETL:100%; LOAD:" + progress + "%");

@@ -54,7 +54,7 @@ public abstract class LoadTask extends MasterTask {
         } catch (UserException e) {
             failMsg.setMsg(e.getMessage() == null ? "" : e.getMessage());
             LOG.warn(new LogBuilder(LogKey.LOAD_JOB, callback.getCallbackId())
-                    .add("error_msg", "Failed to execute load task").build());
+                    .add("error_msg", "Failed to execute load task").build(), e);
         } catch (Exception e) {
             failMsg.setMsg(e.getMessage() == null ? "" : e.getMessage());
             LOG.warn(new LogBuilder(LogKey.LOAD_JOB, callback.getCallbackId())
