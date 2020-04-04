@@ -17,7 +17,6 @@
 
 package org.apache.doris.load.loadv2;
 
-import com.google.common.base.Preconditions;
 import org.apache.doris.PaloFe;
 import org.apache.doris.analysis.BrokerDesc;
 import org.apache.doris.catalog.SparkEtlCluster;
@@ -45,6 +44,7 @@ import org.apache.spark.launcher.SparkAppHandle.Listener;
 import org.apache.spark.launcher.SparkAppHandle.State;
 import org.apache.spark.launcher.SparkLauncher;
 
+import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 
@@ -59,18 +59,13 @@ import java.util.Map;
 public class SparkEtlJobHandler {
     private static final Logger LOG = LogManager.getLogger(SparkEtlJobHandler.class);
 
-    public static final String NUM_TASKS = "numTasks";
-    public static final String NUM_COMPLETED_TASKS = "numCompletedTasks";
-
     private static final String JOB_CONFIG_DIR = PaloFe.DORIS_HOME_DIR + "/temp/job_conf";
     private static final String APP_RESOURCE = PaloFe.DORIS_HOME_DIR + "/lib/palo-fe.jar";
     private static final String MAIN_CLASS = "org.apache.doris.load.loadv2.etl.SparkEtlJob";
     private static final String SPARK_DEPLOY_MODE = "cluster";
     private static final String ETL_JOB_NAME = "doris__%s";
-    // http://host:port/api/v1/applications/appid/jobs
-    private static final String STATUS_URL = "%s/api/v1/applications/%s/jobs";
-
-    private static final int MAX_RETRY = 300;
+    // 5min
+    private static final int GET_APPID_MAX_RETRY = 300;
 
     class SparkAppListener implements Listener {
         @Override
@@ -85,9 +80,8 @@ public class SparkEtlJobHandler {
         // check outputPath exist
 
         // create job config file
-        String configDirPath = JOB_CONFIG_DIR + "/" + loadJobId;
-        String configFilePath = configDirPath + "/" + EtlJobConfig.JOB_CONFIG_FILE_NAME;
-        createJobConfigFile(configDirPath, configFilePath, loadJobId, jobJsonConfig);
+        // delete when etl job finished or cancelled
+        String configFilePath = createJobConfigFile(loadJobId, jobJsonConfig);
 
         // spark cluster config
         SparkLauncher launcher = new SparkLauncher();
@@ -104,16 +98,33 @@ public class SparkEtlJobHandler {
 
         // start app
         SparkAppHandle handle = null;
+        State state = null;
         String appId = null;
         int retry = 0;
+        String errMsg = "start spark app failed. error: ";
         try {
             handle = launcher.startApplication(new SparkAppListener());
-            while (retry++ < MAX_RETRY) {
+            while (retry++ < GET_APPID_MAX_RETRY) {
                 appId = handle.getAppId();
                 if (appId != null) {
                     break;
                 }
 
+                // check state and retry
+                state = handle.getState();
+                if (fromSparkState(state) == TEtlState.CANCELLED) {
+                    throw new LoadException(errMsg + "spark app state: " + state.toString());
+                }
+                if (retry >= GET_APPID_MAX_RETRY) {
+                    throw new LoadException(errMsg + "wait too much time for getting appid, spark app state: "
+                                            + state.toString());
+                }
+
+                // log
+                if (retry % 10 == 0) {
+                    LOG.info("spark appid that handle get is null, state: {}, retry times: {}",
+                             state.toString(), retry);
+                }
                 try {
                     Thread.sleep(1000);
                 } catch (InterruptedException e) {
@@ -121,16 +132,8 @@ public class SparkEtlJobHandler {
                 }
             }
         } catch (IOException e) {
-            String errMsg = "start spark app fail, error: " + e.toString();
             LOG.warn(errMsg, e);
-            throw new LoadException(errMsg, e);
-        } finally {
-            // delete config file
-            Util.deleteDirectory(new File(configDirPath));
-        }
-
-        if (appId == null && retry >= MAX_RETRY) {
-            throw new LoadException("Get appid has been retried too many times");
+            throw new LoadException(errMsg + e.getMessage());
         }
 
         // success
@@ -138,9 +141,9 @@ public class SparkEtlJobHandler {
         attachment.setHandle(handle);
     }
 
-    private void createJobConfigFile(String configDirPath, String configFilePath,
-                                     long loadJobId, String jsonConfig) throws LoadException {
+    private String createJobConfigFile(long loadJobId, String jsonConfig) throws LoadException {
         // check config dir
+        String configDirPath = JOB_CONFIG_DIR + "/" + loadJobId;
         File configDir = new File(configDirPath);
         if (!Util.deleteDirectory(configDir)) {
             String errMsg = "delete config dir error. job: " + loadJobId;
@@ -154,6 +157,7 @@ public class SparkEtlJobHandler {
         }
 
         // write file
+        String configFilePath = configDirPath + "/" + EtlJobConfig.JOB_CONFIG_FILE_NAME;
         File configFile = new File(configFilePath);
         BufferedWriter bw = null;
         try {
@@ -175,79 +179,62 @@ public class SparkEtlJobHandler {
                 }
             }
         }
+
+        return configFilePath;
     }
 
     public EtlStatus getEtlJobStatus(SparkAppHandle handle, String appId, long loadJobId, boolean isYarnMaster) {
         EtlStatus status = new EtlStatus();
 
-        // state from handle
-        if (!isYarnMaster) {
+        if (isYarnMaster) {
+            // state from yarn
+            Preconditions.checkNotNull(appId);
+            YarnClient client = startYarnClient();
+            try {
+                ApplicationReport report = client.getApplicationReport(ConverterUtils.toApplicationId(appId));
+                LOG.info("yarn application -status {}, load job id: {}, result: {}", appId, loadJobId, report);
+
+                YarnApplicationState state = report.getYarnApplicationState();
+                status.setState(fromYarnState(state));
+                if (status.getState() == TEtlState.CANCELLED) {
+                    status.setFailMsg("yarn app state: " + state.toString());
+                }
+                status.setTrackingUrl(report.getTrackingUrl());
+                status.setProgress((int) (report.getProgress() * 100));
+            } catch (ApplicationNotFoundException e) {
+                LOG.warn("spark app not found, spark app id: {}, load job id: {}", appId, loadJobId, e);
+                status.setState(TEtlState.CANCELLED);
+                status.setFailMsg(e.getMessage());
+            } catch (YarnException | IOException e) {
+                LOG.warn("yarn application status failed, spark app id: {}, load job id: {}", appId, loadJobId, e);
+            } finally {
+                stopYarnClient(client);
+            }
+        } else {
+            // state from handle
             if (handle == null) {
                 status.setFailMsg("spark app handle is null");
                 status.setState(TEtlState.CANCELLED);
                 return status;
             }
 
-            State etlJobState = handle.getState();
-            switch (etlJobState) {
-                case FINISHED:
-                    status.setState(TEtlState.FINISHED);
-                    break;
-                case FAILED:
-                case KILLED:
-                case LOST:
-                    status.setState(TEtlState.CANCELLED);
-                    status.setFailMsg("spark app state: " + etlJobState.toString());
-                    break;
-                default:
-                    // UNKNOWN CONNECTED SUBMITTED RUNNING
-                    status.setState(TEtlState.RUNNING);
-                    break;
+            State state = handle.getState();
+            status.setState(fromSparkState(state));
+            if (status.getState() == TEtlState.CANCELLED) {
+                status.setFailMsg("spark app state: " + state.toString());
             }
-            LOG.info("spark app id: {}, load job id: {}, app state: {}", appId, loadJobId, etlJobState);
-
-            return status;
+            LOG.info("spark app id: {}, load job id: {}, app state: {}", appId, loadJobId, state);
         }
 
-        // state from yarn
-        Preconditions.checkNotNull(appId);
-        YarnClient client = startYarnClient();
-        try {
-            ApplicationReport report = client.getApplicationReport(ConverterUtils.toApplicationId(appId));
-            LOG.info("yarn application -status {}, load job id: {}, result: {}", appId, loadJobId, report);
-
-            YarnApplicationState etlJobState = report.getYarnApplicationState();
-            switch (etlJobState) {
-                case FINISHED:
-                    status.setState(TEtlState.FINISHED);
-                    break;
-                case FAILED:
-                case KILLED:
-                    status.setState(TEtlState.CANCELLED);
-                    status.setFailMsg("yarn app state: " + etlJobState.toString());
-                    break;
-                default:
-                    // ACCEPTED NEW NEW_SAVING RUNNING SUBMITTED
-                    status.setState(TEtlState.RUNNING);
-                    break;
-            }
-
-            status.setTrackingUrl(report.getTrackingUrl());
-            status.setProgress((int)(report.getProgress() * 100));
-        } catch (ApplicationNotFoundException e) {
-            LOG.warn("spark app not found, spark app id: {}, load job id: {}", appId, loadJobId, e);
-            status.setState(TEtlState.CANCELLED);
-            status.setFailMsg(e.getMessage());
-        } catch (YarnException | IOException e) {
-            LOG.warn("yarn application status failed, spark app id: {}, load job id: {}", appId, loadJobId, e);
-        } finally {
-            stopYarnClient(client);
+        // delete config file
+        if (status.getState() == TEtlState.FINISHED || status.getState() == TEtlState.CANCELLED) {
+            deleteConfigFile(loadJobId);
         }
 
         return status;
     }
 
-    public void killEtlJob(SparkAppHandle handle, String appId, boolean isYarnMaster) {
+    public void killEtlJob(SparkAppHandle handle, String appId, long loadJobId, boolean isYarnMaster) {
         if (isYarnMaster) {
             Preconditions.checkNotNull(appId);
             YarnClient client = startYarnClient();
@@ -256,7 +243,7 @@ public class SparkEtlJobHandler {
                     client.killApplication(ConverterUtils.toApplicationId(appId));
                     LOG.info("yarn application -kill {}", appId);
                 } catch (YarnException | IOException e) {
-                    LOG.warn("yarn application kill failed, app id: {}", appId, e);
+                    LOG.warn("yarn application kill failed, app id: {}, load job id: {}", appId, loadJobId, e);
                 }
             } finally {
                 stopYarnClient(client);
@@ -266,6 +253,9 @@ public class SparkEtlJobHandler {
                 handle.stop();
             }
         }
+
+        // delete config file
+        deleteConfigFile(loadJobId);
     }
 
     public Map<String, Long> getEtlFilePaths(String outputPath, BrokerDesc brokerDesc) throws Exception {
@@ -300,5 +290,37 @@ public class SparkEtlJobHandler {
 
     private void stopYarnClient(YarnClient client) {
         client.stop();
+    }
+
+    private TEtlState fromYarnState(YarnApplicationState state) {
+        switch (state) {
+            case FINISHED:
+                return TEtlState.FINISHED;
+            case FAILED:
+            case KILLED:
+                return TEtlState.CANCELLED;
+            default:
+                // ACCEPTED NEW NEW_SAVING RUNNING SUBMITTED
+                return TEtlState.RUNNING;
+        }
+    }
+
+    private TEtlState fromSparkState(State state) {
+        switch (state) {
+            case FINISHED:
+                return TEtlState.FINISHED;
+            case FAILED:
+            case KILLED:
+            case LOST:
+                return TEtlState.CANCELLED;
+            default:
+                // UNKNOWN CONNECTED SUBMITTED RUNNING
+                return TEtlState.RUNNING;
+        }
+    }
+
+    private void deleteConfigFile(long loadJobId) {
+        String configDirPath = JOB_CONFIG_DIR + "/" + loadJobId;
+        Util.deleteDirectory(new File(configDirPath));
     }
 }

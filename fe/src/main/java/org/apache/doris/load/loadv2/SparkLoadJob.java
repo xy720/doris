@@ -17,6 +17,7 @@
 
 package org.apache.doris.load.loadv2;
 
+import com.google.common.base.Joiner;
 import org.apache.doris.analysis.Analyzer;
 import org.apache.doris.analysis.BrokerDesc;
 import org.apache.doris.analysis.DescriptorTable;
@@ -46,6 +47,7 @@ import org.apache.doris.common.UserException;
 import org.apache.doris.common.io.Text;
 import org.apache.doris.common.util.LogBuilder;
 import org.apache.doris.common.util.LogKey;
+import org.apache.doris.common.util.TimeUtils;
 import org.apache.doris.load.BrokerFileGroup;
 import org.apache.doris.load.EtlJobType;
 import org.apache.doris.load.EtlStatus;
@@ -350,6 +352,9 @@ public class SparkLoadJob extends BulkLoadJob {
         try {
             loadingStatus = etlStatus;
             progress = etlStatus.getProgress();
+            if (!etlCluster.isYarnMaster()) {
+                loadingStatus.setTrackingUrl(appId);
+            }
         } finally {
             writeUnlock();
         }
@@ -620,6 +625,77 @@ public class SparkLoadJob extends BulkLoadJob {
             Catalog.getCurrentGlobalTransactionMgr().commitTransaction(dbId, transactionId, commitInfos);
         } finally {
             db.writeUnlock();
+        }
+    }
+
+    @Override
+    public List<Comparable> getShowInfo() throws DdlException {
+        readLock();
+        try {
+            // check auth
+            checkAuth("SHOW LOAD");
+            List<Comparable> jobInfo = Lists.newArrayList();
+            // jobId
+            jobInfo.add(id);
+            // label
+            jobInfo.add(label);
+            // state
+            jobInfo.add(state.name());
+
+            // progress
+            switch (state) {
+                case PENDING:
+                    jobInfo.add("ETL:0%; LOAD:0%");
+                    break;
+                case CANCELLED:
+                    jobInfo.add("ETL:N/A; LOAD:N/A");
+                    break;
+                case ETL:
+                    jobInfo.add("ETL:" + progress + "%; LOAD:0%");
+                    break;
+                default:
+                    jobInfo.add("ETL:100%; LOAD:" + progress + "%");
+                    break;
+            }
+
+            // type
+            jobInfo.add(jobType);
+
+            // etl info
+            if (loadingStatus.getCounters().size() == 0) {
+                jobInfo.add("N/A");
+            } else {
+                jobInfo.add(Joiner.on("; ").withKeyValueSeparator("=").join(loadingStatus.getCounters()));
+            }
+
+            // task info
+            jobInfo.add("cluster:" + etlClusterDesc.getName()
+                        + "; timeout(s):" + timeoutSecond
+                        + "; max_filter_ratio:" + maxFilterRatio);
+
+            // error msg
+            if (failMsg == null) {
+                jobInfo.add("N/A");
+            } else {
+                jobInfo.add("type:" + failMsg.getCancelType() + "; msg:" + failMsg.getMsg());
+            }
+
+            // create time
+            jobInfo.add(TimeUtils.longToTimeString(createTimestamp));
+            // etl start time
+            jobInfo.add(TimeUtils.longToTimeString(etlStartTimestamp));
+            // etl end time
+            jobInfo.add(TimeUtils.longToTimeString(etlFinishTimestamp));
+            // load start time
+            jobInfo.add(TimeUtils.longToTimeString(loadStartTimestamp));
+            // load end time
+            jobInfo.add(TimeUtils.longToTimeString(finishTimestamp));
+            // tracking url
+            jobInfo.add(loadingStatus.getTrackingUrl());
+            jobInfo.add(loadStatistic.toJson());
+            return jobInfo;
+        } finally {
+            readUnlock();
         }
     }
 
