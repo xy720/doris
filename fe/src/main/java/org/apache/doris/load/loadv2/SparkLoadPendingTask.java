@@ -49,7 +49,6 @@ import org.apache.doris.load.loadv2.etl.EtlJobConfig.EtlTable;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.apache.spark.launcher.SparkAppHandle;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
@@ -99,15 +98,15 @@ public class SparkLoadPendingTask extends LoadTask {
     }
 
     private void submitEtlJob() throws LoadException {
+        SparkPendingTaskAttachment sparkAttachment = (SparkPendingTaskAttachment) attachment;
         // retry different output path
         etlJobConfig.outputPath = EtlJobConfig.getOutputPath(etlCluster.getHdfsEtlPath(), dbId, loadLabel, signature);
+        sparkAttachment.setOutputPath(etlJobConfig.outputPath);
 
         // handler submit etl job
         SparkEtlJobHandler handler = new SparkEtlJobHandler();
-        SparkAppHandle handle = handler.submitEtlJob(loadJobId, loadLabel, etlCluster, brokerDesc, configToJson());
-        ((SparkPendingTaskAttachment) attachment).setHandle(handle);
-        ((SparkPendingTaskAttachment) attachment).setOutputPath(etlJobConfig.outputPath);
-        LOG.info("submit spark etl job success. attachment: {}", attachment);
+        handler.submitEtlJob(loadJobId, loadLabel, etlCluster, brokerDesc, configToJson(), sparkAttachment);
+        LOG.info("submit spark etl job success. attachment: {}", sparkAttachment);
     }
 
     private String configToJson() {

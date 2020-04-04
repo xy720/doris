@@ -103,8 +103,10 @@ public class SparkLoadJob extends BulkLoadJob {
     private long etlFinishTimestamp = -1;
     private long quorumFinishTimestamp = -1;
 
-    // spark job handle
+    // for spark standalone, not persist
     private SparkAppHandle sparkAppHandle;
+    // for spark yarn
+    private String appId;
     // spark job outputPath
     private String etlOutputPath = "";
 
@@ -296,6 +298,7 @@ public class SparkLoadJob extends BulkLoadJob {
             finishedTaskIds.add(attachment.getTaskId());
 
             sparkAppHandle = attachment.getHandle();
+            appId = attachment.getAppId();
             etlOutputPath = attachment.getOutputPath();
 
             unprotectedUpdateState(JobState.ETL);
@@ -325,11 +328,8 @@ public class SparkLoadJob extends BulkLoadJob {
         }
 
         // get etl status
-        Preconditions.checkNotNull(sparkAppHandle);
         SparkEtlJobHandler handler = new SparkEtlJobHandler();
-        EtlStatus status = handler.getEtlJobStatus(sparkAppHandle, id,
-                                                   etlClusterDesc.getProperties().getOrDefault("spark.status_server",
-                                                                                               "http://127.0.0.1:4040"));
+        EtlStatus status = handler.getEtlJobStatus(sparkAppHandle, appId, id, etlCluster.isYarnMaster());
         switch (status.getState()) {
             case RUNNING:
                 updateEtlStatusInternal(status);
@@ -338,7 +338,7 @@ public class SparkLoadJob extends BulkLoadJob {
                 processEtlFinish(status, handler);
                 break;
             case CANCELLED:
-                throw new LoadException("spark etl job failed");
+                throw new LoadException("spark etl job failed, msg: " + status.getFailMsg());
             default:
                 LOG.warn("unknown etl state: {}", status.getState().name());
                 break;
@@ -349,20 +349,15 @@ public class SparkLoadJob extends BulkLoadJob {
         writeLock();
         try {
             loadingStatus = etlStatus;
-
-            int numTasks = Integer.parseInt(etlStatus.getStats().getOrDefault(
-                    SparkEtlJobHandler.NUM_TASKS, "0"));
-            int numCompletedTasks = Integer.parseInt(etlStatus.getStats().getOrDefault(
-                    SparkEtlJobHandler.NUM_COMPLETED_TASKS, "0"));
-            if (numTasks > 0) {
-                progress = numCompletedTasks * 100 / numTasks;
-            }
+            progress = etlStatus.getProgress();
         } finally {
             writeUnlock();
         }
     }
 
     private void processEtlFinish(EtlStatus etlStatus, SparkEtlJobHandler handler) throws Exception {
+        updateEtlStatusInternal(etlStatus);
+
         // checkDataQuality
 
         // etl output files

@@ -21,6 +21,7 @@ import org.apache.spark.launcher.SparkAppHandle;
 
 public class SparkPendingTaskAttachment extends TaskAttachment {
     private SparkAppHandle handle;
+    private String appId;
     private String outputPath;
 
     public SparkPendingTaskAttachment(long taskId) {
@@ -29,6 +30,14 @@ public class SparkPendingTaskAttachment extends TaskAttachment {
 
     public SparkAppHandle getHandle() {
         return handle;
+    }
+
+    public String getAppId() {
+        return appId;
+    }
+
+    public void setAppId(String appId) {
+        this.appId = appId;
     }
 
     public void setHandle(SparkAppHandle handle) {
@@ -46,7 +55,7 @@ public class SparkPendingTaskAttachment extends TaskAttachment {
     @Override
     public String toString() {
         return "SparkPendingTaskAttachment{" +
-                "handle=" + handle +
+                "appId='" + appId + '\'' +
                 ", outputPath='" + outputPath + '\'' +
                 '}';
     }

@@ -17,6 +17,7 @@
 
 package org.apache.doris.load.loadv2;
 
+import com.google.common.base.Preconditions;
 import org.apache.doris.PaloFe;
 import org.apache.doris.analysis.BrokerDesc;
 import org.apache.doris.catalog.SparkEtlCluster;
@@ -29,12 +30,14 @@ import org.apache.doris.load.loadv2.etl.EtlJobConfig;
 import org.apache.doris.thrift.TBrokerFileStatus;
 import org.apache.doris.thrift.TEtlState;
 
-import org.apache.http.HttpEntity;
-import org.apache.http.client.methods.CloseableHttpResponse;
-import org.apache.http.client.methods.HttpGet;
-import org.apache.http.impl.client.CloseableHttpClient;
-import org.apache.http.impl.client.HttpClients;
-import org.apache.http.util.EntityUtils;
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.yarn.api.records.ApplicationReport;
+import org.apache.hadoop.yarn.api.records.YarnApplicationState;
+import org.apache.hadoop.yarn.client.api.YarnClient;
+import org.apache.hadoop.yarn.conf.YarnConfiguration;
+import org.apache.hadoop.yarn.exceptions.ApplicationNotFoundException;
+import org.apache.hadoop.yarn.exceptions.YarnException;
+import org.apache.hadoop.yarn.util.ConverterUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.spark.launcher.SparkAppHandle;
@@ -44,7 +47,6 @@ import org.apache.spark.launcher.SparkLauncher;
 
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-import com.google.gson.Gson;
 
 import java.io.BufferedWriter;
 import java.io.File;
@@ -57,6 +59,9 @@ import java.util.Map;
 public class SparkEtlJobHandler {
     private static final Logger LOG = LogManager.getLogger(SparkEtlJobHandler.class);
 
+    public static final String NUM_TASKS = "numTasks";
+    public static final String NUM_COMPLETED_TASKS = "numCompletedTasks";
+
     private static final String JOB_CONFIG_DIR = PaloFe.DORIS_HOME_DIR + "/temp/job_conf";
     private static final String APP_RESOURCE = PaloFe.DORIS_HOME_DIR + "/lib/palo-fe.jar";
     private static final String MAIN_CLASS = "org.apache.doris.load.loadv2.etl.SparkEtlJob";
@@ -65,8 +70,7 @@ public class SparkEtlJobHandler {
     // http://host:port/api/v1/applications/appid/jobs
     private static final String STATUS_URL = "%s/api/v1/applications/%s/jobs";
 
-    public static final String NUM_TASKS = "numTasks";
-    public static final String NUM_COMPLETED_TASKS = "numCompletedTasks";
+    private static final int MAX_RETRY = 300;
 
     class SparkAppListener implements Listener {
         @Override
@@ -76,18 +80,14 @@ public class SparkEtlJobHandler {
         public void infoChanged(SparkAppHandle sparkAppHandle) {}
     }
 
-    public SparkAppHandle submitEtlJob(long loadJobId, String loadLabel, SparkEtlCluster etlCluster,
-                                       BrokerDesc brokerDesc, String jobJsonConfig) throws LoadException {
+    public void submitEtlJob(long loadJobId, String loadLabel, SparkEtlCluster etlCluster, BrokerDesc brokerDesc,
+                             String jobJsonConfig, SparkPendingTaskAttachment attachment) throws LoadException {
         // check outputPath exist
 
         // create job config file
         String configDirPath = JOB_CONFIG_DIR + "/" + loadJobId;
         String configFilePath = configDirPath + "/" + EtlJobConfig.JOB_CONFIG_FILE_NAME;
-        try {
-            createJobConfigFile(configDirPath, configFilePath, loadJobId, jobJsonConfig);
-        } catch (LoadException e) {
-            return null;
-        }
+        createJobConfigFile(configDirPath, configFilePath, loadJobId, jobJsonConfig);
 
         // spark cluster config
         SparkLauncher launcher = new SparkLauncher();
@@ -104,18 +104,38 @@ public class SparkEtlJobHandler {
 
         // start app
         SparkAppHandle handle = null;
+        String appId = null;
+        int retry = 0;
         try {
             handle = launcher.startApplication(new SparkAppListener());
+            while (retry++ < MAX_RETRY) {
+                appId = handle.getAppId();
+                if (appId != null) {
+                    break;
+                }
+
+                try {
+                    Thread.sleep(1000);
+                } catch (InterruptedException e) {
+                    LOG.warn(e.getMessage());
+                }
+            }
         } catch (IOException e) {
             String errMsg = "start spark app fail, error: " + e.toString();
-            LOG.warn(errMsg);
-            throw new LoadException(errMsg);
+            LOG.warn(errMsg, e);
+            throw new LoadException(errMsg, e);
         } finally {
             // delete config file
-            // Util.deleteDirectory(new File(configDirPath));
+            Util.deleteDirectory(new File(configDirPath));
         }
 
-        return handle;
+        if (appId == null && retry >= MAX_RETRY) {
+            throw new LoadException("Get appid has been retried too many times");
+        }
+
+        // success
+        attachment.setAppId(appId);
+        attachment.setHandle(handle);
     }
 
     private void createJobConfigFile(String configDirPath, String configFilePath,
@@ -157,83 +177,95 @@ public class SparkEtlJobHandler {
         }
     }
 
-    public EtlStatus getEtlJobStatus(SparkAppHandle handle, long loadJobId, String statusServer) {
+    public EtlStatus getEtlJobStatus(SparkAppHandle handle, String appId, long loadJobId, boolean isYarnMaster) {
         EtlStatus status = new EtlStatus();
 
-        // state
-        State etlJobState = handle.getState();
-        if (etlJobState == State.FINISHED) {
-            status.setState(TEtlState.FINISHED);
-        } else if (etlJobState == State.FAILED || etlJobState == State.KILLED || etlJobState == State.LOST) {
-            status.setState(TEtlState.CANCELLED);
-        } else {
-            // UNKNOWN CONNECTED SUBMITTED RUNNING
-            status.setState(TEtlState.RUNNING);
-        }
+        // state from handle
+        if (!isYarnMaster) {
+            if (handle == null) {
+                status.setFailMsg("spark app handle is null");
+                status.setState(TEtlState.CANCELLED);
+                return status;
+            }
 
-        // get spark appid
-        String appId = handle.getAppId();
-        LOG.info("spark app handle get appid: {}, load job id: {}, state: {}", appId, loadJobId, etlJobState);
-        if (appId == null) {
+            State etlJobState = handle.getState();
+            switch (etlJobState) {
+                case FINISHED:
+                    status.setState(TEtlState.FINISHED);
+                    break;
+                case FAILED:
+                case KILLED:
+                case LOST:
+                    status.setState(TEtlState.CANCELLED);
+                    status.setFailMsg("spark app state: " + etlJobState.toString());
+                    break;
+                default:
+                    // UNKNOWN CONNECTED SUBMITTED RUNNING
+                    status.setState(TEtlState.RUNNING);
+                    break;
+            }
+            LOG.info("spark app id: {}, load job id: {}, app state: {}", appId, loadJobId, etlJobState);
+
             return status;
         }
 
-        // stats
-        int numTasks = 0;
-        int numCompletedTasks = 0;
-        Map<String, String> stats = Maps.newHashMap();
-        status.setStats(stats);
-        String statusUrl = String.format(STATUS_URL, statusServer, appId);
-        CloseableHttpClient httpClient = HttpClients.createDefault();
-        HttpGet httpGet = new HttpGet(statusUrl);
-        CloseableHttpResponse httpResponse = null;
-        String responseJson = null;
+        // state from yarn
+        Preconditions.checkNotNull(appId);
+        YarnClient client = startYarnClient();
         try {
-            httpResponse = httpClient.execute(httpGet);
-            HttpEntity httpEntity = httpResponse.getEntity();
-            responseJson = EntityUtils.toString(httpEntity);
-            LOG.info("get spark app status success. load job id: {}, response: {}", loadJobId, responseJson);
+            ApplicationReport report = client.getApplicationReport(ConverterUtils.toApplicationId(appId));
+            LOG.info("yarn application -status {}, load job id: {}, result: {}", appId, loadJobId, report);
 
-            // [{ "jobId" : 0, "name" : "foreachPartition at Dpp.java:248",
-            //    "submissionTime" : "2020-02-18T09:09:46.398GMT", "stageIds" : [ 0, 1, 2 ], "status" : "RUNNING",
-            //    "numTasks" : 12, "numActiveTasks" : 3, "numCompletedTasks" : 9, "numSkippedTasks" : 0,
-            //    "numFailedTasks" : 0, "numKilledTasks" : 0, "numCompletedIndices" : 9, "numActiveStages" : 1,
-            //    "numCompletedStages" : 2, "numSkippedStages" : 0, "numFailedStages" : 0, "killedTasksSummary" : { }
-            //  }]
-            List<Map<String, Object>> jobInfos = new Gson().fromJson(responseJson, List.class);
-            for (Map<String, Object> jobInfo : jobInfos) {
-                if (jobInfo.containsKey(NUM_TASKS)) {
-                    numTasks += new Double((double) jobInfo.get(NUM_TASKS)).intValue();
-                }
-                if (jobInfo.containsKey(NUM_COMPLETED_TASKS)) {
-                    numCompletedTasks += new Double((double) jobInfo.get(NUM_COMPLETED_TASKS)).intValue();
-                }
+            YarnApplicationState etlJobState = report.getYarnApplicationState();
+            switch (etlJobState) {
+                case FINISHED:
+                    status.setState(TEtlState.FINISHED);
+                    break;
+                case FAILED:
+                case KILLED:
+                    status.setState(TEtlState.CANCELLED);
+                    status.setFailMsg("yarn app state: " + etlJobState.toString());
+                    break;
+                default:
+                    // ACCEPTED NEW NEW_SAVING RUNNING SUBMITTED
+                    status.setState(TEtlState.RUNNING);
+                    break;
             }
-            stats.put(NUM_TASKS, String.valueOf(numTasks));
-            stats.put(NUM_COMPLETED_TASKS, String.valueOf(numCompletedTasks));
-        } catch (Exception e) {
-            LOG.warn("get spark app status fail. load job id: {}, error: {}", loadJobId, e);
-            return status;
+
+            status.setTrackingUrl(report.getTrackingUrl());
+            status.setProgress((int)(report.getProgress() * 100));
+        } catch (ApplicationNotFoundException e) {
+            LOG.warn("spark app not found, spark app id: {}, load job id: {}", appId, loadJobId, e);
+            status.setState(TEtlState.CANCELLED);
+            status.setFailMsg(e.getMessage());
+        } catch (YarnException | IOException e) {
+            LOG.warn("yarn application status failed, spark app id: {}, load job id: {}", appId, loadJobId, e);
         } finally {
-            try {
-                if (httpResponse != null) {
-                    httpResponse.close();
-                }
-                if (httpClient != null) {
-                    httpClient.close();
-                }
-            } catch (IOException e) {
-                LOG.warn("close http response or client fail. load job id: {}, error: {}", loadJobId, e);
-            }
+            stopYarnClient(client);
         }
-
-        // counters
 
         return status;
     }
 
-    public void killEtlJob(SparkAppHandle handle) {
-        handle.stop();
+    public void killEtlJob(SparkAppHandle handle, String appId, boolean isYarnMaster) {
+        if (isYarnMaster) {
+            Preconditions.checkNotNull(appId);
+            YarnClient client = startYarnClient();
+            try {
+                try {
+                    client.killApplication(ConverterUtils.toApplicationId(appId));
+                    LOG.info("yarn application -kill {}", appId);
+                } catch (YarnException | IOException e) {
+                    LOG.warn("yarn application kill failed, app id: {}", appId, e);
+                }
+            } finally {
+                stopYarnClient(client);
+            }
+        } else {
+            if (handle != null) {
+                handle.stop();
+            }
+        }
     }
 
     public Map<String, Long> getEtlFilePaths(String outputPath, BrokerDesc brokerDesc) throws Exception {
@@ -256,5 +288,17 @@ public class SparkEtlJobHandler {
         LOG.debug("get spark etl file paths. files map: {}", filePathToSize);
 
         return filePathToSize;
+    }
+
+    private YarnClient startYarnClient() {
+        Configuration conf = new YarnConfiguration();
+        YarnClient client = YarnClient.createYarnClient();
+        client.init(conf);
+        client.start();
+        return client;
+    }
+
+    private void stopYarnClient(YarnClient client) {
+        client.stop();
     }
 }

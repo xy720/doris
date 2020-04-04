@@ -37,6 +37,8 @@ public class SparkEtlCluster extends EtlCluster {
     public static final String BROKER = "broker";
     public static final String SPARK_ARGS = "spark_args";
 
+    private static final String YARN_MASTER = "yarn";
+
     @SerializedName(value = MASTER)
     private String master;
     @SerializedName(value = HDFS_ETL_PATH)
@@ -76,6 +78,10 @@ public class SparkEtlCluster extends EtlCluster {
 
     public SparkEtlCluster getCopiedEtlCluster() {
         return new SparkEtlCluster(name, master, hdfsEtlPath, broker, Maps.newHashMap(sparkArgsMap));
+    }
+
+    public boolean isYarnMaster() {
+        return master.equalsIgnoreCase(YARN_MASTER);
     }
 
     public void update(EtlClusterDesc etlClusterDesc) throws DdlException {
