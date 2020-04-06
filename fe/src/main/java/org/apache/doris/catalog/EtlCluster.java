@@ -32,21 +32,11 @@ import java.util.Map;
 
 public abstract class EtlCluster implements Writable {
     public enum EtlClusterType {
-        SPARK("spark");
-
-        private final String typeName;
-
-        private EtlClusterType(String typeName) {
-            this.typeName = typeName;
-        }
-
-        public String getTypeName() {
-            return typeName;
-        }
+        SPARK;
 
         public static EtlClusterType fromString(String clusterType) {
             for (EtlClusterType type : EtlClusterType.values()) {
-                if (type.getTypeName().equalsIgnoreCase(clusterType)) {
+                if (type.name().equalsIgnoreCase(clusterType)) {
                     return type;
                 }
             }
@@ -100,7 +90,7 @@ public abstract class EtlCluster implements Writable {
         Text.writeString(out, json);
     }
 
-    public static EtlCluster readIn(DataInput in) throws IOException {
+    public static EtlCluster read(DataInput in) throws IOException {
         String json = Text.readString(in);
         return GsonUtils.GSON.fromJson(json, EtlCluster.class);
     }

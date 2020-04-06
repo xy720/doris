@@ -21,7 +21,10 @@ import org.apache.doris.analysis.BrokerDesc;
 import org.apache.doris.catalog.Catalog;
 import org.apache.doris.catalog.Database;
 import org.apache.doris.catalog.OlapTable;
+import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.Config;
+import org.apache.doris.common.DuplicatedRequestException;
+import org.apache.doris.common.LabelAlreadyUsedException;
 import org.apache.doris.common.MetaNotFoundException;
 import org.apache.doris.common.UserException;
 import org.apache.doris.common.util.LogBuilder;
@@ -31,7 +34,9 @@ import org.apache.doris.load.BrokerFileGroup;
 import org.apache.doris.load.BrokerFileGroupAggInfo.FileGroupAggKey;
 import org.apache.doris.load.EtlJobType;
 import org.apache.doris.load.FailMsg;
+import org.apache.doris.service.FrontendOptions;
 import org.apache.doris.thrift.TUniqueId;
+import org.apache.doris.transaction.BeginTransactionException;
 import org.apache.doris.transaction.TransactionState;
 import org.apache.doris.transaction.TransactionState.TxnSourceType;
 import org.apache.doris.transaction.TransactionState.TxnCoordinator;
@@ -42,9 +47,6 @@ import com.google.common.collect.Lists;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-import java.io.DataInput;
-import java.io.DataOutput;
-import java.io.IOException;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -307,25 +309,4 @@ public class BrokerLoadJob extends BulkLoadJob {
         }
         return String.valueOf(value);
     }
-
-    @Override
-    protected void replayTxnAttachment(TransactionState txnState) {
-        if (txnState.getTxnCommitAttachment() == null) {
-            // The txn attachment maybe null when broker load has been cancelled without attachment.
-            // The end log of broker load has been record but the callback id of txnState hasn't been removed
-            // So the callback of txn is executed when log of txn aborted is replayed.
-            return;
-        }
-        unprotectReadEndOperation((LoadJobFinalOperation) txnState.getTxnCommitAttachment());
-    }
-
-    @Override
-    public void write(DataOutput out) throws IOException {
-        super.write(out);
-    }
-
-    public void readFields(DataInput in) throws IOException {
-        super.readFields(in);
-    }
-
 }

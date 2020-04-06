@@ -103,7 +103,7 @@ public class ModifyEtlClusterClause extends AlterClause {
         if (type == null) {
             throw new AnalysisException("Etl cluster type can't be null.");
         }
-        if (!type.equalsIgnoreCase(EtlClusterType.SPARK.getTypeName())) {
+        if (!type.equalsIgnoreCase(EtlClusterType.SPARK.name())) {
             throw new AnalysisException("Only support Spark cluster.");
         }
         clusterType = EtlClusterType.fromString(type);

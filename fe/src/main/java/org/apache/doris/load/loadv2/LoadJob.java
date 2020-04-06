@@ -17,6 +17,7 @@
 
 package org.apache.doris.load.loadv2;
 
+import com.google.gson.annotations.SerializedName;
 import org.apache.doris.analysis.LoadStmt;
 import org.apache.doris.catalog.AuthorizationInfo;
 import org.apache.doris.catalog.Catalog;
@@ -45,6 +46,7 @@ import org.apache.doris.load.Load;
 import org.apache.doris.metric.MetricRepo;
 import org.apache.doris.mysql.privilege.PaloPrivilege;
 import org.apache.doris.mysql.privilege.PrivPredicate;
+import org.apache.doris.persist.gson.GsonUtils;
 import org.apache.doris.qe.ConnectContext;
 import org.apache.doris.qe.Coordinator;
 import org.apache.doris.qe.QeProcessorImpl;
@@ -688,6 +690,9 @@ public abstract class LoadJob extends AbstractTxnStateChangeCallback implements 
                 case CANCELLED:
                     jobInfo.add("ETL:N/A; LOAD:N/A");
                     break;
+                case ETL:
+                    jobInfo.add("ETL:" + progress + "%; LOAD:0%");
+                    break;
                 default:
                     jobInfo.add("ETL:100%; LOAD:" + progress + "%");
                     break;
@@ -704,7 +709,7 @@ public abstract class LoadJob extends AbstractTxnStateChangeCallback implements 
             }
 
             // task info
-            jobInfo.add("cluster:N/A" + "; timeout(s):" + timeoutSecond
+            jobInfo.add("cluster:" + getEtlClusterName() + "; timeout(s):" + timeoutSecond
                                 + "; max_filter_ratio:" + maxFilterRatio);
 
             // error msg
@@ -717,7 +722,7 @@ public abstract class LoadJob extends AbstractTxnStateChangeCallback implements 
             // create time
             jobInfo.add(TimeUtils.longToTimeString(createTimestamp));
             // etl start time
-            jobInfo.add(TimeUtils.longToTimeString(loadStartTimestamp));
+            jobInfo.add(TimeUtils.longToTimeString(getEtlStartTimestamp()));
             // etl end time
             jobInfo.add(TimeUtils.longToTimeString(loadStartTimestamp));
             // load start time
@@ -731,6 +736,14 @@ public abstract class LoadJob extends AbstractTxnStateChangeCallback implements 
         } finally {
             readUnlock();
         }
+    }
+
+    protected String getEtlClusterName() {
+        return "N/A";
+    }
+
+    protected long getEtlStartTimestamp() {
+        return loadStartTimestamp;
     }
 
     public void getJobInfo(Load.JobInfo jobInfo) throws DdlException {
@@ -998,6 +1011,39 @@ public abstract class LoadJob extends AbstractTxnStateChangeCallback implements 
         }
         if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_61) {
             timezone = Text.readString(in);
+        }
+    }
+
+    public void replayUpdateStateInfo(LoadJobStateUpdateInfo info) {}
+
+    public static class LoadJobStateUpdateInfo implements Writable {
+        @SerializedName(value = "job_id")
+        private long jobId;
+        @SerializedName(value = "state")
+        private JobState state;
+
+        public LoadJobStateUpdateInfo(long jobId, JobState state) {
+            this.jobId = jobId;
+            this.state = state;
+        }
+
+        public long getJobId() {
+            return jobId;
+        }
+
+        public JobState getState() {
+            return state;
+        }
+
+        @Override
+        public void write(DataOutput out) throws IOException {
+            String json = GsonUtils.GSON.toJson(this);
+            Text.writeString(out, json);
+        }
+
+        public static LoadJobStateUpdateInfo read(DataInput in) throws IOException {
+            String json = Text.readString(in);
+            return GsonUtils.GSON.fromJson(json, LoadJobStateUpdateInfo.class);
         }
     }
 }

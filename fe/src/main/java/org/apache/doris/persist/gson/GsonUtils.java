@@ -22,6 +22,7 @@ import org.apache.doris.catalog.EtlCluster;
 import org.apache.doris.catalog.HashDistributionInfo;
 import org.apache.doris.catalog.RandomDistributionInfo;
 import org.apache.doris.catalog.ScalarType;
+import org.apache.doris.catalog.SparkEtlCluster;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ArrayListMultimap;
@@ -49,7 +50,6 @@ import com.google.gson.annotations.SerializedName;
 import com.google.gson.reflect.TypeToken;
 import com.google.gson.stream.JsonReader;
 import com.google.gson.stream.JsonWriter;
-import org.apache.doris.catalog.SparkEtlCluster;
 
 import java.io.IOException;
 import java.lang.reflect.Method;

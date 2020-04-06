@@ -41,6 +41,7 @@ import org.apache.doris.load.DeleteInfo;
 import org.apache.doris.load.ExportJob;
 import org.apache.doris.load.LoadErrorHub;
 import org.apache.doris.load.LoadJob;
+import org.apache.doris.load.loadv2.LoadJob.LoadJobStateUpdateInfo;
 import org.apache.doris.load.loadv2.LoadJobFinalOperation;
 import org.apache.doris.load.routineload.RoutineLoadJob;
 import org.apache.doris.master.Checkpoint;
@@ -498,8 +499,13 @@ public class JournalEntity implements Writable {
                 isRead = true;
                 break;
             }
+            case OperationType.OP_UPDATE_LOAD_JOB: {
+                data = LoadJobStateUpdateInfo.read(in);
+                isRead = true;
+                break;
+            }
             case OperationType.OP_ADD_ETL_CLUSTER: {
-                data = EtlCluster.readIn(in);
+                data = EtlCluster.read(in);
                 isRead = true;
                 break;
             }

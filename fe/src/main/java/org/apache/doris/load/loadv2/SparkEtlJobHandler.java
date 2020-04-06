@@ -91,7 +91,7 @@ public class SparkEtlJobHandler {
                 .setMainClass(MAIN_CLASS)
                 .setAppName(String.format(ETL_JOB_NAME, loadLabel))
                 .addFile(configFilePath);
-        // spark args: --jars, --files
+        // spark args: --jars, --files, --queue
         for (Map.Entry<String, String> entry : etlCluster.getSparkArgsMap().entrySet()) {
             launcher.addSparkArg(entry.getKey(), entry.getValue());
         }
@@ -104,36 +104,37 @@ public class SparkEtlJobHandler {
         String errMsg = "start spark app failed. error: ";
         try {
             handle = launcher.startApplication(new SparkAppListener());
-            while (retry++ < GET_APPID_MAX_RETRY) {
-                appId = handle.getAppId();
-                if (appId != null) {
-                    break;
-                }
-
-                // check state and retry
-                state = handle.getState();
-                if (fromSparkState(state) == TEtlState.CANCELLED) {
-                    throw new LoadException(errMsg + "spark app state: " + state.toString());
-                }
-                if (retry >= GET_APPID_MAX_RETRY) {
-                    throw new LoadException(errMsg + "wait too much time for getting appid, spark app state: "
-                                            + state.toString());
-                }
-
-                // log
-                if (retry % 10 == 0) {
-                    LOG.info("spark appid that handle get is null, state: {}, retry times: {}",
-                             state.toString(), retry);
-                }
-                try {
-                    Thread.sleep(1000);
-                } catch (InterruptedException e) {
-                    LOG.warn(e.getMessage());
-                }
-            }
         } catch (IOException e) {
             LOG.warn(errMsg, e);
             throw new LoadException(errMsg + e.getMessage());
+        }
+
+        while (retry++ < GET_APPID_MAX_RETRY) {
+            appId = handle.getAppId();
+            if (appId != null) {
+                break;
+            }
+
+            // check state and retry
+            state = handle.getState();
+            if (fromSparkState(state) == TEtlState.CANCELLED) {
+                throw new LoadException(errMsg + "spark app state: " + state.toString());
+            }
+            if (retry >= GET_APPID_MAX_RETRY) {
+                throw new LoadException(errMsg + "wait too much time for getting appid, spark app state: "
+                                                + state.toString());
+            }
+
+            // log
+            if (retry % 10 == 0) {
+                LOG.info("spark appid that handle get is null, state: {}, retry times: {}",
+                         state.toString(), retry);
+            }
+            try {
+                Thread.sleep(1000);
+            } catch (InterruptedException e) {
+                LOG.warn(e.getMessage());
+            }
         }
 
         // success
@@ -188,7 +189,7 @@ public class SparkEtlJobHandler {
 
         if (isYarnMaster) {
             // state from yarn
-            Preconditions.checkNotNull(appId);
+            Preconditions.checkState(appId != null && !appId.isEmpty());
             YarnClient client = startYarnClient();
             try {
                 ApplicationReport report = client.getApplicationReport(ConverterUtils.toApplicationId(appId));
