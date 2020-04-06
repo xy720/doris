@@ -50,6 +50,8 @@ import com.google.gson.annotations.SerializedName;
 import com.google.gson.reflect.TypeToken;
 import com.google.gson.stream.JsonReader;
 import com.google.gson.stream.JsonWriter;
+import org.apache.doris.load.loadv2.LoadJob.LoadJobStateUpdateInfo;
+import org.apache.doris.load.loadv2.SparkLoadJob.SparkLoadJobStateUpdateInfo;
 
 import java.io.IOException;
 import java.lang.reflect.Method;
@@ -93,6 +95,12 @@ public class GsonUtils {
             .of(EtlCluster.class, "clazz")
             .registerSubtype(SparkEtlCluster.class, SparkEtlCluster.class.getSimpleName());
 
+    // runtime adapter for class "LoadJobStateUpdateInfo"
+    private static RuntimeTypeAdapterFactory<LoadJobStateUpdateInfo> loadJobStateUpdateInfoTypeAdapterFactory
+            = RuntimeTypeAdapterFactory
+            .of(LoadJobStateUpdateInfo.class, "clazz")
+            .registerSubtype(SparkLoadJobStateUpdateInfo.class, SparkLoadJobStateUpdateInfo.class.getSimpleName());
+
     // the builder of GSON instance.
     // Add any other adapters if necessary.
     private static final GsonBuilder GSON_BUILDER = new GsonBuilder()
@@ -103,7 +111,8 @@ public class GsonUtils {
             .registerTypeAdapterFactory(new PostProcessTypeAdapterFactory())
             .registerTypeAdapterFactory(columnTypeAdapterFactory)
             .registerTypeAdapterFactory(distributionInfoTypeAdapterFactory)
-            .registerTypeAdapterFactory(etlClusterTypeAdapterFactory);
+            .registerTypeAdapterFactory(etlClusterTypeAdapterFactory)
+            .registerTypeAdapterFactory(loadJobStateUpdateInfoTypeAdapterFactory);
 
     // this instance is thread-safe.
     public static final Gson GSON = GSON_BUILDER.create();
