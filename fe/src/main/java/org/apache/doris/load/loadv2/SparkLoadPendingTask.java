@@ -47,6 +47,7 @@ import org.apache.doris.load.loadv2.etl.EtlJobConfig.EtlPartition;
 import org.apache.doris.load.loadv2.etl.EtlJobConfig.EtlPartitionInfo;
 import org.apache.doris.load.loadv2.etl.EtlJobConfig.EtlTable;
 
+import org.apache.doris.transaction.TransactionState;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -74,6 +75,7 @@ public class SparkLoadPendingTask extends LoadTask {
     private final long dbId;
     private final String loadLabel;
     private final long loadJobId;
+    private final long transactionId;
     private EtlJobConfig etlJobConfig;
 
     public SparkLoadPendingTask(SparkLoadJob loadTaskCallback,
@@ -88,12 +90,13 @@ public class SparkLoadPendingTask extends LoadTask {
         this.dbId = loadTaskCallback.getDbId();
         this.loadJobId = loadTaskCallback.getId();
         this.loadLabel = loadTaskCallback.getLabel();
+        this.transactionId = loadTaskCallback.getTransactionId();
         this.failMsg = new FailMsg(FailMsg.CancelType.ETL_SUBMIT_FAIL);
     }
 
     @Override
     void executeTask() throws LoadException {
-        LOG.info("begin to execute spark pending task. job: {}", callback.getCallbackId());
+        LOG.info("begin to execute spark pending task. load job id: {}", loadJobId);
         submitEtlJob();
     }
 
@@ -106,7 +109,7 @@ public class SparkLoadPendingTask extends LoadTask {
         // handler submit etl job
         SparkEtlJobHandler handler = new SparkEtlJobHandler();
         handler.submitEtlJob(loadJobId, loadLabel, etlCluster, brokerDesc, configToJson(), sparkAttachment);
-        LOG.info("submit spark etl job success. attachment: {}", sparkAttachment);
+        LOG.info("submit spark etl job success. load job id: {}, attachment: {}", loadJobId, sparkAttachment);
     }
 
     private String configToJson() {
@@ -153,9 +156,16 @@ public class SparkLoadPendingTask extends LoadTask {
                     // partition info
                     EtlPartitionInfo etlPartitionInfo = createEtlPartitionInfo(table,
                                                                                tableIdToPartitionIds.get(tableId));
-
                     etlTable = new EtlTable(etlIndexes, etlPartitionInfo);
                     tables.put(tableId, etlTable);
+
+                    // add table indexes to transaction state
+                    TransactionState txnState = Catalog.getCurrentGlobalTransactionMgr()
+                            .getTransactionState(transactionId);
+                    if (txnState == null) {
+                        throw new LoadException("txn does not exist. id: " + transactionId);
+                    }
+                    txnState.addTableIndexes(table);
                 }
 
                 // file group

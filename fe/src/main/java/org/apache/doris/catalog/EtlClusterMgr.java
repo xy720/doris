@@ -31,6 +31,7 @@ import org.apache.commons.lang.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.locks.ReentrantLock;
@@ -141,6 +142,11 @@ public class EtlClusterMgr {
         }
     }
 
+    // for catalog save image
+    public Collection<EtlCluster> getEtlClusters() {
+        return nameToEtlCluster.values();
+    }
+
     public List<List<String>> getEtlClustersInfo() {
         lock.lock();
         try {
@@ -179,22 +185,21 @@ public class EtlClusterMgr {
                     EtlClusterType cluterType = etlCluster.getType();
                     if (cluterType == EtlClusterType.SPARK) {
                         SparkEtlCluster sparkEtlCluster = (SparkEtlCluster) etlCluster;
-                        result.addRow(Lists.newArrayList(clusterName, cluterType.getTypeName(),
-                                                         SparkEtlCluster.MASTER, sparkEtlCluster.getMaster()));
-                        result.addRow(Lists.newArrayList(clusterName, cluterType.getTypeName(),
-                                                         SparkEtlCluster.HDFS_ETL_PATH,
+                        String type = cluterType.name().toLowerCase();
+                        result.addRow(Lists.newArrayList(clusterName, type, SparkEtlCluster.MASTER,
+                                                         sparkEtlCluster.getMaster()));
+                        result.addRow(Lists.newArrayList(clusterName, type, SparkEtlCluster.HDFS_ETL_PATH,
                                                          sparkEtlCluster.getHdfsEtlPath()));
-                        result.addRow(Lists.newArrayList(clusterName, cluterType.getTypeName(),
-                                                         SparkEtlCluster.BROKER, sparkEtlCluster.getBroker()));
+                        result.addRow(Lists.newArrayList(clusterName, type, SparkEtlCluster.BROKER,
+                                                         sparkEtlCluster.getBroker()));
                         Map<String, String> sparkArgsMap = sparkEtlCluster.getSparkArgsMap();
                         if (!sparkArgsMap.isEmpty()) {
                             List<String> args = Lists.newArrayList();
                             for (Map.Entry<String, String> argEntry : sparkArgsMap.entrySet()) {
                                 args.add(argEntry.getKey() + SparkEtlCluster.EQUAL_SEPARATOR + argEntry.getValue());
                             }
-                            result.addRow(Lists.newArrayList(
-                                    clusterName, cluterType.getTypeName(), SparkEtlCluster.SPARK_ARGS,
-                                    StringUtils.join(args, SparkEtlCluster.SEMICOLON_SEPARATOR)));
+                            result.addRow(Lists.newArrayList(clusterName, type, SparkEtlCluster.SPARK_ARGS,
+                                                             StringUtils.join(args, SparkEtlCluster.SEMICOLON_SEPARATOR)));
                         }
                     }
                 }

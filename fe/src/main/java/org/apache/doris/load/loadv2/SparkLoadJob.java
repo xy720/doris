@@ -17,7 +17,6 @@
 
 package org.apache.doris.load.loadv2;
 
-import com.google.common.base.Joiner;
 import org.apache.doris.analysis.Analyzer;
 import org.apache.doris.analysis.BrokerDesc;
 import org.apache.doris.analysis.DescriptorTable;
@@ -38,23 +37,25 @@ import org.apache.doris.catalog.SparkEtlCluster;
 import org.apache.doris.catalog.Table;
 import org.apache.doris.catalog.Table.TableType;
 import org.apache.doris.catalog.Tablet;
+import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.Config;
 import org.apache.doris.common.DdlException;
+import org.apache.doris.common.DuplicatedRequestException;
+import org.apache.doris.common.LabelAlreadyUsedException;
 import org.apache.doris.common.LoadException;
 import org.apache.doris.common.MetaNotFoundException;
 import org.apache.doris.common.Pair;
 import org.apache.doris.common.UserException;
-import org.apache.doris.common.io.Text;
 import org.apache.doris.common.util.LogBuilder;
 import org.apache.doris.common.util.LogKey;
-import org.apache.doris.common.util.TimeUtils;
 import org.apache.doris.load.BrokerFileGroup;
 import org.apache.doris.load.EtlJobType;
 import org.apache.doris.load.EtlStatus;
+import org.apache.doris.load.FailMsg;
 import org.apache.doris.load.loadv2.etl.EtlJobConfig;
-import org.apache.doris.persist.ReplicaPersistInfo;
 import org.apache.doris.planner.BrokerScanNode;
 import org.apache.doris.planner.PlanNodeId;
+import org.apache.doris.service.FrontendOptions;
 import org.apache.doris.task.AgentBatchTask;
 import org.apache.doris.task.AgentTaskExecutor;
 import org.apache.doris.task.AgentTaskQueue;
@@ -68,8 +69,11 @@ import org.apache.doris.thrift.TFileType;
 import org.apache.doris.thrift.TNetworkAddress;
 import org.apache.doris.thrift.TPriority;
 import org.apache.doris.thrift.TPushType;
-
+import org.apache.doris.transaction.BeginTransactionException;
 import org.apache.doris.transaction.TabletCommitInfo;
+import org.apache.doris.transaction.TabletQuorumFailedException;
+import org.apache.doris.transaction.TransactionState.LoadJobSourceType;
+
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.spark.launcher.SparkAppHandle;
@@ -78,6 +82,7 @@ import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
+import com.google.gson.annotations.SerializedName;
 
 import java.io.DataInput;
 import java.io.DataOutput;
@@ -99,31 +104,30 @@ public class SparkLoadJob extends BulkLoadJob {
     // for global dict
     public static final String BITMAP_DATA_PROPERTY = "bitmap_data";
 
-    private EtlClusterDesc etlClusterDesc;
+    // --- members below persist when job created ---
+    // create from etlClusterDesc
+    private SparkEtlCluster etlCluster;
 
+    // --- members below persist when job state changed to etl or loading ---
     private long etlStartTimestamp = -1;
-    private long etlFinishTimestamp = -1;
-    private long quorumFinishTimestamp = -1;
-
-    // for spark standalone, not persist
-    private SparkAppHandle sparkAppHandle;
     // for spark yarn
-    private String appId;
+    private String appId = "";
     // spark job outputPath
     private String etlOutputPath = "";
-
-    // hivedb.table for global dict
-    // temporary use: one SparkLoadJob has only one table to load
-    private String hiveTableName = "";
-
     // etl file paths
     private Map<String, Pair<String, Long>> tabletMetaToFileInfo = Maps.newHashMap();
 
-    // replica persist info when push task finished
-    private Map<Long, ReplicaPersistInfo> replicaPersistInfos = Maps.newHashMap();
-
-    // not persist
-    private SparkEtlCluster etlCluster;
+    // --- members below not persist ---
+    // temporary use
+    // one SparkLoadJob has only one table to load
+    // hivedb.table for global dict
+    private String hiveTableName = "";
+    private EtlClusterDesc etlClusterDesc;
+    // for spark standalone
+    private SparkAppHandle sparkAppHandle;
+    // for straggler wait long time to commit transaction
+    private long quorumFinishTimestamp = -1;
+    // below for push task
     private Map<Long, Set<Long>> tableToLoadPartitions = Maps.newHashMap();
     private Map<Long, PushBrokerReaderParams> indexToPushBrokerReaderParams = Maps.newHashMap();
     private Map<Long, Integer> indexToSchemaHash = Maps.newHashMap();
@@ -220,6 +224,9 @@ public class SparkLoadJob extends BulkLoadJob {
     protected void setJobProperties(Map<String, String> properties) throws DdlException {
         super.setJobProperties(properties);
 
+        // set etl cluster and broker desc
+        setEtlClusterInfo();
+
         // global dict
         if (properties != null) {
             if (properties.containsKey(BITMAP_DATA_PROPERTY)) {
@@ -228,21 +235,20 @@ public class SparkLoadJob extends BulkLoadJob {
         }
     }
 
-    private void prepareEtlInfos() throws LoadException {
+    /**
+     * merge system conf with load stmt
+     * @throws DdlException
+     */
+    private void setEtlClusterInfo() throws DdlException {
         // etl cluster
         String clusterName = etlClusterDesc.getName();
         EtlCluster oriEtlCluster = Catalog.getCurrentCatalog().getEtlClusterMgr().getEtlCluster(clusterName);
         if (oriEtlCluster == null) {
-            throw new LoadException("Etl cluster does not exist. name: " + clusterName);
+            throw new DdlException("Etl cluster does not exist. name: " + clusterName);
         }
-
         Preconditions.checkState(oriEtlCluster instanceof SparkEtlCluster);
         etlCluster = ((SparkEtlCluster) oriEtlCluster).getCopiedEtlCluster();
-        try {
-            etlCluster.update(etlClusterDesc);
-        } catch (DdlException e) {
-            throw new LoadException(e.getMessage(), e);
-        }
+        etlCluster.update(etlClusterDesc);
 
         // broker desc
         Map<String, String> brokerProperties = Maps.newHashMap();
@@ -256,10 +262,15 @@ public class SparkLoadJob extends BulkLoadJob {
     }
 
     @Override
-    protected void unprotectedExecuteJob() throws LoadException {
-        // merge infos
-        prepareEtlInfos();
+    public void beginTxn()
+            throws LabelAlreadyUsedException, BeginTransactionException, AnalysisException, DuplicatedRequestException {
+       transactionId = Catalog.getCurrentGlobalTransactionMgr()
+               .beginTransaction(dbId, label, null, "FE: " + FrontendOptions.getLocalHostAddress(),
+                                 LoadJobSourceType.FRONTEND, id, timeoutSecond);
+    }
 
+    @Override
+    protected void unprotectedExecuteJob() throws LoadException {
         // create pending task
         LoadTask task = new SparkLoadPendingTask(this, fileGroupAggInfo.getAggKeyToFileGroups(),
                                                  etlCluster, brokerDesc);
@@ -303,29 +314,36 @@ public class SparkLoadJob extends BulkLoadJob {
             appId = attachment.getAppId();
             etlOutputPath = attachment.getOutputPath();
 
-            unprotectedUpdateState(JobState.ETL);
+            executeEtl();
+            // log etl state
+            logUpdateInfo();
         } finally {
             writeUnlock();
         }
     }
 
-    @Override
-    protected void unprotectedUpdateState(JobState jobState) {
-        super.unprotectedUpdateState(jobState);
-
-        if (jobState == JobState.ETL) {
-            executeEtl();
-        }
-    }
-
-    // update etl time and state in spark load job
+    /**
+     * update etl start time and state in spark load job
+     */
     private void executeEtl() {
         etlStartTimestamp = System.currentTimeMillis();
         state = JobState.ETL;
     }
 
+    private boolean checkState(JobState expectState) {
+        readLock();
+        try {
+            if (state == expectState) {
+                return true;
+            }
+            return false;
+        } finally {
+            readUnlock();
+        }
+    }
+
     public void updateEtlStatus() throws Exception {
-        if (state != JobState.ETL) {
+        if (!checkState(JobState.ETL)) {
             return;
         }
 
@@ -364,17 +382,25 @@ public class SparkLoadJob extends BulkLoadJob {
         updateEtlStatusInternal(etlStatus);
 
         // checkDataQuality
+        if (!checkDataQuality()) {
+            cancelJobWithoutCheck(new FailMsg(FailMsg.CancelType.ETL_QUALITY_UNSATISFIED, QUALITY_FAIL_MSG),
+                                  true, true);
+            return;
+        }
 
-        // etl output files
-        Map<String, Long> filePathToSize = handler.getEtlFilePaths(etlOutputPath, brokerDesc);
-
-        updateToLoadingState(etlStatus, filePathToSize);
-
-        // log job etl finish state
+        // get etl output files and update loading state
+        updateToLoadingState(etlStatus, handler.getEtlFilePaths(etlOutputPath, brokerDesc));
+        // log loading state
+        logUpdateInfo();
 
         // create push tasks
         prepareLoadingInfos();
         submitPushTasks();
+    }
+
+    @Override
+    protected boolean checkDataQuality() {
+        return true;
     }
 
     private void updateToLoadingState(EtlStatus etlStatus, Map<String, Long> filePathToSize) throws LoadException {
@@ -388,7 +414,6 @@ public class SparkLoadJob extends BulkLoadJob {
 
             loadingStatus = etlStatus;
             progress = 0;
-            etlFinishTimestamp = System.currentTimeMillis();
             unprotectedUpdateState(JobState.LOADING);
         } catch (Exception e) {
             throw new LoadException("update to loading state fail", e);
@@ -449,114 +474,119 @@ public class SparkLoadJob extends BulkLoadJob {
         Set<Long> totalTablets = Sets.newHashSet();
         db.readLock();
         try {
-            for (Map.Entry<Long, Set<Long>> entry : tableToLoadPartitions.entrySet()) {
-                long tableId = entry.getKey();
-                OlapTable table = (OlapTable) db.getTable(tableId);
-                if (table == null) {
-                    LOG.warn("table does not exist. id: {}", tableId);
-                    continue;
-                }
-
-                Set<Long> partitionIds = entry.getValue();
-                for (long partitionId : partitionIds) {
-                    Partition partition = table.getPartition(partitionId);
-                    if (partition == null) {
-                        LOG.warn("partition does not exist. id: {}", partitionId);
+            writeLock();
+            try {
+                for (Map.Entry<Long, Set<Long>> entry : tableToLoadPartitions.entrySet()) {
+                    long tableId = entry.getKey();
+                    OlapTable table = (OlapTable) db.getTable(tableId);
+                    if (table == null) {
+                        LOG.warn("table does not exist. id: {}", tableId);
                         continue;
                     }
 
-                    hasLoadPartitions = true;
-                    int quorumReplicaNum = table.getPartitionInfo().getReplicationNum(partitionId) / 2 + 1;
+                    Set<Long> partitionIds = entry.getValue();
+                    for (long partitionId : partitionIds) {
+                        Partition partition = table.getPartition(partitionId);
+                        if (partition == null) {
+                            LOG.warn("partition does not exist. id: {}", partitionId);
+                            continue;
+                        }
 
-                    List<MaterializedIndex> indexes = partition.getMaterializedIndices(IndexExtState.ALL);
-                    for (MaterializedIndex index : indexes) {
-                        long indexId = index.getId();
-                        int schemaHash = indexToSchemaHash.get(indexId);
+                        hasLoadPartitions = true;
+                        int quorumReplicaNum = table.getPartitionInfo().getReplicationNum(partitionId) / 2 + 1;
 
-                        int bucket = 0;
-                        for (Tablet tablet : index.getTablets()) {
-                            long tabletId = tablet.getId();
-                            totalTablets.add(tabletId);
-                            Set<Long> tabletAllReplicas = Sets.newHashSet();
-                            Set<Long> tabletFinishedReplicas = Sets.newHashSet();
-                            for (Replica replica : tablet.getReplicas()) {
-                                long replicaId = replica.getId();
-                                tabletAllReplicas.add(replicaId);
-                                if (!tabletToSentReplicas.containsKey(tabletId)
-                                        || !tabletToSentReplicas.get(tabletId).contains(replica.getId())) {
-                                    long taskSignature = Catalog.getCurrentGlobalTransactionMgr()
-                                            .getTransactionIDGenerator().getNextTransactionId();
-                                    PushBrokerReaderParams params = getPushBrokerReaderParams(table, indexId);
-                                    TDescriptorTable tDescriptorTable = params.tDescriptorTable;
-                                    // deep copy TBrokerScanRange because filePath and fileSize will be updated
-                                    // in different tablet push task
-                                    TBrokerScanRange tBrokerScanRange = new TBrokerScanRange(params.tBrokerScanRange);
-                                    TBrokerRangeDesc tBrokerRangeDesc = tBrokerScanRange.getRanges().get(0);
-                                    // update filePath fileSize
-                                    tBrokerRangeDesc.setPath(null);
-                                    tBrokerRangeDesc.setFile_size(-1);
-                                    String tabletMetaStr = String.format("%d.%d.%d.%d.%d", tableId, partitionId,
-                                                                         indexId, bucket++, schemaHash);
-                                    if (tabletMetaToFileInfo.containsKey(tabletMetaStr)) {
-                                        Pair<String, Long> fileInfo = tabletMetaToFileInfo.get(tabletMetaStr);
-                                        tBrokerRangeDesc.setPath(fileInfo.first);
-                                        tBrokerRangeDesc.setFile_size(fileInfo.second);
-                                    }
+                        List<MaterializedIndex> indexes = partition.getMaterializedIndices(IndexExtState.ALL);
+                        for (MaterializedIndex index : indexes) {
+                            long indexId = index.getId();
+                            int schemaHash = indexToSchemaHash.get(indexId);
 
-                                    // update broker address
-
-                                    // timeout
-
-                                    PushTask pushTask = new PushTask(replica.getBackendId(), dbId, tableId, partitionId,
-                                                                     indexId, tabletId, replica.getId(), schemaHash,
-                                                                     0, getId(), TPushType.LOAD_V2,
-                                                                     TPriority.NORMAL, transactionId, taskSignature,
-                                                                     tBrokerScanRange, tDescriptorTable);
-                                    if (AgentTaskQueue.addTask(pushTask)) {
-                                        batchTask.addTask(pushTask);
-
-                                        if (!tabletToSentReplicas.containsKey(tabletId)) {
-                                            tabletToSentReplicas.put(tabletId, Sets.newHashSet());
+                            int bucket = 0;
+                            for (Tablet tablet : index.getTablets()) {
+                                long tabletId = tablet.getId();
+                                totalTablets.add(tabletId);
+                                Set<Long> tabletAllReplicas = Sets.newHashSet();
+                                Set<Long> tabletFinishedReplicas = Sets.newHashSet();
+                                for (Replica replica : tablet.getReplicas()) {
+                                    long replicaId = replica.getId();
+                                    tabletAllReplicas.add(replicaId);
+                                    if (!tabletToSentReplicas.containsKey(tabletId)
+                                            || !tabletToSentReplicas.get(tabletId).contains(replica.getId())) {
+                                        long taskSignature = Catalog.getCurrentGlobalTransactionMgr()
+                                                .getTransactionIDGenerator().getNextTransactionId();
+                                        PushBrokerReaderParams params = getPushBrokerReaderParams(table, indexId);
+                                        TDescriptorTable tDescriptorTable = params.tDescriptorTable;
+                                        // deep copy TBrokerScanRange because filePath and fileSize will be updated
+                                        // in different tablet push task
+                                        TBrokerScanRange tBrokerScanRange = new TBrokerScanRange(params.tBrokerScanRange);
+                                        TBrokerRangeDesc tBrokerRangeDesc = tBrokerScanRange.getRanges().get(0);
+                                        // update filePath fileSize
+                                        tBrokerRangeDesc.setPath(null);
+                                        tBrokerRangeDesc.setFile_size(-1);
+                                        String tabletMetaStr = String.format("%d.%d.%d.%d.%d", tableId, partitionId,
+                                                                             indexId, bucket++, schemaHash);
+                                        if (tabletMetaToFileInfo.containsKey(tabletMetaStr)) {
+                                            Pair<String, Long> fileInfo = tabletMetaToFileInfo.get(tabletMetaStr);
+                                            tBrokerRangeDesc.setPath(fileInfo.first);
+                                            tBrokerRangeDesc.setFile_size(fileInfo.second);
                                         }
-                                        tabletToSentReplicas.get(tabletId).add(replicaId);
+
+                                        // update broker address
+
+                                        // timeout
+
+                                        PushTask pushTask = new PushTask(replica.getBackendId(), dbId, tableId, partitionId,
+                                                                         indexId, tabletId, replica.getId(), schemaHash,
+                                                                         0, getId(), TPushType.LOAD_V2,
+                                                                         TPriority.NORMAL, transactionId, taskSignature,
+                                                                         tBrokerScanRange, tDescriptorTable);
+                                        if (AgentTaskQueue.addTask(pushTask)) {
+                                            batchTask.addTask(pushTask);
+
+                                            if (!tabletToSentReplicas.containsKey(tabletId)) {
+                                                tabletToSentReplicas.put(tabletId, Sets.newHashSet());
+                                            }
+                                            tabletToSentReplicas.get(tabletId).add(replicaId);
+                                        }
+                                    }
+
+                                    if (finishedReplicas.contains(replicaId) && replica.getLastFailedVersion() < 0) {
+                                        tabletFinishedReplicas.add(replicaId);
                                     }
                                 }
 
-                                if (finishedReplicas.contains(replicaId) && replica.getLastFailedVersion() < 0) {
-                                    tabletFinishedReplicas.add(replicaId);
+                                if (tabletAllReplicas.size() == 0) {
+                                    LOG.error("invalid situation. tablet is empty. id: {}", tabletId);
                                 }
-                            }
 
-                            if (tabletAllReplicas.size() == 0) {
-                                LOG.error("invalid situation. tablet is empty. id: {}", tabletId);
-                            }
-
-                            // check tablet push states
-                            if (tabletFinishedReplicas.size() >= quorumReplicaNum) {
-                                quorumTablets.add(tabletId);
-                                if (tabletFinishedReplicas.size() == tabletAllReplicas.size()) {
-                                    fullTablets.add(tabletId);
+                                // check tablet push states
+                                if (tabletFinishedReplicas.size() >= quorumReplicaNum) {
+                                    quorumTablets.add(tabletId);
+                                    if (tabletFinishedReplicas.size() == tabletAllReplicas.size()) {
+                                        fullTablets.add(tabletId);
+                                    }
                                 }
                             }
                         }
                     }
                 }
-            }
 
-            if (batchTask.getTaskNum() > 0) {
-                AgentTaskExecutor.submit(batchTask);
-            }
+                if (batchTask.getTaskNum() > 0) {
+                    AgentTaskExecutor.submit(batchTask);
+                }
 
-            if (!hasLoadPartitions) {
-                String errMsg = new LogBuilder(LogKey.LOAD_JOB, id)
-                        .add("database_id", dbId)
-                        .add("label", label)
-                        .add("error_msg", "all partitions have no load data")
-                        .build();
-                throw new LoadException(errMsg);
-            }
+                if (!hasLoadPartitions) {
+                    String errMsg = new LogBuilder(LogKey.LOAD_JOB, id)
+                            .add("database_id", dbId)
+                            .add("label", label)
+                            .add("error_msg", "all partitions have no load data")
+                            .build();
+                    throw new LoadException(errMsg);
+                }
 
-            return totalTablets;
+                return totalTablets;
+            } finally {
+                writeUnlock();
+            }
         } finally {
             db.readUnlock();
         }
@@ -573,18 +603,11 @@ public class SparkLoadJob extends BulkLoadJob {
         }
     }
 
-    public void addReplicaPersistInfos(ReplicaPersistInfo info) {
-        writeLock();
-        try {
-            if (!replicaPersistInfos.containsKey(info.getReplicaId())) {
-                replicaPersistInfos.put(info.getReplicaId(), info);
-            }
-        } finally {
-            writeUnlock();
-        }
-    }
-
     public void updateLoadingStatus() throws UserException {
+        if (!checkState(JobState.LOADING)) {
+            return;
+        }
+
         // submit push tasks
         Set<Long> totalTablets = submitPushTasks();
 
@@ -593,12 +616,15 @@ public class SparkLoadJob extends BulkLoadJob {
         writeLock();
         try {
             // loading progress
+            // 100: txn status is visible and load has been finished
             progress = fullTablets.size() * 100 / totalTablets.size();
+            if (progress == 100) {
+                progress = 99;
+            }
+
             // quorum finish ts
-            if (quorumTablets.containsAll(totalTablets)) {
-                if (quorumFinishTimestamp < 0) {
-                    quorumFinishTimestamp = System.currentTimeMillis();
-                }
+            if (quorumFinishTimestamp < 0 && quorumTablets.containsAll(totalTablets)) {
+                quorumFinishTimestamp = System.currentTimeMillis();
             }
 
             long stragglerTimeout = Config.load_straggler_wait_second * 1000;
@@ -618,111 +644,124 @@ public class SparkLoadJob extends BulkLoadJob {
     }
 
     private void tryCommitJob() throws UserException {
+        LOG.info(new LogBuilder(LogKey.LOAD_JOB, id)
+                         .add("txn_id", transactionId)
+                         .add("msg", "Load job try to commit txn")
+                         .build());
         Database db = getDb();
-
         db.writeLock();
         try {
-            Catalog.getCurrentGlobalTransactionMgr().commitTransaction(dbId, transactionId, commitInfos);
+            Catalog.getCurrentGlobalTransactionMgr().commitTransaction(
+                    dbId, transactionId, commitInfos,
+                    new SparkLoadJobFinalOperation(id, loadingStatus, progress, etlStartTimestamp, loadStartTimestamp,
+                                              finishTimestamp, state, failMsg));
+        } catch (TabletQuorumFailedException e) {
+            // retry in next loop
         } finally {
             db.writeUnlock();
         }
     }
 
     @Override
-    public List<Comparable> getShowInfo() throws DdlException {
-        readLock();
-        try {
-            // check auth
-            checkAuth("SHOW LOAD");
-            List<Comparable> jobInfo = Lists.newArrayList();
-            // jobId
-            jobInfo.add(id);
-            // label
-            jobInfo.add(label);
-            // state
-            jobInfo.add(state.name());
+    protected void logFinalOperation() {
+        Catalog.getCurrentCatalog().getEditLog().logEndLoadJob(
+                new SparkLoadJobFinalOperation(id, loadingStatus, progress, etlStartTimestamp, loadStartTimestamp,
+                                               finishTimestamp, state, failMsg));
+    }
 
-            // progress
-            switch (state) {
-                case PENDING:
-                    jobInfo.add("ETL:0%; LOAD:0%");
-                    break;
-                case CANCELLED:
-                    jobInfo.add("ETL:N/A; LOAD:N/A");
-                    break;
-                case ETL:
-                    jobInfo.add("ETL:" + progress + "%; LOAD:0%");
-                    break;
-                default:
-                    jobInfo.add("ETL:100%; LOAD:" + progress + "%");
-                    break;
-            }
+    @Override
+    public void unprotectReadEndOperation(LoadJobFinalOperation loadJobFinalOperation) {
+        super.unprotectReadEndOperation(loadJobFinalOperation);
+        SparkLoadJobFinalOperation operation = (SparkLoadJobFinalOperation) loadJobFinalOperation;
+        etlStartTimestamp = operation.getEtlStartTimestamp();
+    }
 
-            // type
-            jobInfo.add(jobType);
+    @Override
+    protected String getEtlClusterName() {
+        return etlCluster.getName();
+    }
 
-            // etl info
-            if (loadingStatus.getCounters().size() == 0) {
-                jobInfo.add("N/A");
-            } else {
-                jobInfo.add(Joiner.on("; ").withKeyValueSeparator("=").join(loadingStatus.getCounters()));
-            }
-
-            // task info
-            jobInfo.add("cluster:" + etlClusterDesc.getName()
-                        + "; timeout(s):" + timeoutSecond
-                        + "; max_filter_ratio:" + maxFilterRatio);
-
-            // error msg
-            if (failMsg == null) {
-                jobInfo.add("N/A");
-            } else {
-                jobInfo.add("type:" + failMsg.getCancelType() + "; msg:" + failMsg.getMsg());
-            }
-
-            // create time
-            jobInfo.add(TimeUtils.longToTimeString(createTimestamp));
-            // etl start time
-            jobInfo.add(TimeUtils.longToTimeString(etlStartTimestamp));
-            // etl end time
-            jobInfo.add(TimeUtils.longToTimeString(etlFinishTimestamp));
-            // load start time
-            jobInfo.add(TimeUtils.longToTimeString(loadStartTimestamp));
-            // load end time
-            jobInfo.add(TimeUtils.longToTimeString(finishTimestamp));
-            // tracking url
-            jobInfo.add(loadingStatus.getTrackingUrl());
-            jobInfo.add(loadStatistic.toJson());
-            return jobInfo;
-        } finally {
-            readUnlock();
-        }
+    @Override
+    protected long getEtlStartTimestamp() {
+        return etlStartTimestamp;
     }
 
     @Override
     public void write(DataOutput out) throws IOException {
         super.write(out);
-        etlClusterDesc.write(out);
-        Text.writeString(out, hiveTableName);
-        // spark handle and outputPath?
-        out.writeInt(tabletMetaToFileInfo.size());
-        for (Map.Entry<String, Pair<String, Long>> entry : tabletMetaToFileInfo.entrySet()) {
-            Text.writeString(out, entry.getKey());
-            Text.writeString(out, entry.getValue().first);
-            out.writeLong(entry.getValue().second);
-        }
-        // TODO: replicaPersistInfos
+        etlCluster.write(out);
     }
 
     public void readFields(DataInput in) throws IOException {
         super.readFields(in);
-        etlClusterDesc = EtlClusterDesc.read(in);
-        hiveTableName = Text.readString(in);
-        int size = in.readInt();
-        for (int i = 0; i < size; i++) {
-            String tabletMetaStr = Text.readString(in);
-            Pair<String, Long> fileInfo = Pair.create(Text.readString(in), in.readLong());
-            tabletMetaToFileInfo.put(tabletMetaStr, fileInfo);
+        etlCluster = (SparkEtlCluster) EtlCluster.read(in);
+    }
+
+    /**
+     * log load job update info when job state changed to etl or loading
+     */
+    private void logUpdateInfo() {
+        SparkLoadJobStateUpdateInfo info = new SparkLoadJobStateUpdateInfo(id, state, etlStartTimestamp, appId,
+                                                                           etlOutputPath, tabletMetaToFileInfo);
+        Catalog.getCurrentCatalog().getEditLog().logUpdateLoadJob(info);
+    }
+
+    @Override
+    public void replayUpdateStateInfo(LoadJobStateUpdateInfo info) {
+        SparkLoadJobStateUpdateInfo sparkJobStateInfo = (SparkLoadJobStateUpdateInfo) info;
+        state = sparkJobStateInfo.getState();
+        etlStartTimestamp = sparkJobStateInfo.getEtlStartTimestamp();
+        appId = sparkJobStateInfo.getAppId();
+        etlOutputPath = sparkJobStateInfo.getEtlOutputPath();
+        tabletMetaToFileInfo = sparkJobStateInfo.getTabletMetaToFileInfo();
+
+        switch (state) {
+            case ETL:
+                // nothing to do
+                break;
+            case LOADING:
+                prepareLoadingInfos();
+                break;
+            default:
+                LOG.warn("replay update load job state info failed, error: wrong state. job id: {}, state: {}",
+                         id, state);
+                break;
+        }
+    }
+
+    public static class SparkLoadJobStateUpdateInfo extends LoadJobStateUpdateInfo {
+        @SerializedName(value = "etl_start_timestamp")
+        private long etlStartTimestamp = -1;
+        @SerializedName(value = "app_id")
+        private String appId = "";
+        @SerializedName(value = "etl_output_path")
+        private String etlOutputPath = "";
+        @SerializedName(value = "tablet_meta_to_file_info")
+        private Map<String, Pair<String, Long>> tabletMetaToFileInfo = Maps.newHashMap();
+
+        public SparkLoadJobStateUpdateInfo(long jobId, JobState state, long etlStartTimestamp, String appId,
+                                           String etlOutputPath, Map<String, Pair<String, Long>> tabletMetaToFileInfo) {
+            super(jobId, state);
+            this.etlStartTimestamp = etlStartTimestamp;
+            this.appId = appId;
+            this.etlOutputPath = etlOutputPath;
+            this.tabletMetaToFileInfo = tabletMetaToFileInfo;
+        }
+
+        public long getEtlStartTimestamp() {
+            return etlStartTimestamp;
+        }
+
+        public String getAppId() {
+            return appId;
+        }
+
+        public String getEtlOutputPath() {
+            return etlOutputPath;
+        }
+
+        public Map<String, Pair<String, Long>> getTabletMetaToFileInfo() {
+            return tabletMetaToFileInfo;
         }
     }
 }

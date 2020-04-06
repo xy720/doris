@@ -31,11 +31,8 @@ import org.apache.doris.catalog.AuthorizationInfo;
 import org.apache.doris.catalog.Catalog;
 import org.apache.doris.catalog.Database;
 import org.apache.doris.catalog.Table;
-import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.DdlException;
-import org.apache.doris.common.DuplicatedRequestException;
 import org.apache.doris.common.FeMetaVersion;
-import org.apache.doris.common.LabelAlreadyUsedException;
 import org.apache.doris.common.MetaNotFoundException;
 import org.apache.doris.common.io.Text;
 import org.apache.doris.common.util.LogBuilder;
@@ -46,8 +43,6 @@ import org.apache.doris.load.FailMsg;
 import org.apache.doris.qe.ConnectContext;
 import org.apache.doris.qe.SessionVariable;
 import org.apache.doris.qe.SqlModeHelper;
-import org.apache.doris.service.FrontendOptions;
-import org.apache.doris.transaction.BeginTransactionException;
 import org.apache.doris.transaction.TabletCommitInfo;
 import org.apache.doris.transaction.TransactionState;
 import org.apache.logging.log4j.LogManager;
@@ -198,15 +193,6 @@ public abstract class BulkLoadJob extends LoadJob {
             }
         }
         return result;
-    }
-
-    @Override
-    public void beginTxn()
-            throws LabelAlreadyUsedException, BeginTransactionException, AnalysisException, DuplicatedRequestException {
-        transactionId = Catalog.getCurrentGlobalTransactionMgr()
-                .beginTransaction(dbId, label, null, "FE: " + FrontendOptions.getLocalHostAddress(),
-                                  TransactionState.LoadJobSourceType.BATCH_LOAD_JOB, id,
-                                  timeoutSecond);
     }
 
     @Override

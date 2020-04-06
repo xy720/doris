@@ -21,6 +21,7 @@ import org.apache.doris.common.io.Text;
 import org.apache.doris.common.io.Writable;
 import org.apache.doris.load.loadv2.LoadJobFinalOperation;
 import org.apache.doris.load.loadv2.MiniLoadTxnCommitAttachment;
+import org.apache.doris.load.loadv2.SparkLoadJobFinalOperation;
 import org.apache.doris.load.routineload.RLTaskTxnCommitAttachment;
 import org.apache.doris.thrift.TTxnCommitAttachment;
 import org.apache.doris.transaction.TransactionState.LoadJobSourceType;
@@ -66,6 +67,8 @@ public abstract class TxnCommitAttachment implements Writable {
             attachment = new LoadJobFinalOperation();
         } else if (type == LoadJobSourceType.BACKEND_STREAMING) {
             attachment = new MiniLoadTxnCommitAttachment();
+        } else if (type == LoadJobSourceType.FRONTEND) {
+            attachment = new SparkLoadJobFinalOperation();
         } else {
             throw new IOException("Unknown load job source type: " + type.name());
         }

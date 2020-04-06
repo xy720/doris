@@ -156,8 +156,9 @@ public class SparkEtlCluster extends EtlCluster {
             }
 
             String[] sparkArgArr = sparkArgStr.split(EQUAL_SEPARATOR);
-            if (sparkArgArr.length != 2 || sparkArgArr[0].isEmpty() || sparkArgArr[1].isEmpty()) {
-                throw new DdlException("Spark args format error, use 'key1=value1,value2;key2=value3'");
+            if (sparkArgArr.length != 2 || sparkArgArr[0].isEmpty() || !sparkArgArr[0].startsWith("--")
+                    || sparkArgArr[1].isEmpty()) {
+                throw new DdlException("Spark args format error, use '--key1=value1,value2;--key2=value3'");
             }
 
             argsMap.put(sparkArgArr[0], sparkArgArr[1]);

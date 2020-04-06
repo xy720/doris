@@ -1424,6 +1424,7 @@ public class Catalog {
             checksum = loadColocateTableIndex(dis, checksum);
             checksum = loadRoutineLoadJobs(dis, checksum);
             checksum = loadLoadJobsV2(dis, checksum);
+            checksum = loadEtlClusters(dis, checksum);
             checksum = loadSmallFiles(dis, checksum);
 
             long remoteChecksum = dis.readLong();
@@ -1806,6 +1807,19 @@ public class Catalog {
         return checksum;
     }
 
+    public long loadEtlClusters(DataInputStream dis, long checksum) throws IOException {
+        if (MetaContext.get().getMetaVersion() >= FeMetaVersion.VERSION_75) {
+            int count = dis.readInt();
+            checksum ^= count;
+            for (long i = 0; i < count; ++i) {
+                EtlCluster etlCluster = EtlCluster.read(dis);
+                etlClusterMgr.replayAddEtlCluster(etlCluster);
+            }
+            LOG.info("finished replay etlClusterMgr from image");
+        }
+        return checksum;
+    }
+
     public long loadSmallFiles(DataInputStream in, long checksum) throws IOException {
         if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_52) {
             smallFileMgr.readFields(in);
@@ -1859,6 +1873,7 @@ public class Catalog {
             checksum = saveColocateTableIndex(dos, checksum);
             checksum = saveRoutineLoadJobs(dos, checksum);
             checksum = saveLoadJobsV2(dos, checksum);
+            checksum = saveEtlClusters(dos, checksum);
             checksum = saveSmallFiles(dos, checksum);
             dos.writeLong(checksum);
         } finally {
@@ -2127,6 +2142,18 @@ public class Catalog {
 
     public long saveLoadJobsV2(DataOutputStream out, long checksum) throws IOException {
         Catalog.getCurrentCatalog().getLoadManager().write(out);
+        return checksum;
+    }
+
+    public long saveEtlClusters(DataOutputStream dos, long checksum) throws IOException {
+        Collection<EtlCluster> etlClusters = etlClusterMgr.getEtlClusters();
+        int size = etlClusters.size();
+        checksum ^= size;
+        dos.writeInt(size);
+
+        for (EtlCluster etlCluster : etlClusters) {
+            etlCluster.write(dos);
+        }
         return checksum;
     }
 
