@@ -340,7 +340,6 @@ public class LoadManager implements Writable{
 
     public void replayUpdateLoadJobStateInfo(LoadJobStateUpdateInfo info) {
         long jobId = info.getJobId();
-        JobState state = info.getState();
         LoadJob job = idToLoadJob.get(jobId);
         if (job == null) {
             LOG.warn("replay update load job state failed. error: job not found, id: {}", jobId);
