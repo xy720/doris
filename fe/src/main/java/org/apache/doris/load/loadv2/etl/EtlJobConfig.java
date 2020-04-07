@@ -153,6 +153,13 @@ public class EtlJobConfig implements Serializable {
                 '}';
     }
 
+	public String getOutputPath() {
+        return outputPath;
+    }
+
+    public void setOutputPath(String outputPath) {
+        this.outputPath = outputPath;
+    }
     public static String getOutputPath(String hdfsEtlPath, long dbId, String loadLabel, long taskSignature) {
         return String.format(ETL_OUTPUT_PATH_FORMAT, hdfsEtlPath, dbId, loadLabel, taskSignature);
     }
@@ -263,6 +270,15 @@ public class EtlJobConfig implements Serializable {
             this.schemaHash = schemaHash;
             this.indexType = indexType;
             this.isBaseIndex = isBaseIndex;
+        }
+
+        public EtlColumn getColumn(String name) {
+            for (EtlColumn column : columns) {
+                if (column.columnName.equals(name)) {
+                    return column;
+                }
+            }
+            return null;
         }
 
         @Override
@@ -379,10 +395,34 @@ public class EtlJobConfig implements Serializable {
     public static class EtlColumnMapping implements Serializable {
         public String functionName;
         public List<String> args;
+        public String expr;
 
         public EtlColumnMapping(String functionName, List<String> args) {
             this.functionName = functionName;
             this.args = args;
+        }
+
+        public EtlColumnMapping(String expr) {
+            this.expr = expr;
+        }
+
+        public String toDescription() {
+            StringBuilder sb = new StringBuilder();
+            if (functionName == null) {
+                sb.append(expr);
+            } else {
+                sb.append(functionName);
+                sb.append("(");
+                if (args != null) {
+                    for (String arg : args) {
+                        sb.append(arg);
+                        sb.append(",");
+                    }
+                }
+                sb.deleteCharAt(sb.length() - 1);
+                sb.append(")");
+            }
+            return sb.toString();
         }
 
         @Override
@@ -390,6 +430,7 @@ public class EtlJobConfig implements Serializable {
             return "EtlColumnMapping{" +
                     "functionName='" + functionName + '\'' +
                     ", args=" + args +
+                    ", expr=" + expr +
                     '}';
         }
     }

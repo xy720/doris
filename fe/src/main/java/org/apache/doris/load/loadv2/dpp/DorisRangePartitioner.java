@@ -24,22 +24,27 @@ import java.io.Serializable;
 import java.util.List;
 
 public class DorisRangePartitioner extends Partitioner {
-    private int partitionNum;
+    private static final String UNPARTITIONED_TYPE = "UNPARTITIONED";
+    private EtlJobConfig.EtlPartitionInfo partitionInfo;
     private List<PartitionRangeKey> partitionRangeKeys;
     List<Integer> partitionKeyIndexes;
     public DorisRangePartitioner(EtlJobConfig.EtlPartitionInfo partitionInfo,
                                  List<Integer> partitionKeyIndexes,
                                  List<PartitionRangeKey> partitionRangeKeys) {
-        partitionNum = partitionInfo.partitions.size();
+        this.partitionInfo = partitionInfo;
         this.partitionKeyIndexes = partitionKeyIndexes;
         this.partitionRangeKeys = partitionRangeKeys;
     }
 
     public int numPartitions() {
-        return partitionNum;
+        return partitionInfo.partitions.size();
     }
 
     public int getPartition(Object var1) {
+        if (partitionInfo.partitionType != null
+                && partitionInfo.partitionType.equalsIgnoreCase(UNPARTITIONED_TYPE)) {
+            return 0;
+        }
         DppColumns key = (DppColumns)var1;
         // get the partition columns from key as partition key
         DppColumns partitionKey = new DppColumns(key, partitionKeyIndexes);
