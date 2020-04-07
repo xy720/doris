@@ -882,7 +882,10 @@ public final class SparkDpp implements java.io.Serializable {
                     if (Strings.isNullOrEmpty(fileGroup.hiveTableName)) {
                         fileGroupDataframe = loadDataFromFilePaths(spark, baseIndex, filePaths, fileGroup, dstTableSchema);
                     } else {
-                        fileGroupDataframe = loadDataFromHiveTable(spark, fileGroup.hiveTableName);
+                        String taskId = etlJobConfig.outputPath.substring(etlJobConfig.outputPath.lastIndexOf("/") + 1);
+                        String dorisIntermediateHiveTable = String.format(EtlJobConfig.DORIS_INTERMEDIATE_HIVE_TABLE_NAME,
+                                tableId, taskId);
+                        fileGroupDataframe = loadDataFromHiveTable(spark, dorisIntermediateHiveTable);
                     }
                     if (fileGroupDataframe == null) {
                         System.err.println("no data for file file group:" + fileGroup);
