@@ -628,9 +628,9 @@ public class SparkLoadJob extends BulkLoadJob {
                 quorumFinishTimestamp = System.currentTimeMillis();
             }
 
+            // if all replicas are finished or stay in quorum finished for long time, try to commit it.
             long stragglerTimeout = Config.load_straggler_wait_second * 1000;
-            // if all tablets are finished or stay in quorum finished for long time, try to commit it.
-            if (System.currentTimeMillis() - quorumFinishTimestamp > stragglerTimeout
+            if ((quorumFinishTimestamp > 0 && System.currentTimeMillis() - quorumFinishTimestamp > stragglerTimeout)
                     || fullTablets.containsAll(totalTablets)) {
                 canCommitJob = true;
             }
@@ -707,14 +707,15 @@ public class SparkLoadJob extends BulkLoadJob {
      */
     private void logUpdateStateInfo() {
         SparkLoadJobStateUpdateInfo info = new SparkLoadJobStateUpdateInfo(
-                id, state, etlStartTimestamp, appId, etlOutputPath, loadStartTimestamp, tabletMetaToFileInfo);
+                id, state, transactionId, etlStartTimestamp, appId, etlOutputPath,
+                loadStartTimestamp, tabletMetaToFileInfo);
         Catalog.getCurrentCatalog().getEditLog().logUpdateLoadJob(info);
     }
 
     @Override
     public void replayUpdateStateInfo(LoadJobStateUpdateInfo info) {
+        super.replayUpdateStateInfo(info);
         SparkLoadJobStateUpdateInfo sparkJobStateInfo = (SparkLoadJobStateUpdateInfo) info;
-        state = sparkJobStateInfo.getState();
         etlStartTimestamp = sparkJobStateInfo.getEtlStartTimestamp();
         appId = sparkJobStateInfo.getAppId();
         etlOutputPath = sparkJobStateInfo.getEtlOutputPath();
@@ -747,10 +748,10 @@ public class SparkLoadJob extends BulkLoadJob {
         @SerializedName(value = "tablet_meta_to_file_info")
         private Map<String, Pair<String, Long>> tabletMetaToFileInfo = Maps.newHashMap();
 
-        public SparkLoadJobStateUpdateInfo(long jobId, JobState state, long etlStartTimestamp, String appId,
-                                           String etlOutputPath, long loadStartTimestamp,
+        public SparkLoadJobStateUpdateInfo(long jobId, JobState state, long transactionId, long etlStartTimestamp,
+                                           String appId, String etlOutputPath, long loadStartTimestamp,
                                            Map<String, Pair<String, Long>> tabletMetaToFileInfo) {
-            super(jobId, state);
+            super(jobId, state, transactionId);
             this.etlStartTimestamp = etlStartTimestamp;
             this.appId = appId;
             this.etlOutputPath = etlOutputPath;
