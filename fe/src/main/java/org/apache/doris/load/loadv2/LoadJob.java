@@ -1014,17 +1014,23 @@ public abstract class LoadJob extends AbstractTxnStateChangeCallback implements 
         }
     }
 
-    public void replayUpdateStateInfo(LoadJobStateUpdateInfo info) {}
+    public void replayUpdateStateInfo(LoadJobStateUpdateInfo info) {
+        state = info.getState();
+        transactionId = info.getTransactionId();
+    }
 
     public static class LoadJobStateUpdateInfo implements Writable {
         @SerializedName(value = "job_id")
         private long jobId;
         @SerializedName(value = "state")
         private JobState state;
+        @SerializedName(value = "transaction_id")
+        private long transactionId;
 
-        public LoadJobStateUpdateInfo(long jobId, JobState state) {
+        public LoadJobStateUpdateInfo(long jobId, JobState state, long transactionId) {
             this.jobId = jobId;
             this.state = state;
+            this.transactionId = transactionId;
         }
 
         public long getJobId() {
@@ -1033,6 +1039,10 @@ public abstract class LoadJob extends AbstractTxnStateChangeCallback implements 
 
         public JobState getState() {
             return state;
+        }
+
+        public long getTransactionId() {
+            return transactionId;
         }
 
         @Override
