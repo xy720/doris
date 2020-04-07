@@ -409,6 +409,9 @@ public class SparkLoadJob extends BulkLoadJob {
         try {
             for (Map.Entry<String, Long> entry : filePathToSize.entrySet()) {
                 String filePath = entry.getKey();
+                if (!filePath.endsWith(EtlJobConfig.ETL_OUTPUT_FILE_FORMAT)) {
+                    continue;
+                }
                 String tabletMetaStr = EtlJobConfig.getTabletMetaStr(filePath);
                 tabletMetaToFileInfo.put(tabletMetaStr, Pair.create(filePath, entry.getValue()));
             }
@@ -417,7 +420,8 @@ public class SparkLoadJob extends BulkLoadJob {
             progress = 0;
             unprotectedUpdateState(JobState.LOADING);
         } catch (Exception e) {
-            throw new LoadException("update to loading state fail", e);
+            LOG.warn("update to loading state failed. job id: {}", id, e);
+            throw new LoadException(e.getMessage(), e);
         } finally {
             writeUnlock();
         }

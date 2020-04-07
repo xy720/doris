@@ -401,9 +401,10 @@ public class LoadManager implements Writable{
                     try {
                         ((SparkLoadJob) job).updateEtlStatus();
                     } catch (UserException e) {
+                        LOG.warn("update load job etl status failed. job id: {}", job.getId(), e);
                         job.cancelJobWithoutCheck(new FailMsg(ETL_RUN_FAIL, e.getMessage()), true, true);
                     } catch (Exception e) {
-                        LOG.warn("update load job etl status fail. error: {}", e);
+                        LOG.warn("update load job etl status failed. job id: {}", job.getId(), e);
                     }
                 });
     }
@@ -415,9 +416,10 @@ public class LoadManager implements Writable{
                     try {
                         ((SparkLoadJob) job).updateLoadingStatus();
                     } catch (UserException e) {
+                        LOG.warn("update load job loading status failed. job id: {}", job.getId(), e);
                         job.cancelJobWithoutCheck(new FailMsg(LOAD_RUN_FAIL, e.getMessage()), true, true);
                     } catch (Exception e) {
-                        LOG.warn("update load job loading status fail. error: {}", e);
+                        LOG.warn("update load job loading status failed. job id: {}", job.getId(), e);
                     }
                 });
     }
