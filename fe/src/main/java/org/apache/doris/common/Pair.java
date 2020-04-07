@@ -17,6 +17,8 @@
 
 package org.apache.doris.common;
 
+import com.google.gson.annotations.SerializedName;
+
 import java.util.Comparator;
 
 /**
@@ -25,7 +27,9 @@ import java.util.Comparator;
 public class Pair<F, S> {
     public static PairComparator<Pair<?, Comparable>> PAIR_VALUE_COMPARATOR = new PairComparator<>();
 
+    @SerializedName(value = "first")
     public F first;
+    @SerializedName(value = "second")
     public S second;
 
     public Pair(F first, S second) {

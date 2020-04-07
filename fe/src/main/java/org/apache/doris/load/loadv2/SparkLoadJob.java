@@ -317,7 +317,7 @@ public class SparkLoadJob extends BulkLoadJob {
 
             executeEtl();
             // log etl state
-            logUpdateInfo();
+            logUpdateStateInfo();
         } finally {
             writeUnlock();
         }
@@ -392,7 +392,7 @@ public class SparkLoadJob extends BulkLoadJob {
         // get etl output files and update loading state
         updateToLoadingState(etlStatus, handler.getEtlFilePaths(etlOutputPath, brokerDesc));
         // log loading state
-        logUpdateInfo();
+        logUpdateStateInfo();
 
         // create push tasks
         prepareLoadingInfos();
@@ -654,27 +654,13 @@ public class SparkLoadJob extends BulkLoadJob {
         try {
             Catalog.getCurrentGlobalTransactionMgr().commitTransaction(
                     dbId, transactionId, commitInfos,
-                    new SparkLoadJobFinalOperation(id, loadingStatus, progress, etlStartTimestamp, loadStartTimestamp,
+                    new LoadJobFinalOperation(id, loadingStatus, progress, loadStartTimestamp,
                                               finishTimestamp, state, failMsg));
         } catch (TabletQuorumFailedException e) {
             // retry in next loop
         } finally {
             db.writeUnlock();
         }
-    }
-
-    @Override
-    protected void logFinalOperation() {
-        Catalog.getCurrentCatalog().getEditLog().logEndLoadJob(
-                new SparkLoadJobFinalOperation(id, loadingStatus, progress, etlStartTimestamp, loadStartTimestamp,
-                                               finishTimestamp, state, failMsg));
-    }
-
-    @Override
-    public void unprotectReadEndOperation(LoadJobFinalOperation loadJobFinalOperation) {
-        super.unprotectReadEndOperation(loadJobFinalOperation);
-        SparkLoadJobFinalOperation operation = (SparkLoadJobFinalOperation) loadJobFinalOperation;
-        etlStartTimestamp = operation.getEtlStartTimestamp();
     }
 
     @Override
@@ -719,9 +705,9 @@ public class SparkLoadJob extends BulkLoadJob {
     /**
      * log load job update info when job state changed to etl or loading
      */
-    private void logUpdateInfo() {
-        SparkLoadJobStateUpdateInfo info = new SparkLoadJobStateUpdateInfo(id, state, etlStartTimestamp, appId,
-                                                                           etlOutputPath, tabletMetaToFileInfo);
+    private void logUpdateStateInfo() {
+        SparkLoadJobStateUpdateInfo info = new SparkLoadJobStateUpdateInfo(
+                id, state, etlStartTimestamp, appId, etlOutputPath, loadStartTimestamp, tabletMetaToFileInfo);
         Catalog.getCurrentCatalog().getEditLog().logUpdateLoadJob(info);
     }
 
@@ -732,6 +718,7 @@ public class SparkLoadJob extends BulkLoadJob {
         etlStartTimestamp = sparkJobStateInfo.getEtlStartTimestamp();
         appId = sparkJobStateInfo.getAppId();
         etlOutputPath = sparkJobStateInfo.getEtlOutputPath();
+        loadStartTimestamp = sparkJobStateInfo.getLoadStartTimestamp();
         tabletMetaToFileInfo = sparkJobStateInfo.getTabletMetaToFileInfo();
 
         switch (state) {
@@ -755,15 +742,19 @@ public class SparkLoadJob extends BulkLoadJob {
         private String appId = "";
         @SerializedName(value = "etl_output_path")
         private String etlOutputPath = "";
+        @SerializedName(value = "load_start_timestamp")
+        private long loadStartTimestamp = -1;
         @SerializedName(value = "tablet_meta_to_file_info")
         private Map<String, Pair<String, Long>> tabletMetaToFileInfo = Maps.newHashMap();
 
         public SparkLoadJobStateUpdateInfo(long jobId, JobState state, long etlStartTimestamp, String appId,
-                                           String etlOutputPath, Map<String, Pair<String, Long>> tabletMetaToFileInfo) {
+                                           String etlOutputPath, long loadStartTimestamp,
+                                           Map<String, Pair<String, Long>> tabletMetaToFileInfo) {
             super(jobId, state);
             this.etlStartTimestamp = etlStartTimestamp;
             this.appId = appId;
             this.etlOutputPath = etlOutputPath;
+            this.loadStartTimestamp = loadStartTimestamp;
             this.tabletMetaToFileInfo = tabletMetaToFileInfo;
         }
 
@@ -777,6 +768,10 @@ public class SparkLoadJob extends BulkLoadJob {
 
         public String getEtlOutputPath() {
             return etlOutputPath;
+        }
+
+        public long getLoadStartTimestamp() {
+            return loadStartTimestamp;
         }
 
         public Map<String, Pair<String, Long>> getTabletMetaToFileInfo() {
