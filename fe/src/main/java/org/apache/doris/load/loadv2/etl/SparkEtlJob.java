@@ -108,8 +108,9 @@ public class SparkEtlJob {
         }
     }
 
-    private void processDataFromPaths() {
-        SparkDpp sparkDpp = new SparkDpp(etlJobConfig);
+    private void processDpp(SparkSession spark) {
+        SparkDpp sparkDpp = new SparkDpp(spark, etlJobConfig);
+        sparkDpp.init();
         sparkDpp.doDpp();
     }
 
@@ -164,7 +165,7 @@ public class SparkEtlJob {
          */
     }
 
-    private void processDataFromHiveTable() {
+    private void processDataFromHiveTable(SparkSession spark) {
         // only one table
         long tableId = -1;
         EtlTable table = null;
@@ -174,19 +175,19 @@ public class SparkEtlJob {
             break;
         }
 
-        SparkSession spark = SparkSession.builder().appName("Spark Etl").getOrCreate();
-
         // build global dict and and encode source hive table
         buildGlobalDictAndEncodeSourceTable(table, tableId, spark);
 
         // data partition sort and aggregation
+        processDpp(spark);
     }
 
     private void processData() {
+        SparkSession spark = SparkSession.builder().master("local").getOrCreate();
         if (hasBitMapColumns) {
-            processDataFromHiveTable();
+            processDataFromHiveTable(spark);
         } else {
-            processDataFromPaths();
+            processDpp(spark);
         }
     }
 

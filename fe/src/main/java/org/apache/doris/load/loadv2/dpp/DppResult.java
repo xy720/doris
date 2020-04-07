@@ -19,12 +19,15 @@ package org.apache.doris.load.loadv2.dpp;
 
 import com.google.gson.annotations.SerializedName;
 
+import java.io.Serializable;
 
-
-public class DppResult {
+public class DppResult implements Serializable {
     @SerializedName("is_success")
     boolean isSuccess;
 
     @SerializedName("failed_reason")
     String failedReason;
+
+    @SerializedName("invalid_row_number")
+    long invalidRowNumber;
 }

@@ -18,6 +18,7 @@
 package org.apache.doris.load.loadv2;
 
 import org.apache.doris.analysis.BrokerDesc;
+import org.apache.doris.analysis.ImportColumnDesc;
 import org.apache.doris.analysis.LiteralExpr;
 import org.apache.doris.catalog.Catalog;
 import org.apache.doris.catalog.Column;
@@ -401,6 +402,13 @@ public class SparkLoadPendingTask extends LoadTask {
                 columnMappings.put(entry.getKey(),
                                    new EtlColumnMapping(entry.getValue().first, entry.getValue().second));
             }
+        }
+        for (ImportColumnDesc columnDesc : fileGroup.getColumnExprList()) {
+            if (columnDesc.isColumn() || columnMappings.containsKey(columnDesc.getColumnName())) {
+                continue;
+            }
+            // the left must be column expr
+            columnMappings.put(columnDesc.getColumnName(), new EtlColumnMapping(columnDesc.getExpr().toSql()));
         }
 
         // partition ids
