@@ -46,6 +46,7 @@ import org.apache.doris.common.LoadException;
 import org.apache.doris.common.MetaNotFoundException;
 import org.apache.doris.common.Pair;
 import org.apache.doris.common.UserException;
+import org.apache.doris.common.io.Text;
 import org.apache.doris.common.util.LogBuilder;
 import org.apache.doris.common.util.LogKey;
 import org.apache.doris.load.BrokerFileGroup;
@@ -104,17 +105,17 @@ public class SparkLoadJob extends BulkLoadJob {
     // for global dict
     public static final String BITMAP_DATA_PROPERTY = "bitmap_data";
 
-    // --- members below persist when job created ---
-    // create from etlClusterDesc
+    // --- members below need persist ---
+    // create from etlClusterDesc when job created
     private SparkEtlCluster etlCluster;
-
-    // --- members below persist when job state changed to etl or loading ---
+    // members below updated when job state changed to etl
     private long etlStartTimestamp = -1;
     // for spark yarn
     private String appId = "";
     // spark job outputPath
     private String etlOutputPath = "";
-    // etl file paths
+    // members below updated when job state changed to loading
+    // { tableId.partitionId.indexId.bucket.schemaHash -> (etlFilePath, etlFileSize) }
     private Map<String, Pair<String, Long>> tabletMetaToFileInfo = Maps.newHashMap();
 
     // --- members below not persist ---
@@ -690,11 +691,29 @@ public class SparkLoadJob extends BulkLoadJob {
     public void write(DataOutput out) throws IOException {
         super.write(out);
         etlCluster.write(out);
+        out.writeLong(etlStartTimestamp);
+        Text.writeString(out, appId);
+        Text.writeString(out, etlOutputPath);
+        out.writeInt(tabletMetaToFileInfo.size());
+        for (Map.Entry<String, Pair<String, Long>> entry : tabletMetaToFileInfo.entrySet()) {
+            Text.writeString(out, entry.getKey());
+            Text.writeString(out, entry.getValue().first);
+            out.writeLong(entry.getValue().second);
+        }
     }
 
     public void readFields(DataInput in) throws IOException {
         super.readFields(in);
         etlCluster = (SparkEtlCluster) EtlCluster.read(in);
+        etlStartTimestamp = in.readLong();
+        appId = Text.readString(in);
+        etlOutputPath = Text.readString(in);
+        int size = in.readInt();
+        for (int i = 0; i < size; i++) {
+            String tabletMetaStr = Text.readString(in);
+            Pair<String, Long> fileInfo = Pair.create(Text.readString(in), in.readLong());
+            tabletMetaToFileInfo.put(tabletMetaStr, fileInfo);
+        }
     }
 
     /**
