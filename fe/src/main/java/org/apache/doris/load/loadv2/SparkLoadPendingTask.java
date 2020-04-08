@@ -44,6 +44,7 @@ import org.apache.doris.load.loadv2.etl.EtlJobConfig.EtlColumn;
 import org.apache.doris.load.loadv2.etl.EtlJobConfig.EtlColumnMapping;
 import org.apache.doris.load.loadv2.etl.EtlJobConfig.EtlFileGroup;
 import org.apache.doris.load.loadv2.etl.EtlJobConfig.EtlIndex;
+import org.apache.doris.load.loadv2.etl.EtlJobConfig.EtlJobProperty;
 import org.apache.doris.load.loadv2.etl.EtlJobConfig.EtlPartition;
 import org.apache.doris.load.loadv2.etl.EtlJobConfig.EtlPartitionInfo;
 import org.apache.doris.load.loadv2.etl.EtlJobConfig.EtlTable;
@@ -174,13 +175,17 @@ public class SparkLoadPendingTask extends LoadTask {
                     etlTable.addFileGroup(createEtlFileGroup(fileGroup, tableIdToPartitionIds.get(tableId)));
                 }
             }
-
-            String outputFilePattern = loadLabel + "." + EtlJobConfig.ETL_OUTPUT_FILE_NAME_NO_LABEL_SUFFIX_FORMAT
-                    + "." + EtlJobConfig.ETL_OUTPUT_FILE_FORMAT;
-            etlJobConfig = new EtlJobConfig(tables, outputFilePattern, loadLabel);
         } finally {
             db.readUnlock();
         }
+
+        String outputFilePattern = loadLabel + "." + EtlJobConfig.ETL_OUTPUT_FILE_NAME_NO_LABEL_SUFFIX_FORMAT
+                + "." + EtlJobConfig.ETL_OUTPUT_FILE_FORMAT;
+        // strictMode timezone properties
+        EtlJobProperty properties = new EtlJobProperty();
+        properties.strictMode = ((LoadJob) callback).strictMode;
+        properties.timezone = ((LoadJob) callback).timezone;
+        etlJobConfig = new EtlJobConfig(tables, outputFilePattern, loadLabel, properties);
     }
 
     private void prepareTablePartitionInfos(Database db, Map<Long, Set<Long>> tableIdToPartitionIds,
