@@ -1017,6 +1017,7 @@ public abstract class LoadJob extends AbstractTxnStateChangeCallback implements 
     public void replayUpdateStateInfo(LoadJobStateUpdateInfo info) {
         state = info.getState();
         transactionId = info.getTransactionId();
+        loadStartTimestamp = info.getLoadStartTimestamp();
     }
 
     public static class LoadJobStateUpdateInfo implements Writable {
@@ -1026,11 +1027,14 @@ public abstract class LoadJob extends AbstractTxnStateChangeCallback implements 
         private JobState state;
         @SerializedName(value = "transaction_id")
         private long transactionId;
+        @SerializedName(value = "load_start_timestamp")
+        private long loadStartTimestamp;
 
-        public LoadJobStateUpdateInfo(long jobId, JobState state, long transactionId) {
+        public LoadJobStateUpdateInfo(long jobId, JobState state, long transactionId, long loadStartTimestamp) {
             this.jobId = jobId;
             this.state = state;
             this.transactionId = transactionId;
+            this.loadStartTimestamp = loadStartTimestamp;
         }
 
         public long getJobId() {
@@ -1043,6 +1047,10 @@ public abstract class LoadJob extends AbstractTxnStateChangeCallback implements 
 
         public long getTransactionId() {
             return transactionId;
+        }
+
+        public long getLoadStartTimestamp() {
+            return loadStartTimestamp;
         }
 
         @Override

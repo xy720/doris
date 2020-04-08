@@ -17,6 +17,8 @@
 
 package org.apache.doris.load.loadv2;
 
+import com.google.gson.Gson;
+import com.google.gson.JsonSyntaxException;
 import org.apache.doris.PaloFe;
 import org.apache.doris.analysis.BrokerDesc;
 import org.apache.doris.catalog.SparkEtlCluster;
@@ -25,6 +27,7 @@ import org.apache.doris.common.UserException;
 import org.apache.doris.common.util.BrokerUtil;
 import org.apache.doris.common.util.Util;
 import org.apache.doris.load.EtlStatus;
+import org.apache.doris.load.loadv2.dpp.DppResult;
 import org.apache.doris.load.loadv2.etl.EtlJobConfig;
 import org.apache.doris.thrift.TBrokerFileStatus;
 import org.apache.doris.thrift.TEtlState;
@@ -169,7 +172,7 @@ public class SparkEtlJobHandler {
         } catch (IOException e) {
             Util.deleteDirectory(configDir);
             String errMsg = "create config file error. job: " + loadJobId;
-            LOG.warn(errMsg);
+            LOG.warn(errMsg, e);
             throw new LoadException(errMsg);
         } finally {
             if (bw != null) {
@@ -184,7 +187,8 @@ public class SparkEtlJobHandler {
         return configFilePath;
     }
 
-    public EtlStatus getEtlJobStatus(SparkAppHandle handle, String appId, long loadJobId, boolean isYarnMaster) {
+    public EtlStatus getEtlJobStatus(SparkAppHandle handle, String appId, long loadJobId, boolean isYarnMaster,
+                                     String etlOutputPath, BrokerDesc brokerDesc) {
         EtlStatus status = new EtlStatus();
 
         if (isYarnMaster) {
@@ -227,9 +231,22 @@ public class SparkEtlJobHandler {
             LOG.info("spark app id: {}, load job id: {}, app state: {}", appId, loadJobId, state);
         }
 
-        // delete config file
         if (status.getState() == TEtlState.FINISHED || status.getState() == TEtlState.CANCELLED) {
+            // delete config file
             deleteConfigFile(loadJobId);
+
+            // get dpp result
+            String dppResultFilePath = EtlJobConfig.getDppResultFilePath(etlOutputPath);
+            try {
+                String dppResultStr = BrokerUtil.readBrokerFile(dppResultFilePath, brokerDesc);
+                DppResult dppResult = new Gson().fromJson(dppResultStr, DppResult.class);
+                status.setDppResult(dppResult);
+                if (status.getState() == TEtlState.CANCELLED) {
+                    status.setFailMsg(dppResult.failedReason);
+                }
+            } catch (UserException | JsonSyntaxException e) {
+                LOG.warn("read broker file failed, path: {}", dppResultFilePath, e);
+            }
         }
 
         return status;

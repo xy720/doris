@@ -564,11 +564,6 @@ public class BrokerScanNode extends LoadScanNode {
         }
         return output.toString();
     }
-
-    public TBrokerScanRangeParams getTBrokerScanRangeParams(int index) {
-        return paramCreateContexts.get(index).params;
-    }
-
 }
 
 

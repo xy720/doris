@@ -54,6 +54,7 @@ import org.apache.doris.common.util.LogKey;
 import org.apache.doris.load.EtlJobType;
 import org.apache.doris.load.EtlStatus;
 import org.apache.doris.load.FailMsg;
+import org.apache.doris.load.loadv2.dpp.DppResult;
 import org.apache.doris.load.loadv2.etl.EtlJobConfig;
 import org.apache.doris.planner.PlanNodeId;
 import org.apache.doris.planner.ScanNode;
@@ -74,6 +75,7 @@ import org.apache.doris.thrift.TPlanNode;
 import org.apache.doris.thrift.TPriority;
 import org.apache.doris.thrift.TPushType;
 import org.apache.doris.thrift.TScanRangeLocations;
+import org.apache.doris.thrift.TUniqueId;
 import org.apache.doris.transaction.BeginTransactionException;
 import org.apache.doris.transaction.TabletCommitInfo;
 import org.apache.doris.transaction.TabletQuorumFailedException;
@@ -399,7 +401,8 @@ public class SparkLoadJob extends BulkLoadJob {
 
         // get etl status
         SparkEtlJobHandler handler = new SparkEtlJobHandler();
-        EtlStatus status = handler.getEtlJobStatus(sparkAppHandle, appId, id, etlCluster.isYarnMaster());
+        EtlStatus status = handler.getEtlJobStatus(sparkAppHandle, appId, id, etlCluster.isYarnMaster(),
+                                                   etlOutputPath, brokerDesc);
         switch (status.getState()) {
             case RUNNING:
                 updateEtlStatusInternal(status);
@@ -423,6 +426,20 @@ public class SparkLoadJob extends BulkLoadJob {
             if (!etlCluster.isYarnMaster()) {
                 loadingStatus.setTrackingUrl(appId);
             }
+
+            // update load statis and counters
+            DppResult dppResult = etlStatus.getDppResult();
+            if (dppResult != null) {
+                loadStatistic.fileNum = (int) dppResult.fileNumber;
+                loadStatistic.totalFileSizeB = dppResult.fileSize;
+                TUniqueId zeroId = new TUniqueId(0, 0);
+                loadStatistic.initLoad(zeroId, Sets.newHashSet(zeroId));
+                loadStatistic.updateLoad(zeroId, zeroId, dppResult.scannedRows);
+
+                Map<String, String> counters = loadingStatus.getCounters();
+                counters.put(DPP_NORMAL_ALL, String.valueOf(dppResult.normalRows));
+                counters.put(DPP_ABNORMAL_ALL, String.valueOf(dppResult.abnormalRows));
+            }
         } finally {
             writeUnlock();
         }
@@ -445,11 +462,6 @@ public class SparkLoadJob extends BulkLoadJob {
         // create push tasks
         prepareLoadingInfos();
         submitPushTasks();
-    }
-
-    @Override
-    protected boolean checkDataQuality() {
-        return true;
     }
 
     private void updateToLoadingState(EtlStatus etlStatus, Map<String, Long> filePathToSize) throws LoadException {
@@ -776,7 +788,6 @@ public class SparkLoadJob extends BulkLoadJob {
         etlStartTimestamp = sparkJobStateInfo.getEtlStartTimestamp();
         appId = sparkJobStateInfo.getAppId();
         etlOutputPath = sparkJobStateInfo.getEtlOutputPath();
-        loadStartTimestamp = sparkJobStateInfo.getLoadStartTimestamp();
         tabletMetaToFileInfo = sparkJobStateInfo.getTabletMetaToFileInfo();
 
         switch (state) {
@@ -795,24 +806,21 @@ public class SparkLoadJob extends BulkLoadJob {
 
     public static class SparkLoadJobStateUpdateInfo extends LoadJobStateUpdateInfo {
         @SerializedName(value = "etl_start_timestamp")
-        private long etlStartTimestamp = -1;
+        private long etlStartTimestamp;
         @SerializedName(value = "app_id")
-        private String appId = "";
+        private String appId;
         @SerializedName(value = "etl_output_path")
-        private String etlOutputPath = "";
-        @SerializedName(value = "load_start_timestamp")
-        private long loadStartTimestamp = -1;
+        private String etlOutputPath;
         @SerializedName(value = "tablet_meta_to_file_info")
-        private Map<String, Pair<String, Long>> tabletMetaToFileInfo = Maps.newHashMap();
+        private Map<String, Pair<String, Long>> tabletMetaToFileInfo;
 
         public SparkLoadJobStateUpdateInfo(long jobId, JobState state, long transactionId, long etlStartTimestamp,
                                            String appId, String etlOutputPath, long loadStartTimestamp,
                                            Map<String, Pair<String, Long>> tabletMetaToFileInfo) {
-            super(jobId, state, transactionId);
+            super(jobId, state, transactionId, loadStartTimestamp);
             this.etlStartTimestamp = etlStartTimestamp;
             this.appId = appId;
             this.etlOutputPath = etlOutputPath;
-            this.loadStartTimestamp = loadStartTimestamp;
             this.tabletMetaToFileInfo = tabletMetaToFileInfo;
         }
 
@@ -826,10 +834,6 @@ public class SparkLoadJob extends BulkLoadJob {
 
         public String getEtlOutputPath() {
             return etlOutputPath;
-        }
-
-        public long getLoadStartTimestamp() {
-            return loadStartTimestamp;
         }
 
         public Map<String, Pair<String, Long>> getTabletMetaToFileInfo() {
