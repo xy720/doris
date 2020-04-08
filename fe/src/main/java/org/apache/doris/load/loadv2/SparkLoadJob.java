@@ -21,7 +21,9 @@ import org.apache.doris.analysis.Analyzer;
 import org.apache.doris.analysis.BrokerDesc;
 import org.apache.doris.analysis.DescriptorTable;
 import org.apache.doris.analysis.EtlClusterDesc;
+import org.apache.doris.analysis.Expr;
 import org.apache.doris.analysis.SlotDescriptor;
+import org.apache.doris.analysis.SlotRef;
 import org.apache.doris.analysis.TupleDescriptor;
 import org.apache.doris.catalog.Catalog;
 import org.apache.doris.catalog.Column;
@@ -32,10 +34,10 @@ import org.apache.doris.catalog.MaterializedIndex;
 import org.apache.doris.catalog.MaterializedIndex.IndexExtState;
 import org.apache.doris.catalog.OlapTable;
 import org.apache.doris.catalog.Partition;
+import org.apache.doris.catalog.PrimitiveType;
 import org.apache.doris.catalog.Replica;
+import org.apache.doris.catalog.ScalarType;
 import org.apache.doris.catalog.SparkEtlCluster;
-import org.apache.doris.catalog.Table;
-import org.apache.doris.catalog.Table.TableType;
 import org.apache.doris.catalog.Tablet;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.Config;
@@ -49,27 +51,29 @@ import org.apache.doris.common.UserException;
 import org.apache.doris.common.io.Text;
 import org.apache.doris.common.util.LogBuilder;
 import org.apache.doris.common.util.LogKey;
-import org.apache.doris.load.BrokerFileGroup;
 import org.apache.doris.load.EtlJobType;
 import org.apache.doris.load.EtlStatus;
 import org.apache.doris.load.FailMsg;
 import org.apache.doris.load.loadv2.etl.EtlJobConfig;
-import org.apache.doris.planner.BrokerScanNode;
 import org.apache.doris.planner.PlanNodeId;
+import org.apache.doris.planner.ScanNode;
 import org.apache.doris.service.FrontendOptions;
+import org.apache.doris.system.Backend;
 import org.apache.doris.task.AgentBatchTask;
 import org.apache.doris.task.AgentTaskExecutor;
 import org.apache.doris.task.AgentTaskQueue;
 import org.apache.doris.task.PushTask;
-import org.apache.doris.thrift.TBrokerFileStatus;
 import org.apache.doris.thrift.TBrokerRangeDesc;
 import org.apache.doris.thrift.TBrokerScanRange;
+import org.apache.doris.thrift.TBrokerScanRangeParams;
 import org.apache.doris.thrift.TDescriptorTable;
 import org.apache.doris.thrift.TFileFormatType;
 import org.apache.doris.thrift.TFileType;
 import org.apache.doris.thrift.TNetworkAddress;
+import org.apache.doris.thrift.TPlanNode;
 import org.apache.doris.thrift.TPriority;
 import org.apache.doris.thrift.TPushType;
+import org.apache.doris.thrift.TScanRangeLocations;
 import org.apache.doris.transaction.BeginTransactionException;
 import org.apache.doris.transaction.TabletCommitInfo;
 import org.apache.doris.transaction.TabletQuorumFailedException;
@@ -97,7 +101,7 @@ import java.util.Set;
  * Step1: SparkLoadPendingTask will be created by unprotectedExecuteJob method and submit spark etl job.
  * Step2: LoadEtlChecker will check spark etl job status periodly and submit push tasks when spark etl job is finished.
  * Step3: LoadLoadingChecker will check loading status periodly and commit transaction when push tasks are finished.
- * Step4: CommitAndPublicTxn will be called by updateLoadingStatus method when push tasks are finished.
+ * Step4: CommitTxn will be called by updateLoadingStatus method when push tasks are finished.
  */
 public class SparkLoadJob extends BulkLoadJob {
     private static final Logger LOG = LogManager.getLogger(SparkLoadJob.class);
@@ -130,77 +134,122 @@ public class SparkLoadJob extends BulkLoadJob {
     private long quorumFinishTimestamp = -1;
     // below for push task
     private Map<Long, Set<Long>> tableToLoadPartitions = Maps.newHashMap();
-    private Map<Long, PushBrokerReaderParams> indexToPushBrokerReaderParams = Maps.newHashMap();
+    private Map<Long, PushBrokerScannerParams> indexToPushBrokerReaderParams = Maps.newHashMap();
     private Map<Long, Integer> indexToSchemaHash = Maps.newHashMap();
     private Map<Long, Set<Long>> tabletToSentReplicas = Maps.newHashMap();
     private Set<Long> finishedReplicas = Sets.newHashSet();
     private Set<Long> quorumTablets = Sets.newHashSet();
     private Set<Long> fullTablets = Sets.newHashSet();
 
-    private static class PushBrokerReaderParams {
+    private static class PushBrokerScannerParams {
         TBrokerScanRange tBrokerScanRange;
         TDescriptorTable tDescriptorTable;
 
         public void init(List<Column> columns, BrokerDesc brokerDesc) throws UserException {
-            Analyzer analyzer = new Analyzer(Catalog.getInstance(), null);
-            DescriptorTable descTable = analyzer.getDescTbl();
-
+            Analyzer analyzer = new Analyzer(null, null);
             // Generate tuple descriptor
-            TupleDescriptor tupleDesc = descTable.createTupleDescriptor();
+            DescriptorTable descTable = analyzer.getDescTbl();
+            TupleDescriptor destTupleDesc = descTable.createTupleDescriptor();
             // use index schema to fill the descriptor table
-            for (Column col : columns) {
-                SlotDescriptor slotDesc = descTable.addSlotDescriptor(tupleDesc);
-                slotDesc.setIsMaterialized(true);
-                slotDesc.setColumn(col);
-                if (col.isAllowNull()) {
-                    slotDesc.setIsNullable(true);
+            for (Column column : columns) {
+                SlotDescriptor destSlotDesc = descTable.addSlotDescriptor(destTupleDesc);
+                destSlotDesc.setIsMaterialized(true);
+                destSlotDesc.setColumn(column);
+                if (column.isAllowNull()) {
+                    destSlotDesc.setIsNullable(true);
                 } else {
-                    slotDesc.setIsNullable(false);
+                    destSlotDesc.setIsNullable(false);
                 }
             }
-
-            // Broker scan node
-            String tmpFilePath = "file1";
-            long tmpFileSize = 1;
-            List<String> columnNames = Lists.newArrayList();
-            for (Column column : columns) {
-                columnNames.add(column.getName());
-            }
-            List<List<TBrokerFileStatus>> fileStatusesList = Lists.newArrayList();
-            fileStatusesList.add(Lists.newArrayList());
-            fileStatusesList.get(0).add(new TBrokerFileStatus(tmpFilePath, false, tmpFileSize, false));
-            List<BrokerFileGroup> fileGroups = Lists.newArrayList();
-            fileGroups.add(new BrokerFileGroup(Lists.newArrayList(tmpFilePath), columnNames,
-                                               EtlJobConfig.ETL_OUTPUT_FILE_FORMAT));
-            Table indexTable = new Table(-1, "index", TableType.OLAP, columns);
-            PlanNodeId planNodeId = new PlanNodeId(0);
-            BrokerScanNode scanNode = new BrokerScanNode(planNodeId, tupleDesc, "BrokerScanNode",
-                                                         fileStatusesList, fileStatusesList.size());
-            scanNode.setLoadInfo(-1, -1, indexTable, brokerDesc, fileGroups, false);
+            // Push broker scan node
+            PushBrokerScanNode scanNode = new PushBrokerScanNode(destTupleDesc);
+            scanNode.setLoadInfo(columns, brokerDesc);
             scanNode.init(analyzer);
-            scanNode.finalize(analyzer);
-
-            tBrokerScanRange = new TBrokerScanRange();
-            tBrokerScanRange.setParams(scanNode.getTBrokerScanRangeParams(0));
-            // broker address
-            FsBroker fsBroker = Catalog.getCurrentCatalog().getBrokerMgr().getAnyBroker(brokerDesc.getName());
-            tBrokerScanRange.setBroker_addresses(Lists.newArrayList(new TNetworkAddress(fsBroker.ip, fsBroker.port)));
-            // broker range desc
-            TBrokerRangeDesc tBrokerRangeDesc = new TBrokerRangeDesc();
-            tBrokerRangeDesc.setFile_type(TFileType.FILE_BROKER);
-            tBrokerRangeDesc.setFormat_type(TFileFormatType.FORMAT_PARQUET);
-            tBrokerRangeDesc.setSplittable(false);
-            tBrokerRangeDesc.setStart_offset(0);
-            tBrokerRangeDesc.setSize(-1);
-            // update for each tablet
-            tBrokerRangeDesc.setPath(tmpFilePath);
-            tBrokerRangeDesc.setFile_size(tmpFileSize);
-            tBrokerScanRange.setRanges(Lists.newArrayList(tBrokerRangeDesc));
+            tBrokerScanRange = scanNode.getTBrokerScanRange();
 
             // descTable
             descTable.computeMemLayout();
             tDescriptorTable = descTable.toThrift();
         }
+    }
+
+    private static class PushBrokerScanNode extends ScanNode {
+        private TBrokerScanRange tBrokerScanRange;
+        private List<Column> columns;
+        private BrokerDesc brokerDesc;
+
+        public PushBrokerScanNode(TupleDescriptor destTupleDesc) {
+            super(new PlanNodeId(0), destTupleDesc, "PushBrokerScanNode");
+            this.tBrokerScanRange = new TBrokerScanRange();
+        }
+
+        public void setLoadInfo(List<Column> columns, BrokerDesc brokerDesc) {
+            this.columns = columns;
+            this.brokerDesc = brokerDesc;
+        }
+
+        public void init(Analyzer analyzer) throws UserException {
+            super.init(analyzer);
+
+            // scan range params
+            TBrokerScanRangeParams params = new TBrokerScanRangeParams();
+            params.setStrict_mode(false);
+            params.setProperties(brokerDesc.getProperties());
+            TupleDescriptor srcTupleDesc = analyzer.getDescTbl().createTupleDescriptor();
+            Map<String, SlotDescriptor> srcSlotDescByName = Maps.newHashMap();
+            for (Column column : columns) {
+                SlotDescriptor srcSlotDesc = analyzer.getDescTbl().addSlotDescriptor(srcTupleDesc);
+                srcSlotDesc.setType(ScalarType.createType(PrimitiveType.VARCHAR));
+                srcSlotDesc.setIsMaterialized(true);
+                srcSlotDesc.setIsNullable(true);
+                srcSlotDesc.setColumn(new Column(column.getName(), PrimitiveType.VARCHAR));
+                params.addToSrc_slot_ids(srcSlotDesc.getId().asInt());
+                srcSlotDescByName.put(column.getName(), srcSlotDesc);
+            }
+
+            TupleDescriptor destTupleDesc = desc;
+            Map<Integer, Integer> destSidToSrcSidWithoutTrans = Maps.newHashMap();
+            for (SlotDescriptor destSlotDesc : destTupleDesc.getSlots()) {
+                if (!destSlotDesc.isMaterialized()) {
+                    continue;
+                }
+
+                SlotDescriptor srcSlotDesc = srcSlotDescByName.get(destSlotDesc.getColumn().getName());
+                destSidToSrcSidWithoutTrans.put(destSlotDesc.getId().asInt(), srcSlotDesc.getId().asInt());
+                Expr expr = new SlotRef(srcSlotDesc);
+                expr = castToSlot(destSlotDesc, expr);
+                params.putToExpr_of_dest_slot(destSlotDesc.getId().asInt(), expr.treeToThrift());
+            }
+            params.setDest_sid_to_src_sid_without_trans(destSidToSrcSidWithoutTrans);
+            params.setSrc_tuple_id(srcTupleDesc.getId().asInt());
+            params.setDest_tuple_id(destTupleDesc.getId().asInt());
+            tBrokerScanRange.setParams(params);
+
+            // broker address updated for each replica
+            tBrokerScanRange.setBroker_addresses(Lists.newArrayList());
+
+            // broker range desc
+            TBrokerRangeDesc tBrokerRangeDesc = new TBrokerRangeDesc();
+            tBrokerScanRange.setRanges(Lists.newArrayList(tBrokerRangeDesc));
+            tBrokerRangeDesc.setFile_type(TFileType.FILE_BROKER);
+            tBrokerRangeDesc.setFormat_type(TFileFormatType.FORMAT_PARQUET);
+            tBrokerRangeDesc.setSplittable(false);
+            tBrokerRangeDesc.setStart_offset(0);
+            tBrokerRangeDesc.setSize(-1);
+            // path and file size updated for each replica
+        }
+
+        public TBrokerScanRange getTBrokerScanRange() {
+            return tBrokerScanRange;
+        }
+
+        @Override
+        public List<TScanRangeLocations> getScanRangeLocations(long maxScanRangeLength) {
+            return null;
+        }
+
+        @Override
+        protected void toThrift(TPlanNode msg) {}
     }
 
     // only for log replay
@@ -381,7 +430,6 @@ public class SparkLoadJob extends BulkLoadJob {
 
     private void processEtlFinish(EtlStatus etlStatus, SparkEtlJobHandler handler) throws Exception {
         updateEtlStatusInternal(etlStatus);
-
         // checkDataQuality
         if (!checkDataQuality()) {
             cancelJobWithoutCheck(new FailMsg(FailMsg.CancelType.ETL_QUALITY_UNSATISFIED, QUALITY_FAIL_MSG),
@@ -451,11 +499,11 @@ public class SparkLoadJob extends BulkLoadJob {
         }
     }
 
-    private PushBrokerReaderParams getPushBrokerReaderParams(OlapTable table, long indexId) throws UserException {
+    private PushBrokerScannerParams getPushBrokerReaderParams(OlapTable table, long indexId) throws UserException {
         if (!indexToPushBrokerReaderParams.containsKey(indexId)) {
-            PushBrokerReaderParams pushBrokerReaderParams = new PushBrokerReaderParams();
-            pushBrokerReaderParams.init(table.getSchemaByIndexId(indexId), brokerDesc);
-            indexToPushBrokerReaderParams.put(indexId, pushBrokerReaderParams);
+            PushBrokerScannerParams pushBrokerScannerParams = new PushBrokerScannerParams();
+            pushBrokerScannerParams.init(table.getSchemaByIndexId(indexId), brokerDesc);
+            indexToPushBrokerReaderParams.put(indexId, pushBrokerScannerParams);
         }
         return indexToPushBrokerReaderParams.get(indexId);
     }
@@ -516,15 +564,16 @@ public class SparkLoadJob extends BulkLoadJob {
                                     tabletAllReplicas.add(replicaId);
                                     if (!tabletToSentReplicas.containsKey(tabletId)
                                             || !tabletToSentReplicas.get(tabletId).contains(replica.getId())) {
+                                        long backendId = replica.getBackendId();
                                         long taskSignature = Catalog.getCurrentGlobalTransactionMgr()
                                                 .getTransactionIDGenerator().getNextTransactionId();
-                                        PushBrokerReaderParams params = getPushBrokerReaderParams(table, indexId);
-                                        TDescriptorTable tDescriptorTable = params.tDescriptorTable;
+
+                                        PushBrokerScannerParams params = getPushBrokerReaderParams(table, indexId);
                                         // deep copy TBrokerScanRange because filePath and fileSize will be updated
                                         // in different tablet push task
                                         TBrokerScanRange tBrokerScanRange = new TBrokerScanRange(params.tBrokerScanRange);
-                                        TBrokerRangeDesc tBrokerRangeDesc = tBrokerScanRange.getRanges().get(0);
                                         // update filePath fileSize
+                                        TBrokerRangeDesc tBrokerRangeDesc = tBrokerScanRange.getRanges().get(0);
                                         tBrokerRangeDesc.setPath(null);
                                         tBrokerRangeDesc.setFile_size(-1);
                                         String tabletMetaStr = String.format("%d.%d.%d.%d.%d", tableId, partitionId,
@@ -536,14 +585,18 @@ public class SparkLoadJob extends BulkLoadJob {
                                         }
 
                                         // update broker address
-
-                                        // timeout
+                                        Backend backend = Catalog.getCurrentCatalog().getCurrentSystemInfo()
+                                                .getBackend(backendId);
+                                        FsBroker fsBroker = Catalog.getCurrentCatalog().getBrokerMgr().getBroker(
+                                                brokerDesc.getName(), backend.getHost());
+                                        tBrokerScanRange.getBroker_addresses().add(
+                                                new TNetworkAddress(fsBroker.ip, fsBroker.port));
 
                                         PushTask pushTask = new PushTask(replica.getBackendId(), dbId, tableId, partitionId,
                                                                          indexId, tabletId, replica.getId(), schemaHash,
                                                                          0, getId(), TPushType.LOAD_V2,
                                                                          TPriority.NORMAL, transactionId, taskSignature,
-                                                                         tBrokerScanRange, tDescriptorTable);
+                                                                         tBrokerScanRange, params.tDescriptorTable);
                                         if (AgentTaskQueue.addTask(pushTask)) {
                                             batchTask.addTask(pushTask);
 
