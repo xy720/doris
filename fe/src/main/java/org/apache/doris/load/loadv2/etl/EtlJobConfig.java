@@ -110,7 +110,11 @@ import java.util.Map;
  *  },
  * 	"output_path": "hdfs://hdfs_host:port/user/output/10003/label1/1582599203397",
  * 	"output_file_pattern": "label1.%d.%d.%d.%d.%d.parquet",
- * 	"label": "label0"
+ * 	"label": "label0",
+ * 	"properties": {
+ * 	    "strict_mode": false,
+ * 	    "timezone": "Asia/Shanghai"
+ * 	}
  * }
  */
 public class EtlJobConfig implements Serializable {
@@ -133,14 +137,16 @@ public class EtlJobConfig implements Serializable {
     public String outputPath;
     public String outputFilePattern;
     public String label;
+    public EtlJobProperty properties;
     // private EtlErrorHubInfo hubInfo;
 
-    public EtlJobConfig(Map<Long, EtlTable> tables, String outputFilePattern, String label) {
+    public EtlJobConfig(Map<Long, EtlTable> tables, String outputFilePattern, String label, EtlJobProperty properties) {
         this.tables = tables;
         // set outputPath when submit etl job
         this.outputPath = null;
         this.outputFilePattern = outputFilePattern;
         this.label = label;
+        this.properties = properties;
     }
 
     @Override
@@ -150,6 +156,7 @@ public class EtlJobConfig implements Serializable {
                 ", outputPath='" + outputPath + '\'' +
                 ", outputFilePattern='" + outputFilePattern + '\'' +
                 ", label='" + label + '\'' +
+                ", properties=" + properties +
                 '}';
     }
 
@@ -157,9 +164,6 @@ public class EtlJobConfig implements Serializable {
         return outputPath;
     }
 
-    public void setOutputPath(String outputPath) {
-        this.outputPath = outputPath;
-    }
     public static String getOutputPath(String hdfsEtlPath, long dbId, String loadLabel, long taskSignature) {
         return String.format(ETL_OUTPUT_PATH_FORMAT, hdfsEtlPath, dbId, loadLabel, taskSignature);
     }
@@ -175,6 +179,19 @@ public class EtlJobConfig implements Serializable {
 
         // tableId.partitionId.indexId.bucket.schemaHash
         return fileName.substring(fileName.indexOf(".") + 1, fileName.lastIndexOf("."));
+    }
+
+    public static class EtlJobProperty implements Serializable {
+        public boolean strictMode;
+        public String timezone;
+
+        @Override
+        public String toString() {
+            return "EtlJobProperty{" +
+                    "strictMode=" + strictMode +
+                    ", timezone='" + timezone + '\'' +
+                    '}';
+        }
     }
 
     public static class EtlTable implements Serializable {
