@@ -22,6 +22,7 @@ import com.google.common.collect.Lists;
 import com.google.gson.Gson;
 import org.apache.doris.common.UserException;
 import org.apache.doris.load.loadv2.etl.EtlJobConfig;
+import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.parquet.column.ParquetProperties;
@@ -87,7 +88,11 @@ public final class SparkDpp implements java.io.Serializable {
     private static final String DPP_RESULT_FILE = "dpp_result.json";
     private static final String BITMAP_TYPE = "bitmap";
     private EtlJobConfig etlJobConfig = null;
-    private LongAccumulator invalidRowAcc = null;
+    private LongAccumulator abnormalRowAcc = null;
+    private LongAccumulator unselectedRowAcc = null;
+    private LongAccumulator scannedRowsAcc = null;
+    private LongAccumulator fileNumberAcc = null;
+    private LongAccumulator fileSizeAcc = null;
     private DppResult dppResult;
     private SparkSession spark = null;
     private UserDefinedAggregateFunction bitmap_union = null;
@@ -99,6 +104,11 @@ public final class SparkDpp implements java.io.Serializable {
 
     public void init() {
         bitmap_union = spark.udf().register("bitmap_union", new BitmapUnion());
+        abnormalRowAcc = spark.sparkContext().longAccumulator();
+        unselectedRowAcc = spark.sparkContext().longAccumulator();
+        scannedRowsAcc = spark.sparkContext().longAccumulator();
+        fileNumberAcc = spark.sparkContext().longAccumulator();
+        fileSizeAcc = spark.sparkContext().longAccumulator();
     }
 
     private Class dataTypeToClass(DataType dataType) {
@@ -566,7 +576,7 @@ public final class SparkDpp implements java.io.Serializable {
                 int pid = partitioner.getPartition(key);
                 if (!validPartitionIndex.contains(pid)) {
                     System.err.println("invalid partition for row:" + row + ", pid:" + pid);
-                    invalidRowAcc.add(1);
+                    abnormalRowAcc.add(1);
                 } else {
                     long hashValue = getHashValue(row, distributeColumns, dstTableSchema);
                     int bucketId = (int) ((hashValue & 0xffffffff) % partitionInfo.partitions.get(pid).bucketNum);
@@ -672,7 +682,8 @@ public final class SparkDpp implements java.io.Serializable {
     private Dataset<Row> loadDataFromPath(SparkSession spark,
                                           EtlJobConfig.EtlFileGroup fileGroup,
                                           String fileUrl,
-                                          EtlJobConfig.EtlIndex baseIndex) throws UserException {
+                                          EtlJobConfig.EtlIndex baseIndex,
+                                          StructType dstTableSchema) throws UserException {
         List<String> columnValueFromPath = parseColumnsFromPath(fileUrl, fileGroup.columnsFromPath);
         List<String> dataSrcColumns = fileGroup.fileFieldNames;
         if (dataSrcColumns == null) {
@@ -682,6 +693,10 @@ public final class SparkDpp implements java.io.Serializable {
             for (EtlJobConfig.EtlColumn column : baseIndex.columns) {
                 dataSrcColumns.add(column.columnName);
             }
+        }
+        List<String> dstTableNames = new ArrayList<>();
+        for (EtlJobConfig.EtlColumn column : baseIndex.columns) {
+            dstTableNames.add(column.columnName);
         }
         List<String> srcColumnsWithColumnsFromPath = new ArrayList<>();
         srcColumnsWithColumnsFromPath.addAll(dataSrcColumns);
@@ -695,37 +710,100 @@ public final class SparkDpp implements java.io.Serializable {
         // TODO: support parquet file and orc file
         JavaRDD<Row> rowRDD = sourceDataRdd.flatMap(
                 record -> {
+                    scannedRowsAcc.add(1);
                     String[] attributes = record.split(fileGroup.columnSeparator);
                     List<Row> result = new ArrayList<>();
                     if (attributes.length != columnSize) {
-                        invalidRowAcc.add(1);
+                        abnormalRowAcc.add(1);
                         System.err.println("invalid src schema, data columns:"
                                 + attributes.length + ", file group columns:"
                                 + columnSize + ", row:" + record);
                     } else {
+                        boolean validRow = true;
                         for (int i = 0; i < attributes.length; ++i) {
                             if (attributes[i].equals(NULL_FLAG)) {
                                 if (baseIndex.columns.get(i).isAllowNull) {
                                     attributes[i] = null;
                                 } else {
-                                    invalidRowAcc.add(1);
+                                    abnormalRowAcc.add(1);
                                     System.err.println("colunm:" + i + " can not be null. row:" + record);
-                                    return null;
+                                    validRow = false;
+                                    break;
+                                }
+                            }
+                            boolean isStrictMode = (boolean)etlJobConfig.properties.strictMode;
+                            if (isStrictMode) {
+                                StructField field = srcSchema.apply(i);
+                                if (dstTableNames.contains(field.name())) {
+                                    DataType type = dstTableSchema.apply(field.name()).dataType();
+                                    if (!type.equals(DataTypes.StringType)) {
+                                        if (type.equals(DataTypes.ShortType)) {
+                                            try{
+                                                Short value = Short.parseShort(attributes[i]);
+                                            } catch (NumberFormatException e) {
+                                                abnormalRowAcc.add(1);
+                                                validRow = false;
+                                                break;
+                                            }
+                                        } else if (type.equals(DataTypes.IntegerType)) {
+                                            try {
+                                                Integer value = Integer.parseInt(attributes[i]);
+                                            } catch (NumberFormatException e) {
+                                                abnormalRowAcc.add(1);
+                                                validRow = false;
+                                                break;
+                                            }
+                                        } else if (type.equals(DataTypes.LongType)) {
+                                            try {
+                                                Long value = Long.parseLong(attributes[i]);
+                                            } catch (NumberFormatException e) {
+                                                abnormalRowAcc.add(1);
+                                                validRow = false;
+                                                break;
+                                            }
+                                        } else if (type.equals(DataTypes.FloatType)) {
+                                            try {
+                                                Float value = Float.parseFloat(attributes[i]);
+                                            } catch (NumberFormatException e) {
+                                                abnormalRowAcc.add(1);
+                                                validRow = false;
+                                                break;
+                                            }
+                                        } else if (type.equals(DataTypes.DoubleType)) {
+                                            try {
+                                                Double value = Double.parseDouble(attributes[i]);
+                                            } catch (NumberFormatException e) {
+                                                abnormalRowAcc.add(1);
+                                                validRow = false;
+                                                break;
+                                            }
+                                        } else if (type.equals(DataTypes.DateType)) {
+                                            try {
+                                                long value = Date.parse(attributes[i]);
+                                            } catch (IllegalArgumentException e) {
+                                                abnormalRowAcc.add(1);
+                                                validRow = false;
+                                                break;
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
-                        Row row = null;
-                        if (fileGroup.columnsFromPath == null) {
-                            row = RowFactory.create(attributes);
-                        } else {
-                            // process columns from path
-                            // append columns from path to the tail
-                            List<String> columnAttributes = new ArrayList<>();
-                            columnAttributes.addAll(Arrays.asList(attributes));
-                            columnAttributes.addAll(columnValueFromPath);
-                            row = RowFactory.create(columnAttributes.toArray());
+                        if (validRow) {
+                            Row row = null;
+                            if (fileGroup.columnsFromPath == null) {
+                                row = RowFactory.create(attributes);
+                            } else {
+                                // process columns from path
+                                // append columns from path to the tail
+                                List<String> columnAttributes = new ArrayList<>();
+                                columnAttributes.addAll(Arrays.asList(attributes));
+                                columnAttributes.addAll(columnValueFromPath);
+                                row = RowFactory.create(columnAttributes.toArray());
+                            }
+                            result.add(row);
                         }
-                        result.add(row);
                     }
                     return result.iterator();
                 }
@@ -807,13 +885,23 @@ public final class SparkDpp implements java.io.Serializable {
                                                StructType dstTableSchema) throws UserException {
         Dataset<Row> fileGroupDataframe = null;
         for (String filePath : filePaths) {
+            fileNumberAcc.add(1);
+            try {
+                Configuration conf = new Configuration();
+                URI uri = new URI(filePath);
+                FileSystem fs = FileSystem.get(uri, conf);
+                FileStatus fileStatus = fs.getFileStatus(new Path(filePath));
+                fileSizeAcc.add(fileStatus.getLen());
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
             if (fileGroup.columnSeparator == null) {
                 System.err.println("invalid null column separator!");
                 throw new UserException("Reason: invalid null column separator!");
             }
             Dataset<Row> dataframe = null;
 
-            dataframe = loadDataFromPath(spark, fileGroup, filePath, baseIndex);
+            dataframe = loadDataFromPath(spark, fileGroup, filePath, baseIndex, dstTableSchema);
             dataframe = convertSrcDataframeToDstDataframe(baseIndex, dataframe, dstTableSchema, fileGroup);
             if (fileGroupDataframe == null) {
                 fileGroupDataframe = dataframe;
@@ -821,18 +909,23 @@ public final class SparkDpp implements java.io.Serializable {
                 fileGroupDataframe.union(dataframe);
             }
         }
+        fileGroupDataframe.show();
         return fileGroupDataframe;
     }
 
-    private Dataset<Row> loadDataFromHiveTable(SparkSession spark, String hiveTableName) {
-        Dataset<Row> fileGroupDataframe = spark.sql("select * from " + hiveTableName);
-        return fileGroupDataframe;
+    private Dataset<Row> loadDataFromHiveTable(SparkSession spark,
+                                               String hiveTableName,
+                                               EtlJobConfig.EtlIndex baseIndex,
+                                               EtlJobConfig.EtlFileGroup fileGroup,
+                                               StructType dstTableSchema) throws UserException {
+        Dataset<Row> dataframe = spark.sql("select * from " + hiveTableName);
+        dataframe = convertSrcDataframeToDstDataframe(baseIndex, dataframe, dstTableSchema, fileGroup);
+        return dataframe;
     }
 
     private DppResult process() throws Exception {
         dppResult = new DppResult();
         try {
-            invalidRowAcc = spark.sparkContext().longAccumulator();
             for (Map.Entry<Long, EtlJobConfig.EtlTable> entry : etlJobConfig.tables.entrySet()) {
                 Long tableId = entry.getKey();
                 EtlJobConfig.EtlTable etlTable = entry.getValue();
@@ -885,17 +978,18 @@ public final class SparkDpp implements java.io.Serializable {
                         String taskId = etlJobConfig.outputPath.substring(etlJobConfig.outputPath.lastIndexOf("/") + 1);
                         String dorisIntermediateHiveTable = String.format(EtlJobConfig.DORIS_INTERMEDIATE_HIVE_TABLE_NAME,
                                 tableId, taskId);
-                        fileGroupDataframe = loadDataFromHiveTable(spark, dorisIntermediateHiveTable);
+                        fileGroupDataframe = loadDataFromHiveTable(spark, dorisIntermediateHiveTable, baseIndex, fileGroup, dstTableSchema);
                     }
                     if (fileGroupDataframe == null) {
                         System.err.println("no data for file file group:" + fileGroup);
                         continue;
                     }
-                    fileGroupDataframe.show();
                     if (!Strings.isNullOrEmpty(fileGroup.where)) {
+                        long originalSize = fileGroupDataframe.count();
                         fileGroupDataframe = fileGroupDataframe.filter(fileGroup.where);
+                        long currentSize = fileGroupDataframe.count();
+                        unselectedRowAcc.add(currentSize - originalSize);
                     }
-                    fileGroupDataframe.show();
 
                     fileGroupDataframe = repartitionDataframeByBucketId(spark, fileGroupDataframe,
                             partitionInfo, partitionKeyIndex,
@@ -911,12 +1005,20 @@ public final class SparkDpp implements java.io.Serializable {
             System.err.println("spark dpp failed for exception:" + exception);
             dppResult.isSuccess = false;
             dppResult.failedReason = exception.getMessage();
-            dppResult.invalidRowNumber = invalidRowAcc.value();
+            dppResult.normalRows = scannedRowsAcc.value() - abnormalRowAcc.value();
+            dppResult.scannedRows = scannedRowsAcc.value();
+            dppResult.fileNumber = fileNumberAcc.value();
+            dppResult.fileSize = fileSizeAcc.value();
+            dppResult.abnormalRows = abnormalRowAcc.value();
             throw exception;
         }
         dppResult.isSuccess = true;
         dppResult.failedReason = "";
-        dppResult.invalidRowNumber = invalidRowAcc.value();
+        dppResult.normalRows = scannedRowsAcc.value() - abnormalRowAcc.value();
+        dppResult.scannedRows = scannedRowsAcc.value();
+        dppResult.fileNumber = fileNumberAcc.value();
+        dppResult.fileSize = fileSizeAcc.value();
+        dppResult.abnormalRows = abnormalRowAcc.value();
         return dppResult;
     }
 

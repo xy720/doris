@@ -55,22 +55,33 @@ class DppColumns implements Comparable<DppColumns>, Serializable {
 
         int cmp = 0;
         for (int i = 0; i < columns.size(); i++) {
+            Object columnObj = columns.get(i);
+            Object otherColumn = other.columns.get(i);
+            if (columnObj == null && otherColumn == null) {
+                return 0;
+            } else if (columnObj == null || otherColumn == null) {
+                if (columnObj == null) {
+                    return -1;
+                } else {
+                    return 1;
+                }
+            }
             if (columns.get(i) instanceof Integer) {
-                cmp = ((Integer)(this.columns.get(i))).compareTo((Integer)(other.columns.get(i)));
+                cmp = ((Integer)(columns.get(i))).compareTo((Integer)(other.columns.get(i)));
             } else if (columns.get(i) instanceof Long) {
-                cmp = ((Long)(this.columns.get(i))).compareTo((Long)(other.columns.get(i)));
+                cmp = ((Long)(columns.get(i))).compareTo((Long)(other.columns.get(i)));
             }  else if (columns.get(i) instanceof  Boolean) {
-                cmp = ((Boolean)(this.columns.get(i))).compareTo((Boolean) (other.columns.get(i)));
+                cmp = ((Boolean)(columns.get(i))).compareTo((Boolean) (other.columns.get(i)));
             } else if (columns.get(i) instanceof  Short) {
-                cmp = ((Short)(this.columns.get(i))).compareTo((Short)(other.columns.get(i)));
+                cmp = ((Short)(columns.get(i))).compareTo((Short)(other.columns.get(i)));
             } else if (columns.get(i) instanceof  Float) {
-                cmp = ((Float)(this.columns.get(i))).compareTo((Float) (other.columns.get(i)));
+                cmp = ((Float)(columns.get(i))).compareTo((Float) (other.columns.get(i)));
             } else if (columns.get(i) instanceof Double) {
-                cmp = ((Double)(this.columns.get(i))).compareTo((Double) (other.columns.get(i)));
+                cmp = ((Double)(columns.get(i))).compareTo((Double) (other.columns.get(i)));
             } else if (columns.get(i) instanceof Date) {
-                cmp = ((Date)(this.columns.get(i))).compareTo((Date) (other.columns.get(i)));
+                cmp = ((Date)(columns.get(i))).compareTo((Date) (other.columns.get(i)));
             } else {
-                cmp = ((String)(this.columns.get(i))).compareTo((String) (other.columns.get(i)));
+                cmp = ((String)(columns.get(i))).compareTo((String) (other.columns.get(i)));
             }
             if (cmp != 0) {
                 return cmp;

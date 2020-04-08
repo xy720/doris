@@ -28,6 +28,21 @@ public class DppResult implements Serializable {
     @SerializedName("failed_reason")
     String failedReason;
 
-    @SerializedName("invalid_row_number")
-    long invalidRowNumber;
+    @SerializedName("scanned_rows")
+    long scannedRows;
+
+    @SerializedName("file_number")
+    long fileNumber;
+
+    @SerializedName("file_size")
+    long fileSize;
+
+    @SerializedName("normal_rows")
+    long normalRows;
+
+    @SerializedName("abnormal_rows")
+    long abnormalRows;
+
+    @SerializedName("unselect_rows")
+    long unselectRows;
 }
