@@ -23,26 +23,26 @@ import java.io.Serializable;
 
 public class DppResult implements Serializable {
     @SerializedName("is_success")
-    boolean isSuccess;
+    public boolean isSuccess;
 
     @SerializedName("failed_reason")
-    String failedReason;
+    public String failedReason;
 
     @SerializedName("scanned_rows")
-    long scannedRows;
+    public long scannedRows;
 
     @SerializedName("file_number")
-    long fileNumber;
+    public long fileNumber;
 
     @SerializedName("file_size")
-    long fileSize;
+    public long fileSize;
 
     @SerializedName("normal_rows")
-    long normalRows;
+    public long normalRows;
 
     @SerializedName("abnormal_rows")
-    long abnormalRows;
+    public long abnormalRows;
 
     @SerializedName("unselect_rows")
-    long unselectRows;
+    public long unselectRows;
 }

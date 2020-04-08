@@ -132,6 +132,8 @@ public class EtlJobConfig implements Serializable {
 
     // config
     public static final String JOB_CONFIG_FILE_NAME = "jobconfig.json";
+    // dpp result
+    public static final String DPP_RESULT_NAME = "dpp_result.json";
 
     public Map<Long, EtlTable> tables;
     public String outputPath;
@@ -166,6 +168,10 @@ public class EtlJobConfig implements Serializable {
 
     public static String getOutputPath(String hdfsEtlPath, long dbId, String loadLabel, long taskSignature) {
         return String.format(ETL_OUTPUT_PATH_FORMAT, hdfsEtlPath, dbId, loadLabel, taskSignature);
+    }
+
+    public static String getDppResultFilePath(String outputPath) {
+        return outputPath + "/" + DPP_RESULT_NAME;
     }
 
     public static String getTabletMetaStr(String filePath) throws Exception {

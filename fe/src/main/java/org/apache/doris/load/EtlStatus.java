@@ -19,6 +19,7 @@ package org.apache.doris.load;
 
 import org.apache.doris.common.io.Text;
 import org.apache.doris.common.io.Writable;
+import org.apache.doris.load.loadv2.dpp.DppResult;
 import org.apache.doris.thrift.TEtlState;
 
 import com.google.common.base.Strings;
@@ -44,6 +45,7 @@ public class EtlStatus implements Writable {
     // 0 - 100
     private int progress;
     private String failMsg;
+    private DppResult dppResult;
 
     public EtlStatus() {
         this.state = TEtlState.RUNNING;
@@ -53,6 +55,7 @@ public class EtlStatus implements Writable {
         this.fileMap = Maps.newHashMap();
         this.progress = 0;
         this.failMsg = "";
+        this.dppResult = null;
     }
 
     public TEtlState getState() {
@@ -124,12 +127,21 @@ public class EtlStatus implements Writable {
         this.failMsg = failMsg;
     }
 
+    public DppResult getDppResult() {
+        return dppResult;
+    }
+
+    public void setDppResult(DppResult dppResult) {
+        this.dppResult = dppResult;
+    }
+
     public void reset() {
         this.stats.clear();
         this.counters.clear();
         this.fileMap.clear();
         this.progress = 0;
         this.failMsg = "";
+        this.dppResult = null;
     }
 
     @Override
@@ -142,6 +154,7 @@ public class EtlStatus implements Writable {
                 ", fileMap=" + fileMap +
                 ", progress=" + progress +
                 ", failMsg='" + failMsg + '\'' +
+                ", dppResult='" + dppResult + '\'' +
                 '}';
     }
 
