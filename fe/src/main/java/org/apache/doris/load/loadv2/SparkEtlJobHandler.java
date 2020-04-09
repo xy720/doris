@@ -105,11 +105,15 @@ public class SparkEtlJobHandler {
                 .setAppName(String.format(ETL_JOB_NAME, loadLabel))
                 .addFile(configFilePath);
         // spark args: --jars, --files, --queue
-        for (Map.Entry<String, String> entry : etlCluster.getSparkArgsMap().entrySet()) {
-            launcher.addSparkArg(entry.getKey(), entry.getValue());
+        if (etlCluster.getSparkArgsMap() != null) {
+            for (Map.Entry<String, String> entry : etlCluster.getSparkArgsMap().entrySet()) {
+                launcher.addSparkArg(entry.getKey(), entry.getValue());
+            }
         }
-        // yarn configs
-        if (etlCluster.isYarnMaster()) {
+        // yarn configs:
+        // yarn.resourcemanager.address
+        // fs.defaultFS
+        if (etlCluster.isYarnMaster() && etlCluster.getYarnConfigsMap() != null) {
             for (Map.Entry<String, String> entry : etlCluster.getYarnConfigsMap().entrySet()) {
                 launcher.setConf(SPARK_HADOOP_CONFIG_PREFIX + entry.getKey(), entry.getValue());
             }
@@ -333,9 +337,11 @@ public class SparkEtlJobHandler {
     private YarnClient startYarnClient(SparkEtlCluster etlCluster) {
         YarnClient client = YarnClient.createYarnClient();
         Configuration conf = new YarnConfiguration();
-        // set yarn.resourcemanager.address
-        for (Map.Entry<String, String> entry : etlCluster.getYarnConfigsMap().entrySet()) {
-            conf.set(entry.getKey(), entry.getValue());
+        if (etlCluster.getYarnConfigsMap() != null) {
+            // set yarn.resourcemanager.address
+            for (Map.Entry<String, String> entry : etlCluster.getYarnConfigsMap().entrySet()) {
+                conf.set(entry.getKey(), entry.getValue());
+            }
         }
         client.init(conf);
         client.start();
