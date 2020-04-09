@@ -58,9 +58,6 @@ import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Range;
 import com.google.common.collect.Sets;
-import com.google.gson.FieldNamingPolicy;
-import com.google.gson.Gson;
-import com.google.gson.GsonBuilder;
 
 import java.util.List;
 import java.util.Map;
@@ -110,15 +107,8 @@ public class SparkLoadPendingTask extends LoadTask {
 
         // handler submit etl job
         SparkEtlJobHandler handler = new SparkEtlJobHandler();
-        handler.submitEtlJob(loadJobId, loadLabel, etlCluster, brokerDesc, configToJson(), sparkAttachment);
+        handler.submitEtlJob(loadJobId, loadLabel, etlCluster, brokerDesc, etlJobConfig, sparkAttachment);
         LOG.info("submit spark etl job success. load job id: {}, attachment: {}", loadJobId, sparkAttachment);
-    }
-
-    private String configToJson() {
-        GsonBuilder gsonBuilder = new GsonBuilder();
-        gsonBuilder.setFieldNamingPolicy(FieldNamingPolicy.LOWER_CASE_WITH_UNDERSCORES);
-        Gson gson = gsonBuilder.create();
-        return gson.toJson(etlJobConfig);
     }
 
     @Override
