@@ -28,6 +28,7 @@ import org.apache.doris.common.Config;
 import org.apache.doris.common.UserException;
 import org.apache.doris.service.FrontendOptions;
 import org.apache.doris.thrift.TBrokerCloseReaderRequest;
+import org.apache.doris.thrift.TBrokerDeletePathRequest;
 import org.apache.doris.thrift.TBrokerFD;
 import org.apache.doris.thrift.TBrokerFileStatus;
 import org.apache.doris.thrift.TBrokerListPathRequest;
@@ -69,7 +70,7 @@ public class BrokerUtil {
                 tBrokerListResponse = client.listPath(request);
             }
             if (tBrokerListResponse.getOpStatus().getStatusCode() != TBrokerOperationStatusCode.OK) {
-                throw new UserException("Broker list path failed.path=" + path
+                throw new UserException("Broker list path failed. path=" + path
                         + ",broker=" + address + ",msg=" + tBrokerListResponse.getOpStatus().getMessage());
             }
             failed = false;
@@ -214,6 +215,33 @@ public class BrokerUtil {
             }
 
             // return client
+            returnClient(client, address, failed);
+        }
+    }
+
+    public static void deleteBrokerPath(String path, BrokerDesc brokerDesc) throws UserException {
+        TNetworkAddress address = getAddress(brokerDesc);
+        TPaloBrokerService.Client client = borrowClient(address);
+        boolean failed = true;
+        try {
+            TBrokerDeletePathRequest tDeletePathRequest = new TBrokerDeletePathRequest(
+                    TBrokerVersion.VERSION_ONE, path, brokerDesc.getProperties());
+            TBrokerOperationStatus tOperationStatus = null;
+            try {
+                tOperationStatus = client.deletePath(tDeletePathRequest);
+            } catch (TException e) {
+                reopenClient(client);
+                tOperationStatus = client.deletePath(tDeletePathRequest);
+            }
+            if (tOperationStatus.getStatusCode() != TBrokerOperationStatusCode.OK) {
+                throw new UserException("Broker delete path failed.path=" + path + ", broker=" + address
+                                                + ", msg=" + tOperationStatus.getMessage());
+            }
+            failed = false;
+        } catch (TException e) {
+            LOG.warn("Broker read path exception, path={}, address={}, exception={}", path, address, e);
+            throw new UserException("Broker read path exception.path=" + path + ",broker=" + address);
+        } finally {
             returnClient(client, address, failed);
         }
     }

@@ -439,6 +439,7 @@ public class SparkLoadJob extends BulkLoadJob {
                 Map<String, String> counters = loadingStatus.getCounters();
                 counters.put(DPP_NORMAL_ALL, String.valueOf(dppResult.normalRows));
                 counters.put(DPP_ABNORMAL_ALL, String.valueOf(dppResult.abnormalRows));
+                counters.put(UNSELECTED_ROWS, String.valueOf(dppResult.unselectRows));
             }
         } finally {
             writeUnlock();

@@ -971,6 +971,7 @@ OLAPStatus PushBrokerReader::init(const TabletSharedPtr tablet,
     }
 
     // init tuple
+    _tuple_id = scan_range.params.dest_tuple_id;
     _tuple_desc = _runtime_state->desc_tbl().get_tuple_descriptor(_tuple_id);
     if (_tuple_desc == nullptr) {
         std::stringstream ss;
@@ -986,7 +987,6 @@ OLAPStatus PushBrokerReader::init(const TabletSharedPtr tablet,
     }
     _tuple = reinterpret_cast<Tuple*>(tuple_buffer);   
 
-    _tuple_id = scan_range.params.dest_tuple_id;
     _ready = true;
 	return OLAP_SUCCESS;
 }

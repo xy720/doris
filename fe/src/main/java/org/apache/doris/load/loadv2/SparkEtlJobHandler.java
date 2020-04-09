@@ -17,7 +17,9 @@
 
 package org.apache.doris.load.loadv2;
 
+import com.google.gson.FieldNamingPolicy;
 import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
 import com.google.gson.JsonSyntaxException;
 import org.apache.doris.PaloFe;
 import org.apache.doris.analysis.BrokerDesc;
@@ -79,15 +81,20 @@ public class SparkEtlJobHandler {
     }
 
     public void submitEtlJob(long loadJobId, String loadLabel, SparkEtlCluster etlCluster, BrokerDesc brokerDesc,
-                             String jobJsonConfig, SparkPendingTaskAttachment attachment) throws LoadException {
-        // check outputPath exist
+                             EtlJobConfig etlJobConfig, SparkPendingTaskAttachment attachment) throws LoadException {
+        // delete outputPath
+        deleteEtlFilePaths(etlJobConfig.outputPath, brokerDesc);
 
         // create job config file
         // delete when etl job finished or cancelled
-        String configFilePath = createJobConfigFile(loadJobId, jobJsonConfig);
+        String configFilePath = createJobConfigFile(loadJobId, configToJson(etlJobConfig));
 
         // spark cluster config
-        SparkLauncher launcher = new SparkLauncher();
+        LOG.info("xxxxxx2");
+        Map<String, String> env = Maps.newHashMap();
+        //env.put("HADOOP_CONF_DIR", "/home/disk1/wyb/deploy/fe/hadoopconf");
+        //env.put("SPARK_HOME", "/home/disk1/wyb/deploy/spark-2.4.4-bin-hadoop2.7");
+        SparkLauncher launcher = new SparkLauncher(env);
         launcher.setMaster(etlCluster.getMaster())
                 .setDeployMode(SPARK_DEPLOY_MODE)
                 .setAppResource(APP_RESOURCE)
@@ -298,8 +305,25 @@ public class SparkEtlJobHandler {
         return filePathToSize;
     }
 
+    public void deleteEtlFilePaths(String outputPath, BrokerDesc brokerDesc) {
+        try {
+            BrokerUtil.deleteBrokerPath(outputPath, brokerDesc);
+            LOG.info("delete path success. path: {}", outputPath);
+        } catch (UserException e) {
+            LOG.warn("delete path failed. path: {}", outputPath, e);
+        }
+    }
+
+    private String configToJson(EtlJobConfig etlJobConfig) {
+        GsonBuilder gsonBuilder = new GsonBuilder();
+        gsonBuilder.setFieldNamingPolicy(FieldNamingPolicy.LOWER_CASE_WITH_UNDERSCORES);
+        Gson gson = gsonBuilder.create();
+        return gson.toJson(etlJobConfig);
+    }
+
     private YarnClient startYarnClient() {
         Configuration conf = new YarnConfiguration();
+        //conf.set("yarn.resourcemanager.address", "172.26.108.172:8032");
         YarnClient client = YarnClient.createYarnClient();
         client.init(conf);
         client.start();
