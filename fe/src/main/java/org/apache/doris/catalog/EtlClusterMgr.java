@@ -201,6 +201,15 @@ public class EtlClusterMgr {
                             result.addRow(Lists.newArrayList(clusterName, type, SparkEtlCluster.SPARK_ARGS,
                                                              StringUtils.join(args, SparkEtlCluster.SEMICOLON_SEPARATOR)));
                         }
+                        Map<String, String> yarnConfigsMap = sparkEtlCluster.getYarnConfigsMap();
+                        if (!yarnConfigsMap.isEmpty()) {
+                            List<String> configs = Lists.newArrayList();
+                            for (Map.Entry<String, String> configEntry : sparkArgsMap.entrySet()) {
+                                configs.add(configEntry.getKey() + SparkEtlCluster.EQUAL_SEPARATOR + configEntry.getValue());
+                            }
+                            result.addRow(Lists.newArrayList(clusterName, type, SparkEtlCluster.YARN_CONFIGS,
+                                                             StringUtils.join(configs, SparkEtlCluster.SEMICOLON_SEPARATOR)));
+                        }
                     }
                 }
             } finally {

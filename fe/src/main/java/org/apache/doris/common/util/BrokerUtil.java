@@ -147,12 +147,16 @@ public class BrokerUtil {
                 tBrokerListResponse = client.listPath(request);
             }
             if (tBrokerListResponse.getOpStatus().getStatusCode() != TBrokerOperationStatusCode.OK) {
-                throw new UserException("Broker list path failed. path=" + path + ",broker=" + address
+                throw new UserException("Broker list path failed. path=" + path + ", broker=" + address
                                                 + ",msg=" + tBrokerListResponse.getOpStatus().getMessage());
             }
             failed = false;
             List<TBrokerFileStatus> fileStatuses = tBrokerListResponse.getFiles();
-            Preconditions.checkState(fileStatuses.size() == 1);
+            if (fileStatuses.size() != 1) {
+                throw new UserException("Broker files num error. path=" + path + ", broker=" + address
+                                                + ", files num: " + fileStatuses.size());
+            }
+
             Preconditions.checkState(!fileStatuses.get(0).isIsDir());
             long fileSize = fileStatuses.get(0).getSize();
 
