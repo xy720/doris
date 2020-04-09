@@ -175,8 +175,8 @@ public class SparkEtlCluster extends EtlCluster {
         Map<String, String> yarnConfigsMap = getArgsMap(properties, argsKey);
         if ((!yarnConfigsMap.containsKey(YARN_RESOURCE_MANAGER_ADDRESS) || !yarnConfigsMap.containsKey(FS_DEFAULT_FS))
                 && isYarnMaster()) {
-            throw new DdlException("Missing " + argsKey + " " + YARN_RESOURCE_MANAGER_ADDRESS + " and " + FS_DEFAULT_FS
-                                           + " in yarn master");
+            throw new DdlException("Missing " + argsKey + "(" + YARN_RESOURCE_MANAGER_ADDRESS + " and " + FS_DEFAULT_FS
+                                           + ") in yarn master");
         }
         return yarnConfigsMap;
     }
@@ -198,8 +198,7 @@ public class SparkEtlCluster extends EtlCluster {
             }
 
             String[] argArr = argStr.trim().split(EQUAL_SEPARATOR);
-            if (argArr.length != 2 || argArr[0].isEmpty() || !argArr[0].startsWith("--")
-                    || argArr[1].isEmpty()) {
+            if (argArr.length != 2 || argArr[0].isEmpty() || argArr[1].isEmpty()) {
                 throw new DdlException(argsKey + " format error, use 'key1=value1;key2=value2'");
             }
             argsMap.put(argArr[0], argArr[1]);

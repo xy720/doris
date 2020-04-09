@@ -193,7 +193,7 @@ public class EtlClusterMgr {
                         result.addRow(Lists.newArrayList(clusterName, type, SparkEtlCluster.BROKER,
                                                          sparkEtlCluster.getBroker()));
                         Map<String, String> sparkArgsMap = sparkEtlCluster.getSparkArgsMap();
-                        if (!sparkArgsMap.isEmpty()) {
+                        if (sparkArgsMap != null && !sparkArgsMap.isEmpty()) {
                             List<String> args = Lists.newArrayList();
                             for (Map.Entry<String, String> argEntry : sparkArgsMap.entrySet()) {
                                 args.add(argEntry.getKey() + SparkEtlCluster.EQUAL_SEPARATOR + argEntry.getValue());
@@ -202,9 +202,9 @@ public class EtlClusterMgr {
                                                              StringUtils.join(args, SparkEtlCluster.SEMICOLON_SEPARATOR)));
                         }
                         Map<String, String> yarnConfigsMap = sparkEtlCluster.getYarnConfigsMap();
-                        if (!yarnConfigsMap.isEmpty()) {
+                        if (yarnConfigsMap != null && !yarnConfigsMap.isEmpty()) {
                             List<String> configs = Lists.newArrayList();
-                            for (Map.Entry<String, String> configEntry : sparkArgsMap.entrySet()) {
+                            for (Map.Entry<String, String> configEntry : yarnConfigsMap.entrySet()) {
                                 configs.add(configEntry.getKey() + SparkEtlCluster.EQUAL_SEPARATOR + configEntry.getValue());
                             }
                             result.addRow(Lists.newArrayList(clusterName, type, SparkEtlCluster.YARN_CONFIGS,
