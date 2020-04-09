@@ -69,6 +69,10 @@ public class SparkEtlJobHandler {
     private static final String MAIN_CLASS = "org.apache.doris.load.loadv2.etl.SparkEtlJob";
     private static final String SPARK_DEPLOY_MODE = "cluster";
     private static final String ETL_JOB_NAME = "doris__%s";
+
+    private static final String HADOOP_CONF_DIR_KEY = "HADOOP_CONF_DIR";
+    private static final String HADOOP_CONF_DIR_VALUE = PaloFe.DORIS_HOME_DIR + "/temp/hadoop_conf";
+    private static final String SPARK_HADOOP_CONFIG_PREFIX = "spark.hadoop.";
     // 5min
     private static final int GET_APPID_MAX_RETRY = 300;
 
@@ -90,9 +94,8 @@ public class SparkEtlJobHandler {
         String configFilePath = createJobConfigFile(loadJobId, configToJson(etlJobConfig));
 
         // spark cluster config
-        LOG.info("xxxxxx2");
         Map<String, String> env = Maps.newHashMap();
-        //env.put("HADOOP_CONF_DIR", "/home/disk1/wyb/deploy/fe/hadoopconf");
+        env.put(HADOOP_CONF_DIR_KEY, HADOOP_CONF_DIR_VALUE);
         //env.put("SPARK_HOME", "/home/disk1/wyb/deploy/spark-2.4.4-bin-hadoop2.7");
         SparkLauncher launcher = new SparkLauncher(env);
         launcher.setMaster(etlCluster.getMaster())
@@ -104,6 +107,12 @@ public class SparkEtlJobHandler {
         // spark args: --jars, --files, --queue
         for (Map.Entry<String, String> entry : etlCluster.getSparkArgsMap().entrySet()) {
             launcher.addSparkArg(entry.getKey(), entry.getValue());
+        }
+        // yarn configs
+        if (etlCluster.isYarnMaster()) {
+            for (Map.Entry<String, String> entry : etlCluster.getYarnConfigsMap().entrySet()) {
+                launcher.setConf(SPARK_HADOOP_CONFIG_PREFIX + entry.getKey(), entry.getValue());
+            }
         }
 
         // start app
@@ -194,14 +203,14 @@ public class SparkEtlJobHandler {
         return configFilePath;
     }
 
-    public EtlStatus getEtlJobStatus(SparkAppHandle handle, String appId, long loadJobId, boolean isYarnMaster,
+    public EtlStatus getEtlJobStatus(SparkAppHandle handle, String appId, long loadJobId, SparkEtlCluster etlCluster,
                                      String etlOutputPath, BrokerDesc brokerDesc) {
         EtlStatus status = new EtlStatus();
 
-        if (isYarnMaster) {
+        if (etlCluster.isYarnMaster()) {
             // state from yarn
             Preconditions.checkState(appId != null && !appId.isEmpty());
-            YarnClient client = startYarnClient();
+            YarnClient client = startYarnClient(etlCluster);
             try {
                 ApplicationReport report = client.getApplicationReport(ConverterUtils.toApplicationId(appId));
                 LOG.info("yarn application -status {}, load job id: {}, result: {}", appId, loadJobId, report);
@@ -259,10 +268,10 @@ public class SparkEtlJobHandler {
         return status;
     }
 
-    public void killEtlJob(SparkAppHandle handle, String appId, long loadJobId, boolean isYarnMaster) {
-        if (isYarnMaster) {
+    public void killEtlJob(SparkAppHandle handle, String appId, long loadJobId, SparkEtlCluster etlCluster) {
+        if (etlCluster.isYarnMaster()) {
             Preconditions.checkNotNull(appId);
-            YarnClient client = startYarnClient();
+            YarnClient client = startYarnClient(etlCluster);
             try {
                 try {
                     client.killApplication(ConverterUtils.toApplicationId(appId));
@@ -321,10 +330,13 @@ public class SparkEtlJobHandler {
         return gson.toJson(etlJobConfig);
     }
 
-    private YarnClient startYarnClient() {
-        Configuration conf = new YarnConfiguration();
-        //conf.set("yarn.resourcemanager.address", "172.26.108.172:8032");
+    private YarnClient startYarnClient(SparkEtlCluster etlCluster) {
         YarnClient client = YarnClient.createYarnClient();
+        Configuration conf = new YarnConfiguration();
+        // set yarn.resourcemanager.address
+        for (Map.Entry<String, String> entry : etlCluster.getYarnConfigsMap().entrySet()) {
+            conf.set(entry.getKey(), entry.getValue());
+        }
         client.init(conf);
         client.start();
         return client;

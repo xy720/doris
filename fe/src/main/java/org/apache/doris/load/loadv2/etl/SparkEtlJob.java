@@ -62,7 +62,6 @@ public class SparkEtlJob {
             // master type |  deployMode type
             // ------------|----------------
             // spark://xx  |  client
-            // spark://xx  |  cluster
             jobConfigFilePath = "file://" + SparkFiles.get(EtlJobConfig.JOB_CONFIG_FILE_NAME);
         }
         System.err.println("****** spark yarn staging dir: " + sparkYarnStagingDir);
