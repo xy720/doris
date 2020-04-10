@@ -107,7 +107,7 @@ public class SparkEtlJob {
         }
     }
 
-    private void processDpp(SparkSession spark) {
+    private void processDpp(SparkSession spark) throws Exception {
         SparkDpp sparkDpp = new SparkDpp(spark, etlJobConfig);
         sparkDpp.init();
         sparkDpp.doDpp();
@@ -164,7 +164,7 @@ public class SparkEtlJob {
          */
     }
 
-    private void processDataFromHiveTable(SparkSession spark) {
+    private void processDataFromHiveTable(SparkSession spark) throws Exception {
         // only one table
         long tableId = -1;
         EtlTable table = null;
@@ -181,7 +181,7 @@ public class SparkEtlJob {
         processDpp(spark);
     }
 
-    private void processData() {
+    private void processData() throws Exception {
         SparkSession spark = SparkSession.builder().master("local").getOrCreate();
         if (hasBitMapColumns) {
             processDataFromHiveTable(spark);

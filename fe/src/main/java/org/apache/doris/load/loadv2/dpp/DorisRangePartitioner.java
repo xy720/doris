@@ -37,6 +37,12 @@ public class DorisRangePartitioner extends Partitioner {
     }
 
     public int numPartitions() {
+        if (partitionInfo == null) {
+            return 0;
+        }
+        if (partitionInfo.partitionType.equalsIgnoreCase(UNPARTITIONED_TYPE)) {
+            return 1;
+        }
         return partitionInfo.partitions.size();
     }
 
@@ -73,8 +79,8 @@ public class DorisRangePartitioner extends Partitioner {
         public String toString() {
             return "PartitionRangeKey{" +
                     "isMaxPartition=" + isMaxPartition +
-                    ", startKeys=" + startKeys.toString() +
-                    ", endKeys=" + endKeys.toString() +
+                    ", startKeys=" + startKeys +
+                    ", endKeys=" + endKeys +
                     '}';
         }
     }
