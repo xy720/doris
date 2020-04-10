@@ -586,7 +586,7 @@ public class SparkLoadJob extends BulkLoadJob {
                                         TBrokerScanRange tBrokerScanRange = new TBrokerScanRange(params.tBrokerScanRange);
                                         // update filePath fileSize
                                         TBrokerRangeDesc tBrokerRangeDesc = tBrokerScanRange.getRanges().get(0);
-                                        tBrokerRangeDesc.setPath(null);
+                                        tBrokerRangeDesc.setPath("");
                                         tBrokerRangeDesc.setFile_size(-1);
                                         String tabletMetaStr = String.format("%d.%d.%d.%d.%d", tableId, partitionId,
                                                                              indexId, bucket++, schemaHash);
