@@ -337,12 +337,12 @@ OLAPStatus PushHandler::_convert_v2(TabletSharedPtr cur_tablet,
         VLOG(3) << "init rowset builder. tablet=" << cur_tablet->full_name()
             << ", block_row_size=" << cur_tablet->num_rows_per_row_block();
 
-        // 4. Init Row
-        uint8_t* tuple_buf = reader->mem_pool()->allocate(schema->schema_size());
-        ContiguousRow row(schema, tuple_buf);
-
-        // 5. Read data from broker and write into SegmentGroup of cur_tablet
         if (!path.empty()) {
+            // 4. Init Row
+            uint8_t* tuple_buf = reader->mem_pool()->allocate(schema->schema_size());
+            ContiguousRow row(schema, tuple_buf);
+
+            // 5. Read data from broker and write into SegmentGroup of cur_tablet
             // Convert from raw to delta
             VLOG(3) << "start to convert row file to delta.";
             while (!reader->eof()) {
