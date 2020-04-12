@@ -106,7 +106,7 @@ class DppColumns implements Comparable<DppColumns>, Serializable {
     @Override
     public String toString() {
         return "dppColumns{" +
-                "columns=" + columns.toString() +
+                "columns=" + columns +
                 '}';
     }
 }

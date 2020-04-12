@@ -18,8 +18,10 @@
 package org.apache.doris.load.loadv2.etl;
 
 import com.google.common.collect.Lists;
+import com.google.common.collect.ImmutableMap;
 
 import java.io.Serializable;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
@@ -417,6 +419,10 @@ public class EtlJobConfig implements Serializable {
         public String functionName;
         public List<String> args;
         public String expr;
+        public Map<String, String> functionMap =
+                new ImmutableMap.Builder<Integer, String>().
+                        put("md5sum", "md5").build();
+
 
         public EtlColumnMapping(String functionName, List<String> args) {
             this.functionName = functionName;
@@ -432,7 +438,11 @@ public class EtlJobConfig implements Serializable {
             if (functionName == null) {
                 sb.append(expr);
             } else {
-                sb.append(functionName);
+                if (functionMap.containsKey(functionName)) {
+                    sb.append(functionMap.get(functionName));
+                } else {
+                    sb.append(functionName);
+                }
                 sb.append("(");
                 if (args != null) {
                     for (String arg : args) {
