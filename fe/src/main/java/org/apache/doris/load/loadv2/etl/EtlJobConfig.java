@@ -21,7 +21,6 @@ import com.google.common.collect.Lists;
 import com.google.common.collect.ImmutableMap;
 
 import java.io.Serializable;
-import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
@@ -420,7 +419,7 @@ public class EtlJobConfig implements Serializable {
         public List<String> args;
         public String expr;
         public Map<String, String> functionMap =
-                new ImmutableMap.Builder<Integer, String>().
+                new ImmutableMap.Builder<String, String>().
                         put("md5sum", "md5").build();
 
 
