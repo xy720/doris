@@ -190,7 +190,11 @@ public class SparkEtlJobHandler {
                 FinalApplicationStatus faStatus = report.getFinalApplicationStatus();
                 status.setState(fromYarnState(state, faStatus));
                 if (status.getState() == TEtlState.CANCELLED) {
-                    status.setFailMsg("yarn app state: " + state.toString());
+                    if (state == YarnApplicationState.FINISHED) {
+                        status.setFailMsg("spark app state: " + faStatus.toString());
+                    } else {
+                        status.setFailMsg("yarn app state: " + state.toString());
+                    }
                 }
                 status.setTrackingUrl(report.getTrackingUrl());
                 status.setProgress((int) (report.getProgress() * 100));

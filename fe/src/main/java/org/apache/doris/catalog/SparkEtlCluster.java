@@ -17,16 +17,16 @@
 
 package org.apache.doris.catalog;
 
-import com.google.common.collect.Lists;
-import org.apache.commons.lang.StringUtils;
 import org.apache.doris.analysis.EtlClusterDesc;
 import org.apache.doris.common.DdlException;
+import org.apache.doris.common.proc.BaseProcResult;
 
 import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
+import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
+import org.apache.commons.lang.StringUtils;
 import com.google.gson.annotations.SerializedName;
-import org.apache.doris.common.proc.BaseProcResult;
 
 import java.util.List;
 import java.util.Map;

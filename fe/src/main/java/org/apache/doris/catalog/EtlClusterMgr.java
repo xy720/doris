@@ -65,7 +65,7 @@ public class EtlClusterMgr {
         }
     }
 
-    public void addEtlCluster(ModifyEtlClusterClause clause) throws DdlException {
+    private void addEtlCluster(ModifyEtlClusterClause clause) throws DdlException {
         lock.lock();
         try {
             if (clause.getClusterType() != EtlClusterType.SPARK) {
@@ -94,14 +94,13 @@ public class EtlClusterMgr {
         } finally {
             lock.unlock();
         }
-
     }
 
-    public void dropEtlCluster(String name) throws DdlException {
+    private void dropEtlCluster(String name) throws DdlException {
         lock.lock();
         try {
             if (!nameToEtlCluster.containsKey(name)) {
-                throw new DdlException("Unknown etl cluster name(" + name + ")");
+                throw new DdlException("Etl cluster name(" + name + ") does not exist");
             }
 
             nameToEtlCluster.remove(name);

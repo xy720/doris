@@ -29,7 +29,10 @@ import java.util.Map;
 // (
 //     "type" = "spark",
 //     "master" = "yarn",
+//     "deploy_mode" = "cluster",
 //     "spark_args" = "--jars=xxx.jar,yyy.jar;--files=/tmp/aaa,/tmp/bbb",
+//     "spark_configs" = "spark.driver.memory=1g;spark.executor.memory=1g",
+//     "yarn_configs" = "yarn.resourcemanager.address=host:port;fs.defaultFS=hdfs://host:port",
 //     "hdfs_etl_path" = "hdfs://127.0.0.1:10000/tmp/doris",
 //     "broker" = "broker0"
 // );
