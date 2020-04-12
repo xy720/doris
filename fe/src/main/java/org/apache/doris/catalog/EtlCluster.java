@@ -21,6 +21,7 @@ import org.apache.doris.analysis.ModifyEtlClusterClause;
 import org.apache.doris.common.DdlException;
 import org.apache.doris.common.io.Text;
 import org.apache.doris.common.io.Writable;
+import org.apache.doris.common.proc.BaseProcResult;
 import org.apache.doris.persist.gson.GsonUtils;
 
 import com.google.gson.annotations.SerializedName;
@@ -78,6 +79,7 @@ public abstract class EtlCluster implements Writable {
     }
 
     protected abstract void setProperties(Map<String, String> properties) throws DdlException;
+    protected abstract void getProcNodeData(BaseProcResult result);
 
     @Override
     public String toString() {

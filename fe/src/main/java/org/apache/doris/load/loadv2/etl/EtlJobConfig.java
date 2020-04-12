@@ -123,15 +123,13 @@ public class EtlJobConfig implements Serializable {
     public static final String DISTINCT_KEY_TABLE_NAME = "doris_distinct_key_table_%d_%s";
     public static final String DORIS_INTERMEDIATE_HIVE_TABLE_NAME = "doris_intermediate_hive_table_%d_%s";
 
-    // hdfsEtlPath/output/dbId/loadLabel/PendingTaskSignature
-    private static final String ETL_OUTPUT_PATH_FORMAT = "%s/output/%d/%s/%d";
+    // hdfsEtlPath/jobs/dbId/loadLabel/PendingTaskSignature
+    private static final String ETL_OUTPUT_PATH_FORMAT = "%s/jobs/%d/%s/%d";
     private static final String ETL_OUTPUT_FILE_NAME_DESC = "label.tableId.partitionId.indexId.bucket.schemaHash.parquet";
     // tableId.partitionId.indexId.bucket.schemaHash
     public static final String ETL_OUTPUT_FILE_NAME_NO_LABEL_SUFFIX_FORMAT = "%d.%d.%d.%d.%d";
     public static final String ETL_OUTPUT_FILE_FORMAT = "parquet";
 
-    // config
-    public static final String JOB_CONFIG_FILE_NAME = "jobconfig.json";
     // dpp result
     public static final String DPP_RESULT_NAME = "dpp_result.json";
 

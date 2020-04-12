@@ -28,16 +28,21 @@ import org.apache.doris.common.Config;
 import org.apache.doris.common.UserException;
 import org.apache.doris.service.FrontendOptions;
 import org.apache.doris.thrift.TBrokerCloseReaderRequest;
+import org.apache.doris.thrift.TBrokerCloseWriterRequest;
 import org.apache.doris.thrift.TBrokerDeletePathRequest;
 import org.apache.doris.thrift.TBrokerFD;
 import org.apache.doris.thrift.TBrokerFileStatus;
 import org.apache.doris.thrift.TBrokerListPathRequest;
 import org.apache.doris.thrift.TBrokerListResponse;
+import org.apache.doris.thrift.TBrokerOpenMode;
 import org.apache.doris.thrift.TBrokerOpenReaderRequest;
 import org.apache.doris.thrift.TBrokerOpenReaderResponse;
+import org.apache.doris.thrift.TBrokerOpenWriterRequest;
+import org.apache.doris.thrift.TBrokerOpenWriterResponse;
 import org.apache.doris.thrift.TBrokerOperationStatus;
 import org.apache.doris.thrift.TBrokerOperationStatusCode;
 import org.apache.doris.thrift.TBrokerPReadRequest;
+import org.apache.doris.thrift.TBrokerPWriteRequest;
 import org.apache.doris.thrift.TBrokerReadResponse;
 import org.apache.doris.thrift.TBrokerVersion;
 import org.apache.doris.thrift.TNetworkAddress;
@@ -47,12 +52,18 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.thrift.TException;
 
+import java.io.FileInputStream;
+import java.io.IOException;
 import java.io.UnsupportedEncodingException;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.util.Collections;
 import java.util.List;
 
 public class BrokerUtil {
     private static final Logger LOG = LogManager.getLogger(BrokerUtil.class);
+
+    private static int READ_BUFFER_SIZE = 1024 * 1024;
 
     public static void parseBrokerFile(String path, BrokerDesc brokerDesc, List<TBrokerFileStatus> fileStatuses)
             throws UserException {
@@ -82,7 +93,7 @@ public class BrokerUtil {
             }
         } catch (TException e) {
             LOG.warn("Broker list path exception, path={}, address={}, exception={}", path, address, e);
-            throw new UserException("Broker list path exception.path=" + path + ",broker=" + address);
+            throw new UserException("Broker list path exception. path=" + path + ", broker=" + address);
         } finally {
             returnClient(client, address, failed);
         }
@@ -194,8 +205,9 @@ public class BrokerUtil {
             byte[] data = tReadResponse.getData();
             return new String(data, "UTF-8");
         } catch (TException | UnsupportedEncodingException e) {
-            LOG.warn("Broker read path exception, path={}, address={}, exception={}", path, address, e);
-            throw new UserException("Broker read path exception.path=" + path + ",broker=" + address);
+            String failMsg = "Broker read file exception. path=" + path + ", broker=" + address;
+            LOG.warn(failMsg, e);
+            throw new UserException(failMsg);
         } finally {
             // close reader
             if (fd != null) {
@@ -208,8 +220,8 @@ public class BrokerUtil {
                     reopenClient(client);
                     try {
                         tOperationStatus = client.closeReader(tCloseReaderRequest);
-                    } catch (TException e1) {
-                        LOG.warn("Broker close reader failed. path={}, address={}", path, address, e1);
+                    } catch (TException ex) {
+                        LOG.warn("Broker close reader failed. path={}, address={}", path, address, ex);
                     }
                     if (tOperationStatus.getStatusCode() != TBrokerOperationStatusCode.OK) {
                         LOG.warn("Broker close reader failed. path={}, address={}, error={}", path, address,
@@ -220,6 +232,57 @@ public class BrokerUtil {
 
             // return client
             returnClient(client, address, failed);
+        }
+    }
+
+    public static void writeBrokerFile(byte[] data, String destFilePath, BrokerDesc brokerDesc) throws UserException {
+        BrokerWriter writer = new BrokerWriter(destFilePath, brokerDesc);
+        try {
+            writer.open();
+            ByteBuffer byteBuffer = ByteBuffer.wrap(data);
+            writer.write(byteBuffer, data.length);
+        } finally {
+            writer.close();
+        }
+    }
+
+    public static void writeBrokerFile(String srcFilePath, String destFilePath,
+                                       BrokerDesc brokerDesc) throws UserException {
+        FileInputStream fis = null;
+        FileChannel channel = null;
+        BrokerWriter writer = new BrokerWriter(destFilePath, brokerDesc);
+        ByteBuffer byteBuffer = ByteBuffer.allocate(READ_BUFFER_SIZE);
+        try {
+            writer.open();
+            fis = new FileInputStream(srcFilePath);
+            channel = fis.getChannel();
+            while (true) {
+                int readSize = channel.read(byteBuffer);
+                if (readSize == -1) {
+                    break;
+                }
+
+                byteBuffer.flip();
+                writer.write(byteBuffer, readSize);
+                byteBuffer.clear();
+            }
+        } catch (IOException e) {
+            String failMsg = "Read file exception. filePath=" + srcFilePath;
+            LOG.warn(failMsg, e);
+            throw new UserException(failMsg);
+        } finally {
+            // close broker file writer and local file input stream
+            writer.close();
+            try {
+                if (channel != null) {
+                    channel.close();
+                }
+                if (fis != null) {
+                    fis.close();
+                }
+            } catch (IOException e) {
+                LOG.warn("Close local file failed. srcPath={}", srcFilePath, e);
+            }
         }
     }
 
@@ -286,5 +349,109 @@ public class BrokerUtil {
 
     private static void reopenClient(TPaloBrokerService.Client client) {
         ClientPool.brokerPool.reopen(client);
+    }
+
+    private static class BrokerWriter {
+        private String brokerFilePath;
+        private BrokerDesc brokerDesc;
+        private TPaloBrokerService.Client client;
+        private TNetworkAddress address;
+        private TBrokerFD fd;
+        private long currentOffset;
+        private boolean isReady;
+        private boolean failed;
+
+        public BrokerWriter(String brokerFilePath, BrokerDesc brokerDesc) {
+            this.brokerFilePath = brokerFilePath;
+            this.brokerDesc = brokerDesc;
+            this.isReady = false;
+            this.failed = true;
+        }
+
+        public void open() throws UserException {
+            address = BrokerUtil.getAddress(brokerDesc);
+            client = BrokerUtil.borrowClient(address);
+            try {
+                String clientId = FrontendOptions.getLocalHostAddress() + ":" + Config.rpc_port;
+                TBrokerOpenWriterRequest tOpenWriterRequest = new TBrokerOpenWriterRequest(
+                        TBrokerVersion.VERSION_ONE, brokerFilePath, TBrokerOpenMode.APPEND,
+                        clientId, brokerDesc.getProperties());
+                TBrokerOpenWriterResponse tOpenWriterResponse = null;
+                try {
+                    tOpenWriterResponse = client.openWriter(tOpenWriterRequest);
+                } catch (TException e) {
+                    reopenClient(client);
+                    tOpenWriterResponse = client.openWriter(tOpenWriterRequest);
+                }
+                if (tOpenWriterResponse.getOpStatus().getStatusCode() != TBrokerOperationStatusCode.OK) {
+                    throw new UserException("Broker open writer failed. destPath=" + brokerFilePath
+                                                    + ", broker=" + address
+                                                    + ", msg=" + tOpenWriterResponse.getOpStatus().getMessage());
+                }
+                failed = false;
+                fd = tOpenWriterResponse.getFd();
+                currentOffset = 0L;
+                isReady = true;
+            } catch (TException e) {
+                String failMsg = "Broker open writer exception. filePath=" + brokerFilePath + ", broker=" + address;
+                LOG.warn(failMsg, e);
+                throw new UserException(failMsg);
+            }
+        }
+
+        public void write(ByteBuffer byteBuffer, long bufferSize) throws UserException {
+            if (!isReady) {
+                throw new UserException("Broker writer is not ready. filePath=" + brokerFilePath + ", broker=" + address);
+            }
+
+            TBrokerOperationStatus tOperationStatus = null;
+            TBrokerPWriteRequest tPWriteRequest = new TBrokerPWriteRequest(
+                    TBrokerVersion.VERSION_ONE, fd, currentOffset, byteBuffer);
+            try {
+                try {
+                    tOperationStatus = client.pwrite(tPWriteRequest);
+                } catch (TException e) {
+                    reopenClient(client);
+                    tOperationStatus = client.pwrite(tPWriteRequest);
+                }
+                if (tOperationStatus.getStatusCode() != TBrokerOperationStatusCode.OK) {
+                    throw new UserException("Broker write failed. filePath=" + brokerFilePath + ", broker=" + address
+                                                    + ", msg=" + tOperationStatus.getMessage());
+                }
+                currentOffset += bufferSize;
+            } catch (TException e) {
+                String failMsg = "Broker write exception. filePath=" + brokerFilePath + ", broker=" + address;
+                LOG.warn(failMsg, e);
+                throw new UserException(failMsg);
+            }
+        }
+
+        public void close() {
+            // close broker writer
+            TBrokerOperationStatus tOperationStatus = null;
+            if (fd != null) {
+                TBrokerCloseWriterRequest tCloseWriterRequest = new TBrokerCloseWriterRequest(
+                        TBrokerVersion.VERSION_ONE, fd);
+                try {
+                    tOperationStatus = client.closeWriter(tCloseWriterRequest);
+                } catch (TException e) {
+                    reopenClient(client);
+                    try {
+                        tOperationStatus = client.closeWriter(tCloseWriterRequest);
+                    } catch (TException ex) {
+                        LOG.warn("Broker close writer failed. filePath={}, address={}", brokerFilePath, address, ex);
+                    }
+                    if (tOperationStatus.getStatusCode() != TBrokerOperationStatusCode.OK) {
+                        LOG.warn("Broker close writer failed. filePath={}, address={}, error={}", brokerFilePath,
+                                 address, tOperationStatus.getMessage());
+                    }
+                }
+            }
+
+            // return client
+            returnClient(client, address, failed);
+            isReady = false;
+        }
+
     }
 }
