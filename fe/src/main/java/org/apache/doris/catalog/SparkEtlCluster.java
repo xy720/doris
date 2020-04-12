@@ -17,6 +17,8 @@
 
 package org.apache.doris.catalog;
 
+import com.google.common.collect.Lists;
+import org.apache.commons.lang.StringUtils;
 import org.apache.doris.analysis.EtlClusterDesc;
 import org.apache.doris.common.DdlException;
 
@@ -24,51 +26,82 @@ import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
 import com.google.common.collect.Maps;
 import com.google.gson.annotations.SerializedName;
+import org.apache.doris.common.proc.BaseProcResult;
 
+import java.util.List;
 import java.util.Map;
 
 public class SparkEtlCluster extends EtlCluster {
-    public static final String SEMICOLON_SEPARATOR = ";";
-    public static final String EQUAL_SEPARATOR = "=";
-    public static final String COMMA_SEPARATOR = ",";
+    private static final String SEMICOLON_SEPARATOR = ";";
+    private static final String EQUAL_SEPARATOR = "=";
+    private static final String COMMA_SEPARATOR = ",";
 
-    public static final String MASTER = "master";
-    public static final String HDFS_ETL_PATH = "hdfs_etl_path";
-    public static final String BROKER = "broker";
-    public static final String SPARK_ARGS = "spark_args";
-    public static final String YARN_CONFIGS = "yarn_configs";
+    private static final String MASTER = "master";
+    private static final String DEPLOY_MODE = "deploy_mode";
+    private static final String HDFS_ETL_PATH = "hdfs_etl_path";
+    private static final String BROKER = "broker";
+    private static final String SPARK_ARGS = "spark_args";
+    private static final String SPARK_CONFIGS = "spark_configs";
+    private static final String YARN_CONFIGS = "yarn_configs";
 
+    private static final String SPARK_ARG_PREFIX = "--";
+    private static final String SPARK_CONFIG_PREFIX = "spark.";
     private static final String YARN_MASTER = "yarn";
     private static final String YARN_RESOURCE_MANAGER_ADDRESS = "yarn.resourcemanager.address";
     private static final String FS_DEFAULT_FS = "fs.defaultFS";
 
+    public enum DeployMode {
+        CLUSTER,
+        CLIENT;
+
+        public static DeployMode fromString(String deployMode) {
+            for (DeployMode mode : DeployMode.values()) {
+                if (mode.name().equalsIgnoreCase(deployMode)) {
+                    return mode;
+                }
+            }
+            return null;
+        }
+    }
+
     @SerializedName(value = MASTER)
     private String master;
+    @SerializedName(value = DEPLOY_MODE)
+    private DeployMode deployMode = DeployMode.CLUSTER;
     @SerializedName(value = HDFS_ETL_PATH)
     private String hdfsEtlPath;
     @SerializedName(value = BROKER)
     private String broker;
     @SerializedName(value = SPARK_ARGS)
     private Map<String, String> sparkArgsMap;
+    @SerializedName(value = SPARK_CONFIGS)
+    private Map<String, String> sparkConfigsMap;
     @SerializedName(value = YARN_CONFIGS)
     private Map<String, String> yarnConfigsMap;
 
     public SparkEtlCluster(String name) {
-        this(name, null, null, null, Maps.newHashMap(), Maps.newHashMap());
+        this(name, null, DeployMode.CLUSTER, null, null, Maps.newHashMap(), Maps.newHashMap(), Maps.newHashMap());
     }
 
-    private SparkEtlCluster(String name, String master, String hdfsEtlPath, String broker,
-                            Map<String, String> sparkArgsMap, Map<String, String> yarnConfigsMap) {
+    private SparkEtlCluster(String name, String master, DeployMode deployMode, String hdfsEtlPath, String broker,
+                            Map<String, String> sparkArgsMap, Map<String, String> sparkConfigsMap,
+                            Map<String, String> yarnConfigsMap) {
         super(name, EtlClusterType.SPARK);
         this.master = master;
+        this.deployMode = deployMode;
         this.hdfsEtlPath = hdfsEtlPath;
         this.broker = broker;
         this.sparkArgsMap = sparkArgsMap;
+        this.sparkConfigsMap = sparkConfigsMap;
         this.yarnConfigsMap = yarnConfigsMap;
     }
 
     public String getMaster() {
         return master;
+    }
+
+    public DeployMode getDeployMode() {
+        return deployMode;
     }
 
     public String getHdfsEtlPath() {
@@ -83,13 +116,17 @@ public class SparkEtlCluster extends EtlCluster {
         return sparkArgsMap;
     }
 
+    public Map<String, String> getSparkConfigsMap() {
+        return sparkConfigsMap;
+    }
+
     public Map<String, String> getYarnConfigsMap() {
         return yarnConfigsMap;
     }
 
     public SparkEtlCluster getCopiedEtlCluster() {
-        return new SparkEtlCluster(name, master, hdfsEtlPath, broker, Maps.newHashMap(sparkArgsMap),
-                                   Maps.newHashMap(yarnConfigsMap));
+        return new SparkEtlCluster(name, master, deployMode, hdfsEtlPath, broker, Maps.newHashMap(sparkArgsMap),
+                                   Maps.newHashMap(sparkConfigsMap), Maps.newHashMap(yarnConfigsMap));
     }
 
     public boolean isYarnMaster() {
@@ -104,9 +141,16 @@ public class SparkEtlCluster extends EtlCluster {
             return;
         }
 
-        // replace master, hdfsEtlPath, broker if exist in etlClusterDesc
+        // replace master, deployMode, hdfsEtlPath, broker if exist in etlClusterDesc
         if (properties.containsKey(MASTER)) {
             master = properties.get(MASTER);
+        }
+        if (properties.containsKey(DEPLOY_MODE)) {
+            DeployMode mode = DeployMode.fromString(properties.get(DEPLOY_MODE));
+            if (mode == null) {
+                throw new DdlException("Unknown deploy mode: " + properties.get(DEPLOY_MODE));
+            }
+            deployMode = mode;
         }
         if (properties.containsKey(HDFS_ETL_PATH)) {
             hdfsEtlPath = properties.get(hdfsEtlPath);
@@ -117,7 +161,7 @@ public class SparkEtlCluster extends EtlCluster {
 
         // merge spark args
         if (properties.containsKey(SPARK_ARGS)) {
-            Map<String, String> newArgsMap = getArgsMap(properties, SPARK_ARGS);
+            Map<String, String> newArgsMap = getConfigsMap(properties, SPARK_ARGS);
             for (Map.Entry<String, String> entry : newArgsMap.entrySet()) {
                 String argKey = entry.getKey();
                 if (sparkArgsMap.containsKey(argKey)) {
@@ -128,10 +172,14 @@ public class SparkEtlCluster extends EtlCluster {
             }
         }
 
+        // merge spark configs
+        if (properties.containsKey(SPARK_CONFIGS)) {
+            sparkConfigsMap.putAll(getSparkConfigsMap(properties, SPARK_CONFIGS));
+        }
+
         // merge yarn configs
         if (properties.containsKey(YARN_CONFIGS)) {
-            Map<String, String> newConfigsMap = getYarnConfigsMap(properties, YARN_CONFIGS);
-            yarnConfigsMap.putAll(newConfigsMap);
+            yarnConfigsMap.putAll(getYarnConfigsMap(properties, YARN_CONFIGS));
         }
     }
 
@@ -142,6 +190,10 @@ public class SparkEtlCluster extends EtlCluster {
         master = properties.get(MASTER);
         if (master == null) {
             throw new DdlException("Missing spark master in properties");
+        }
+        DeployMode mode = DeployMode.fromString(properties.get(DEPLOY_MODE));
+        if (mode != null) {
+            deployMode = mode;
         }
         hdfsEtlPath = properties.get(HDFS_ETL_PATH);
         if (hdfsEtlPath == null) {
@@ -158,52 +210,92 @@ public class SparkEtlCluster extends EtlCluster {
         }
 
         sparkArgsMap = getSparkArgsMap(properties, SPARK_ARGS);
+        sparkConfigsMap = getSparkConfigsMap(properties, SPARK_CONFIGS);
         yarnConfigsMap = getYarnConfigsMap(properties, YARN_CONFIGS);
     }
 
-    private Map<String, String> getSparkArgsMap(Map<String, String> properties, String argsKey) throws DdlException {
-        Map<String, String> sparkArgsMap = getArgsMap(properties, argsKey);
+    @Override
+    protected void getProcNodeData(BaseProcResult result) {
+        String lowerCaseType = type.name().toLowerCase();
+        result.addRow(Lists.newArrayList(name, lowerCaseType, SparkEtlCluster.MASTER, master));
+        result.addRow(Lists.newArrayList(name, lowerCaseType, SparkEtlCluster.DEPLOY_MODE,
+                                         deployMode.name().toLowerCase()));
+        result.addRow(Lists.newArrayList(name, lowerCaseType, SparkEtlCluster.HDFS_ETL_PATH, hdfsEtlPath));
+        result.addRow(Lists.newArrayList(name, lowerCaseType, SparkEtlCluster.BROKER, broker));
+
+        Map<String, Map<String, String>> keyToConfigsMap = Maps.newHashMap();
+        keyToConfigsMap.put(SPARK_ARGS, sparkArgsMap);
+        keyToConfigsMap.put(SPARK_CONFIGS, sparkConfigsMap);
+        keyToConfigsMap.put(YARN_CONFIGS, yarnConfigsMap);
+        for (Map.Entry<String, Map<String, String>> entry : keyToConfigsMap.entrySet()) {
+            Map<String, String> configsMap = entry.getValue();
+            if (!configsMap.isEmpty()) {
+                List<String> configs = Lists.newArrayList();
+                for (Map.Entry<String, String> argEntry : configsMap.entrySet()) {
+                    configs.add(argEntry.getKey() + SparkEtlCluster.EQUAL_SEPARATOR + argEntry.getValue());
+                }
+                result.addRow(Lists.newArrayList(name, lowerCaseType, entry.getKey(),
+                                                 StringUtils.join(configs, SparkEtlCluster.SEMICOLON_SEPARATOR)));
+            }
+        }
+    }
+
+    private Map<String, String> getSparkArgsMap(Map<String, String> properties, String sparkArgsKey)
+            throws DdlException {
+        Map<String, String> sparkArgsMap = getConfigsMap(properties, sparkArgsKey);
         for (Map.Entry<String, String> entry : sparkArgsMap.entrySet()) {
-            if (!entry.getKey().startsWith("--")) {
-                throw new DdlException(argsKey + " format error, use '--key1=value1,value2;--key2=value3'");
+            if (!entry.getKey().startsWith(SPARK_ARG_PREFIX)) {
+                throw new DdlException(sparkArgsKey + " format error, use '--key1=value1,value2;--key2=value3'");
             }
         }
         return sparkArgsMap;
     }
 
-    private Map<String, String> getYarnConfigsMap(Map<String, String> properties, String argsKey) throws DdlException {
-        Map<String, String> yarnConfigsMap = getArgsMap(properties, argsKey);
+    private Map<String, String> getSparkConfigsMap(Map<String, String> properties, String sparkConfigsKey)
+            throws DdlException {
+        Map<String, String> sparkConfigsMap = getConfigsMap(properties, sparkConfigsKey);
+        for (Map.Entry<String, String> entry : sparkConfigsMap.entrySet()) {
+            if (!entry.getKey().startsWith(SPARK_CONFIG_PREFIX)) {
+                throw new DdlException(sparkConfigsKey + " format error, use 'spark.key1=value1;spark.key2=value2'");
+            }
+        }
+        return sparkConfigsMap;
+    }
+
+    private Map<String, String> getYarnConfigsMap(Map<String, String> properties, String yarnConfigsKey) throws DdlException {
+        Map<String, String> yarnConfigsMap = getConfigsMap(properties, yarnConfigsKey);
         if ((!yarnConfigsMap.containsKey(YARN_RESOURCE_MANAGER_ADDRESS) || !yarnConfigsMap.containsKey(FS_DEFAULT_FS))
                 && isYarnMaster()) {
-            throw new DdlException("Missing " + argsKey + "(" + YARN_RESOURCE_MANAGER_ADDRESS + " and " + FS_DEFAULT_FS
+            throw new DdlException("Missing " + yarnConfigsKey + "(" + YARN_RESOURCE_MANAGER_ADDRESS + " and " + FS_DEFAULT_FS
                                            + ") in yarn master");
         }
         return yarnConfigsMap;
     }
 
-    private Map<String, String> getArgsMap(Map<String, String> properties, String argsKey) throws DdlException {
-        Map<String, String> argsMap = Maps.newHashMap();
+    private Map<String, String> getConfigsMap(Map<String, String> properties, String key) throws DdlException {
+        Map<String, String> configsMap = Maps.newHashMap();
 
-        String argsStr = properties.get(argsKey);
-        if (Strings.isNullOrEmpty(argsStr)) {
-            return argsMap;
+        String configsStr = properties.get(key);
+        if (Strings.isNullOrEmpty(configsStr)) {
+            return configsMap;
         }
 
         // --jars=xxx.jar,yyy.jar;--files=/tmp/aaa,/tmp/bbb
         // yarn.resourcemanager.address=host:port;fs.defaultFS=hdfs://host:port
-        String[] args = argsStr.split(SEMICOLON_SEPARATOR);
-        for (String argStr : args) {
-            if (argStr.trim().isEmpty()) {
+        // spark.driver.memory=1g;spark.executor.memory=1g
+        String[] configs = configsStr.split(SEMICOLON_SEPARATOR);
+        for (String configStr : configs) {
+            if (configStr.trim().isEmpty()) {
                 continue;
             }
 
-            String[] argArr = argStr.trim().split(EQUAL_SEPARATOR);
-            if (argArr.length != 2 || argArr[0].isEmpty() || argArr[1].isEmpty()) {
-                throw new DdlException(argsKey + " format error, use 'key1=value1;key2=value2'");
+            String[] configArr = configStr.trim().split(EQUAL_SEPARATOR);
+            if (configArr.length != 2 || configArr[0].isEmpty() || configArr[1].isEmpty()) {
+                throw new DdlException(key + " format error, use 'key1=value1;key2=value2'");
             }
-            argsMap.put(argArr[0], argArr[1]);
+             configsMap.put(configArr[0], configArr[1]);
         }
-        return argsMap;
+        return  configsMap;
     }
 }
 

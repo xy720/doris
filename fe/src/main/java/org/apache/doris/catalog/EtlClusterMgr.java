@@ -25,9 +25,7 @@ import org.apache.doris.common.proc.ProcNodeInterface;
 import org.apache.doris.common.proc.ProcResult;
 
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-import org.apache.commons.lang.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -180,37 +178,8 @@ public class EtlClusterMgr {
             lock.lock();
             try {
                 for (Map.Entry<String, EtlCluster> entry : nameToEtlCluster.entrySet()) {
-                    String clusterName = entry.getKey();
                     EtlCluster etlCluster = entry.getValue();
-                    EtlClusterType cluterType = etlCluster.getType();
-                    if (cluterType == EtlClusterType.SPARK) {
-                        SparkEtlCluster sparkEtlCluster = (SparkEtlCluster) etlCluster;
-                        String type = cluterType.name().toLowerCase();
-                        result.addRow(Lists.newArrayList(clusterName, type, SparkEtlCluster.MASTER,
-                                                         sparkEtlCluster.getMaster()));
-                        result.addRow(Lists.newArrayList(clusterName, type, SparkEtlCluster.HDFS_ETL_PATH,
-                                                         sparkEtlCluster.getHdfsEtlPath()));
-                        result.addRow(Lists.newArrayList(clusterName, type, SparkEtlCluster.BROKER,
-                                                         sparkEtlCluster.getBroker()));
-                        Map<String, String> sparkArgsMap = sparkEtlCluster.getSparkArgsMap();
-                        if (sparkArgsMap != null && !sparkArgsMap.isEmpty()) {
-                            List<String> args = Lists.newArrayList();
-                            for (Map.Entry<String, String> argEntry : sparkArgsMap.entrySet()) {
-                                args.add(argEntry.getKey() + SparkEtlCluster.EQUAL_SEPARATOR + argEntry.getValue());
-                            }
-                            result.addRow(Lists.newArrayList(clusterName, type, SparkEtlCluster.SPARK_ARGS,
-                                                             StringUtils.join(args, SparkEtlCluster.SEMICOLON_SEPARATOR)));
-                        }
-                        Map<String, String> yarnConfigsMap = sparkEtlCluster.getYarnConfigsMap();
-                        if (yarnConfigsMap != null && !yarnConfigsMap.isEmpty()) {
-                            List<String> configs = Lists.newArrayList();
-                            for (Map.Entry<String, String> configEntry : yarnConfigsMap.entrySet()) {
-                                configs.add(configEntry.getKey() + SparkEtlCluster.EQUAL_SEPARATOR + configEntry.getValue());
-                            }
-                            result.addRow(Lists.newArrayList(clusterName, type, SparkEtlCluster.YARN_CONFIGS,
-                                                             StringUtils.join(configs, SparkEtlCluster.SEMICOLON_SEPARATOR)));
-                        }
-                    }
+                    etlCluster.getProcNodeData(result);
                 }
             } finally {
                 lock.unlock();

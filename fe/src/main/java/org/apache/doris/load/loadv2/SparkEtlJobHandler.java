@@ -27,7 +27,6 @@ import org.apache.doris.catalog.SparkEtlCluster;
 import org.apache.doris.common.LoadException;
 import org.apache.doris.common.UserException;
 import org.apache.doris.common.util.BrokerUtil;
-import org.apache.doris.common.util.Util;
 import org.apache.doris.load.EtlStatus;
 import org.apache.doris.load.loadv2.dpp.DppResult;
 import org.apache.doris.load.loadv2.etl.EtlJobConfig;
@@ -36,6 +35,7 @@ import org.apache.doris.thrift.TEtlState;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.yarn.api.records.ApplicationReport;
+import org.apache.hadoop.yarn.api.records.FinalApplicationStatus;
 import org.apache.hadoop.yarn.api.records.YarnApplicationState;
 import org.apache.hadoop.yarn.client.api.YarnClient;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
@@ -53,25 +53,20 @@ import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 
-import java.io.BufferedWriter;
-import java.io.File;
-import java.io.FileOutputStream;
 import java.io.IOException;
-import java.io.OutputStreamWriter;
+import java.io.UnsupportedEncodingException;
 import java.util.List;
 import java.util.Map;
 
 public class SparkEtlJobHandler {
     private static final Logger LOG = LogManager.getLogger(SparkEtlJobHandler.class);
 
-    private static final String JOB_CONFIG_DIR = PaloFe.DORIS_HOME_DIR + "/temp/job_conf";
-    private static final String APP_RESOURCE = PaloFe.DORIS_HOME_DIR + "/lib/palo-fe.jar";
+    private static final String APP_RESOURCE_NAME = "palo-fe.jar";
+    private static final String CONFIG_FILE_NAME = "jobconfig.json";
+    private static final String APP_RESOURCE_LOCAL_PATH = PaloFe.DORIS_HOME_DIR + "/lib/" + APP_RESOURCE_NAME;
+    private static final String JOB_CONFIG_DIR = "configs";
     private static final String MAIN_CLASS = "org.apache.doris.load.loadv2.etl.SparkEtlJob";
-    private static final String SPARK_DEPLOY_MODE = "cluster";
     private static final String ETL_JOB_NAME = "doris__%s";
-
-    private static final String HADOOP_CONF_DIR_KEY = "HADOOP_CONF_DIR";
-    private static final String HADOOP_CONF_DIR_VALUE = PaloFe.DORIS_HOME_DIR + "/temp/hadoop_conf";
     private static final String SPARK_HADOOP_CONFIG_PREFIX = "spark.hadoop.";
     // 5min
     private static final int GET_APPID_MAX_RETRY = 300;
@@ -87,33 +82,47 @@ public class SparkEtlJobHandler {
     public void submitEtlJob(long loadJobId, String loadLabel, SparkEtlCluster etlCluster, BrokerDesc brokerDesc,
                              EtlJobConfig etlJobConfig, SparkPendingTaskAttachment attachment) throws LoadException {
         // delete outputPath
-        deleteEtlFilePaths(etlJobConfig.outputPath, brokerDesc);
+        deleteEtlOutputPath(etlJobConfig.outputPath, brokerDesc);
 
-        // create job config file
-        // delete when etl job finished or cancelled
-        String configFilePath = createJobConfigFile(loadJobId, configToJson(etlJobConfig));
+        // upload app resource and jobconfig to hdfs
+        String configsHdfsDir = etlJobConfig.outputPath + "/" + JOB_CONFIG_DIR + "/";
+        String appResourceHdfsPath = configsHdfsDir + APP_RESOURCE_NAME;
+        String jobConfigHdfsPath = configsHdfsDir + CONFIG_FILE_NAME;
+        try {
+            BrokerUtil.writeBrokerFile(APP_RESOURCE_LOCAL_PATH, appResourceHdfsPath, brokerDesc);
+            byte[] configData = configToJson(etlJobConfig).getBytes("UTF-8");
+            BrokerUtil.writeBrokerFile(configData, jobConfigHdfsPath, brokerDesc);
+        } catch (UserException | UnsupportedEncodingException e) {
+            throw new LoadException(e.getMessage());
+        }
 
-        // spark cluster config
         Map<String, String> env = Maps.newHashMap();
-        env.put(HADOOP_CONF_DIR_KEY, HADOOP_CONF_DIR_VALUE);
+        //env.put("HADOOP_CONF_DIR", "");
         //env.put("SPARK_HOME", "/home/disk1/wyb/deploy/spark-2.4.4-bin-hadoop2.7");
         SparkLauncher launcher = new SparkLauncher(env);
+        // master      |  deployMode
+        // ------------|-------------
+        // yarn        |  cluster
+        // spark://xx  |  cluster
+        // spark://xx  |  client
         launcher.setMaster(etlCluster.getMaster())
-                .setDeployMode(SPARK_DEPLOY_MODE)
-                .setAppResource(APP_RESOURCE)
+                .setDeployMode(etlCluster.getDeployMode().name().toLowerCase())
+                .setAppResource(appResourceHdfsPath)
                 .setMainClass(MAIN_CLASS)
                 .setAppName(String.format(ETL_JOB_NAME, loadLabel))
-                .addFile(configFilePath);
+                .addAppArgs(jobConfigHdfsPath);
         // spark args: --jars, --files, --queue
-        if (etlCluster.getSparkArgsMap() != null) {
-            for (Map.Entry<String, String> entry : etlCluster.getSparkArgsMap().entrySet()) {
-                launcher.addSparkArg(entry.getKey(), entry.getValue());
-            }
+        for (Map.Entry<String, String> entry : etlCluster.getSparkArgsMap().entrySet()) {
+            launcher.addSparkArg(entry.getKey(), entry.getValue());
+        }
+        // spark configs
+        for (Map.Entry<String, String> entry : etlCluster.getSparkConfigsMap().entrySet()) {
+            launcher.setConf(entry.getKey(), entry.getValue());
         }
         // yarn configs:
         // yarn.resourcemanager.address
         // fs.defaultFS
-        if (etlCluster.isYarnMaster() && etlCluster.getYarnConfigsMap() != null) {
+        if (etlCluster.isYarnMaster()) {
             for (Map.Entry<String, String> entry : etlCluster.getYarnConfigsMap().entrySet()) {
                 launcher.setConf(SPARK_HADOOP_CONFIG_PREFIX + entry.getKey(), entry.getValue());
             }
@@ -165,48 +174,6 @@ public class SparkEtlJobHandler {
         attachment.setHandle(handle);
     }
 
-    private String createJobConfigFile(long loadJobId, String jsonConfig) throws LoadException {
-        // check config dir
-        String configDirPath = JOB_CONFIG_DIR + "/" + loadJobId;
-        File configDir = new File(configDirPath);
-        if (!Util.deleteDirectory(configDir)) {
-            String errMsg = "delete config dir error. job: " + loadJobId;
-            LOG.warn(errMsg);
-            throw new LoadException(errMsg);
-        }
-        if (!configDir.mkdirs()) {
-            String errMsg = "create config dir error. job: " + loadJobId;
-            LOG.warn(errMsg);
-            throw new LoadException(errMsg);
-        }
-
-        // write file
-        String configFilePath = configDirPath + "/" + EtlJobConfig.JOB_CONFIG_FILE_NAME;
-        File configFile = new File(configFilePath);
-        BufferedWriter bw = null;
-        try {
-            bw = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(configFile),
-                                                           "UTF-8"));
-            bw.write(jsonConfig);
-            bw.flush();
-        } catch (IOException e) {
-            Util.deleteDirectory(configDir);
-            String errMsg = "create config file error. job: " + loadJobId;
-            LOG.warn(errMsg, e);
-            throw new LoadException(errMsg);
-        } finally {
-            if (bw != null) {
-                try {
-                    bw.close();
-                } catch (IOException e) {
-                    LOG.warn("close buffered writer error", e);
-                }
-            }
-        }
-
-        return configFilePath;
-    }
-
     public EtlStatus getEtlJobStatus(SparkAppHandle handle, String appId, long loadJobId, SparkEtlCluster etlCluster,
                                      String etlOutputPath, BrokerDesc brokerDesc) {
         EtlStatus status = new EtlStatus();
@@ -220,7 +187,8 @@ public class SparkEtlJobHandler {
                 LOG.info("yarn application -status {}, load job id: {}, result: {}", appId, loadJobId, report);
 
                 YarnApplicationState state = report.getYarnApplicationState();
-                status.setState(fromYarnState(state));
+                FinalApplicationStatus faStatus = report.getFinalApplicationStatus();
+                status.setState(fromYarnState(state, faStatus));
                 if (status.getState() == TEtlState.CANCELLED) {
                     status.setFailMsg("yarn app state: " + state.toString());
                 }
@@ -252,9 +220,6 @@ public class SparkEtlJobHandler {
         }
 
         if (status.getState() == TEtlState.FINISHED || status.getState() == TEtlState.CANCELLED) {
-            // delete config file
-            deleteConfigFile(loadJobId);
-
             // get dpp result
             String dppResultFilePath = EtlJobConfig.getDppResultFilePath(etlOutputPath);
             try {
@@ -291,9 +256,6 @@ public class SparkEtlJobHandler {
                 handle.stop();
             }
         }
-
-        // delete config file
-        deleteConfigFile(loadJobId);
     }
 
     public Map<String, Long> getEtlFilePaths(String outputPath, BrokerDesc brokerDesc) throws Exception {
@@ -318,7 +280,7 @@ public class SparkEtlJobHandler {
         return filePathToSize;
     }
 
-    public void deleteEtlFilePaths(String outputPath, BrokerDesc brokerDesc) {
+    public void deleteEtlOutputPath(String outputPath, BrokerDesc brokerDesc) {
         try {
             BrokerUtil.deleteBrokerPath(outputPath, brokerDesc);
             LOG.info("delete path success. path: {}", outputPath);
@@ -337,11 +299,9 @@ public class SparkEtlJobHandler {
     private YarnClient startYarnClient(SparkEtlCluster etlCluster) {
         YarnClient client = YarnClient.createYarnClient();
         Configuration conf = new YarnConfiguration();
-        if (etlCluster.getYarnConfigsMap() != null) {
-            // set yarn.resourcemanager.address
-            for (Map.Entry<String, String> entry : etlCluster.getYarnConfigsMap().entrySet()) {
-                conf.set(entry.getKey(), entry.getValue());
-            }
+        // set yarn.resourcemanager.address
+        for (Map.Entry<String, String> entry : etlCluster.getYarnConfigsMap().entrySet()) {
+            conf.set(entry.getKey(), entry.getValue());
         }
         client.init(conf);
         client.start();
@@ -352,12 +312,19 @@ public class SparkEtlJobHandler {
         client.stop();
     }
 
-    private TEtlState fromYarnState(YarnApplicationState state) {
+    private TEtlState fromYarnState(YarnApplicationState state, FinalApplicationStatus faStatus) {
         switch (state) {
             case FINISHED:
-                return TEtlState.FINISHED;
+                if (faStatus == FinalApplicationStatus.SUCCEEDED) {
+                    // finish and success
+                    return TEtlState.FINISHED;
+                } else {
+                    // finish but fail
+                    return TEtlState.CANCELLED;
+                }
             case FAILED:
             case KILLED:
+                // not finish
                 return TEtlState.CANCELLED;
             default:
                 // ACCEPTED NEW NEW_SAVING RUNNING SUBMITTED
@@ -377,10 +344,5 @@ public class SparkEtlJobHandler {
                 // UNKNOWN CONNECTED SUBMITTED RUNNING
                 return TEtlState.RUNNING;
         }
-    }
-
-    private void deleteConfigFile(long loadJobId) {
-        String configDirPath = JOB_CONFIG_DIR + "/" + loadJobId;
-        Util.deleteDirectory(new File(configDirPath));
     }
 }

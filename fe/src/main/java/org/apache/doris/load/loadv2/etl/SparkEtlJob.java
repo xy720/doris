@@ -24,7 +24,6 @@ import org.apache.doris.load.loadv2.etl.EtlJobConfig.EtlIndex;
 import org.apache.doris.load.loadv2.etl.EtlJobConfig.EtlTable;
 
 import org.apache.spark.SparkConf;
-import org.apache.spark.SparkFiles;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext;
 import org.apache.spark.sql.SparkSession;
@@ -38,12 +37,16 @@ import java.util.List;
 import java.util.Map;
 
 public class SparkEtlJob {
-    private static final String SPARK_YARN_STAGING_DIR = "SPARK_YARN_STAGING_DIR";
     private static final String BITMAP_TYPE = "bitmap";
 
+    private String jobConfigFilePath;
     private EtlJobConfig etlJobConfig;
     private boolean hasBitMapColumns;
     private JavaSparkContext sc;
+
+    private SparkEtlJob(String jobConfigFilePath) {
+        this.jobConfigFilePath = jobConfigFilePath;
+    }
 
     private void initSparkEnvironment() {
         SparkConf conf = new SparkConf();
@@ -51,22 +54,7 @@ public class SparkEtlJob {
     }
 
     private void initConfig() {
-        String sparkYarnStagingDir = System.getenv(SPARK_YARN_STAGING_DIR);
-        String jobConfigFilePath = null;
-        if (sparkYarnStagingDir != null) {
-            // master type |  deployMode type
-            // ------------|----------------
-            // yarn        |  cluster
-            jobConfigFilePath = sparkYarnStagingDir + "/" + EtlJobConfig.JOB_CONFIG_FILE_NAME;
-        } else {
-            // master type |  deployMode type
-            // ------------|----------------
-            // spark://xx  |  client
-            jobConfigFilePath = "file://" + SparkFiles.get(EtlJobConfig.JOB_CONFIG_FILE_NAME);
-        }
-        System.err.println("****** spark yarn staging dir: " + sparkYarnStagingDir);
         System.err.println("****** job config file path: " + jobConfigFilePath);
-
         JavaRDD<String> textFileRdd = sc.textFile(jobConfigFilePath);
         String jobJsonConfigs = String.join("", textFileRdd.collect());
         System.err.println("****** rdd read json configs: " + jobJsonConfigs);
@@ -198,8 +186,13 @@ public class SparkEtlJob {
     }
 
     public static void main(String[] args) {
+        if (args.length < 1) {
+            System.err.println("missing job config file path arg");
+            System.exit(-1);
+        }
+
         try {
-            new SparkEtlJob().run();
+            new SparkEtlJob(args[0]).run();
         } catch (Exception e) {
             System.err.println("spark etl job run fail");
             e.printStackTrace();
