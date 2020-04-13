@@ -103,7 +103,7 @@ public class SparkEtlJobHandler {
 
         Map<String, String> env = Maps.newHashMap();
         //env.put("HADOOP_CONF_DIR", "");
-        //env.put("SPARK_HOME", "/home/disk1/wyb/deploy/spark-2.4.4-bin-hadoop2.7");
+        //env.put("SPARK_HOME", "");
         SparkLauncher launcher = new SparkLauncher(env);
         // master      |  deployMode
         // ------------|-------------
