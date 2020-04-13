@@ -72,13 +72,33 @@ public class BitmapUnion extends UserDefinedAggregateFunction {
     public void initialize(MutableAggregationBuffer buffer) {
         RoaringBitmap roaringBitmap = new RoaringBitmap();
         roaringBitmap.runOptimize();
-        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        buffer.update(0, serializeBitmap(roaringBitmap));
+    }
+
+    public byte[] serializeBitmap(RoaringBitmap roaringBitmap) {
         try {
-            roaringBitmap.serialize(new DataOutputStream(bos));
+            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+            DataOutputStream outputStream = new DataOutputStream(bos);
+            outputStream.writeByte(2);
+            roaringBitmap.serialize(outputStream);
+            return bos.toByteArray();
         } catch (IOException ioException) {
             ioException.printStackTrace();
+            throw new RuntimeException(ioException);
         }
-        buffer.update(0, bos.toByteArray());
+    }
+
+    public RoaringBitmap deserializeBitmap(byte[] byteBitmap) {
+        try {
+            DataInputStream inputStream = new DataInputStream(new ByteArrayInputStream(byteBitmap));
+            int type = inputStream.readByte();
+            assert type == 2;
+            RoaringBitmap bitmap = new RoaringBitmap();
+            bitmap.deserialize(inputStream);
+            return bitmap;
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
     }
 
     @Override
@@ -89,17 +109,10 @@ public class BitmapUnion extends UserDefinedAggregateFunction {
             int id = Integer.parseInt(value);
             Object bitmapObj = buffer.get(0);
             byte[] bitmapBytes = (byte[])bitmapObj;
-            RoaringBitmap bitmap = new RoaringBitmap();
-            try {
-                bitmap.deserialize(new DataInputStream(new ByteArrayInputStream(bitmapBytes)));
-                bitmap.add(id);
-                bitmap.runOptimize();
-                ByteArrayOutputStream bos = new ByteArrayOutputStream();
-                bitmap.serialize(new DataOutputStream(bos));
-                buffer.update(0, bos.toByteArray());
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
+            RoaringBitmap bitmap = deserializeBitmap(bitmapBytes);
+            bitmap.add(id);
+            bitmap.runOptimize();
+            buffer.update(0, serializeBitmap(bitmap));
         }
     }
 
@@ -107,18 +120,10 @@ public class BitmapUnion extends UserDefinedAggregateFunction {
     public void merge(MutableAggregationBuffer buffer1, Row buffer2) {
         byte[] bitmap2Bytes = (byte[])buffer2.get(0);
         byte[] bitmap1Bytes = (byte[])buffer1.get(0);
-        RoaringBitmap bitmap1 = new RoaringBitmap();
-        RoaringBitmap bitmap2 = new RoaringBitmap();
-        try {
-            bitmap1.deserialize(new DataInputStream(new ByteArrayInputStream(bitmap1Bytes)));
-            bitmap2.deserialize(new DataInputStream(new ByteArrayInputStream(bitmap2Bytes)));
-            bitmap1.or(bitmap2);
-            ByteArrayOutputStream bos = new ByteArrayOutputStream();
-            bitmap1.serialize(new DataOutputStream(bos));
-            buffer1.update(0, bos.toByteArray());
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
+        RoaringBitmap bitmap1 = deserializeBitmap(bitmap1Bytes);
+        RoaringBitmap bitmap2 = deserializeBitmap(bitmap2Bytes);
+        bitmap1.or(bitmap2);
+        buffer1.update(0, serializeBitmap(bitmap1));
     }
 
     @Override
