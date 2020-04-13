@@ -156,8 +156,10 @@ public final class SparkDpp implements java.io.Serializable {
         return aggDataFrame;
     }
 
-    private void writePartitionedAndSortedDataframeToParquet(Dataset<Row> dataframe, String pathPattern, long tableId,
-                                                             EtlJobConfig.EtlIndex indexMeta) {
+    private void writePartitionedAndSortedDataframeToParquet(Dataset<Row> dataframe,
+                                                             String pathPattern,
+                                                             long tableId,
+                                                             EtlJobConfig.EtlIndex indexMeta) throws UserException {
         dataframe.foreachPartition(new ForeachPartitionFunction<Row>() {
             @Override
             public void call(Iterator<Row> t) throws Exception {
@@ -182,9 +184,13 @@ public final class SparkDpp implements java.io.Serializable {
                             builder.optional(PrimitiveType.PrimitiveTypeName.FLOAT).named(column.columnName);
                         } else if (column.columnType.equals("DOUBLE")) {
                             builder.optional(PrimitiveType.PrimitiveTypeName.DOUBLE).named(column.columnName);
+                        } else if (column.columnType.equals("BITMAP")) {
+                            builder.optional(PrimitiveType.PrimitiveTypeName.BINARY).named(column.columnName);
+                        } else if (column.columnType.equals("HLL")) {
+                            builder.optional(PrimitiveType.PrimitiveTypeName.BINARY).named(column.columnName);
                         } else {
-                            // TODO: exception handle
                             System.err.println("invalid column type:" + column);
+                            throw new UserException("invalid column type:" + column);
                         }
                     } else {
                         if (column.columnType.equals("SMALLINT") ||column.columnType.equals("INT")) {
@@ -200,9 +206,13 @@ public final class SparkDpp implements java.io.Serializable {
                             builder.required(PrimitiveType.PrimitiveTypeName.FLOAT).named(column.columnName);
                         } else if (column.columnType.equals("DOUBLE")) {
                             builder.required(PrimitiveType.PrimitiveTypeName.DOUBLE).named(column.columnName);
+                        } else if (column.columnType.equals("BITMAP")) {
+                            builder.required(PrimitiveType.PrimitiveTypeName.BINARY).named(column.columnName);
+                        } else if (column.columnType.equals("HLL")) {
+                            builder.required(PrimitiveType.PrimitiveTypeName.BINARY).named(column.columnName);
                         } else {
-                            // TODO: exception handle
                             System.err.println("invalid column type:" + column);
+                            throw new UserException("invalid column type:" + column);
                         }
                     }
                 }
@@ -269,7 +279,8 @@ public final class SparkDpp implements java.io.Serializable {
 
     private void processRollupTree(RollupTreeNode rootNode,
                                    Dataset<Row> rootDataframe,
-                                   long tableId, EtlJobConfig.EtlTable tableMeta, EtlJobConfig.EtlIndex baseIndex) {
+                                   long tableId, EtlJobConfig.EtlTable tableMeta,
+                                   EtlJobConfig.EtlIndex baseIndex) throws UserException {
         Queue<RollupTreeNode> nodeQueue = new LinkedList<>();
         nodeQueue.offer(rootNode);
         int currentLevel = 0;

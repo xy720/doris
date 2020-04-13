@@ -60,7 +60,7 @@ public class BitmapUnion extends UserDefinedAggregateFunction {
 
     @Override
     public DataType dataType() {
-        return DataTypes.StringType;
+        return DataTypes.BinaryType;
     }
 
     @Override
