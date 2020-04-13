@@ -180,7 +180,7 @@ public class SparkEtlJob {
     }
 
     private void processData() throws Exception {
-        SparkSession spark = SparkSession.builder().master("local").getOrCreate();
+        SparkSession spark = SparkSession.builder().master("local").enableHiveSupport().getOrCreate();
         if (hasBitMapColumns) {
             processDataFromHiveTable(spark);
         } else {
