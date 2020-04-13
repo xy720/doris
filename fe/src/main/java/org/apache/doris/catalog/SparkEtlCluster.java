@@ -264,7 +264,7 @@ public class SparkEtlCluster extends EtlCluster {
 
     private Map<String, String> getYarnConfigsMap(Map<String, String> properties, String yarnConfigsKey) throws DdlException {
         Map<String, String> yarnConfigsMap = getConfigsMap(properties, yarnConfigsKey);
-        if ((!yarnConfigsMap.containsKey(YARN_RESOURCE_MANAGER_ADDRESS) || !yarnConfigsMap.containsKey(FS_DEFAULT_FS))
+        if ((!yarnConfigsMap.containsKey(YARN_RESOURCE_MANAGER_ADDRESS))
                 && isYarnMaster()) {
             throw new DdlException("Missing " + yarnConfigsKey + "(" + YARN_RESOURCE_MANAGER_ADDRESS + " and " + FS_DEFAULT_FS
                                            + ") in yarn master");
