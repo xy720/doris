@@ -48,7 +48,7 @@ import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
-import org.apache.spark.sql.expressions.UserDefinedAggregateFunction;
+//import org.apache.spark.sql.expressions.UserDefinedAggregateFunction;
 import org.apache.spark.util.LongAccumulator;
 import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.api.java.JavaRDD;
