@@ -92,7 +92,6 @@ public final class SparkDpp implements java.io.Serializable {
     private LongAccumulator fileSizeAcc = null;
     private DppResult dppResult;
     private SparkSession spark = null;
-    private UserDefinedAggregateFunction bitmap_union = null;
 
     public SparkDpp(SparkSession spark, EtlJobConfig etlJobConfig) {
         this.spark = spark;
@@ -100,7 +99,8 @@ public final class SparkDpp implements java.io.Serializable {
     }
 
     public void init() {
-        bitmap_union = spark.udf().register("bitmap_union", new BitmapUnion());
+        spark.udf().register("bitmap_union_str", new BitmapUnion(DataTypes.StringType));
+        spark.udf().register("bitmap_union_binary", new BitmapUnion(DataTypes.BinaryType));
         abnormalRowAcc = spark.sparkContext().longAccumulator();
         unselectedRowAcc = spark.sparkContext().longAccumulator();
         scannedRowsAcc = spark.sparkContext().longAccumulator();
@@ -136,8 +136,13 @@ public final class SparkDpp implements java.io.Serializable {
                     sb.append("sum(" + column.columnName + ") as " + column.columnName);
                     sb.append(",");
                 }  else if (column.aggregationType.equalsIgnoreCase("BITMAP_UNION")) {
-                    sb.append("bitmap_union(" + column.columnName + ") as " + column.columnName);
-                    sb.append(",");
+                    if (indexMeta.isBaseIndex) {
+                        sb.append("bitmap_union_str(" + column.columnName + ") as " + column.columnName);
+                        sb.append(",");
+                    } else {
+                        sb.append("bitmap_union_binary(" + column.columnName + ") as " + column.columnName);
+                        sb.append(",");
+                    }
                 }
             }
         }
