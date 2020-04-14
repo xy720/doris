@@ -161,10 +161,7 @@ public final class SparkDpp implements java.io.Serializable {
         // after agg, the type of sum column maybe be changed, so should add type cast for value column
         for (Map.Entry<String, DataType> entry : valueColumnsOriginalType.entrySet()) {
             DataType currentType = aggDataFrame.schema().apply(entry.getKey()).dataType();
-            if (indexMeta.isBaseIndex && indexMeta.getColumn(entry.getKey()).aggregationType.equalsIgnoreCase("BITMAP_UNION") ) {
-                aggDataFrame = aggDataFrame.withColumn(entry.getKey(), aggDataFrame.col(entry.getKey()).cast(DataTypes.BinaryType));
-                System.err.println(entry.getKey() + " complete type cast to bitmap");
-            } else if (!currentType.equals(entry.getValue())) {
+            if (!currentType.equals(entry.getValue())) {
                 aggDataFrame = aggDataFrame.withColumn(entry.getKey(), aggDataFrame.col(entry.getKey()).cast(entry.getValue()));
             }
         }
