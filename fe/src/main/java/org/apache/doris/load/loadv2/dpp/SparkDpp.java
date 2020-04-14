@@ -43,7 +43,7 @@ import org.apache.spark.sql.Row;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Column;
 import org.apache.spark.sql.SparkSession;
-import org.apache.spark.sql.functions;
+//import org.apache.spark.sql.functions;
 import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructField;
@@ -52,7 +52,7 @@ import org.apache.spark.sql.expressions.UserDefinedAggregateFunction;
 import org.apache.spark.util.LongAccumulator;
 import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.api.java.JavaRDD;
-import org.apache.spark.sql.SparkSession;
+//import org.apache.spark.sql.SparkSession;
 
 import scala.Tuple2;
 import scala.collection.Seq;
@@ -73,6 +73,8 @@ import java.util.Arrays;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import scala.collection.JavaConverters;
+
+//import static org.apache.spark.sql.types.DataTypes.BinaryType;
 
 // This class is a Spark-based data preprocessing program,
 // which will make use of the distributed compute framework of spark to
@@ -149,10 +151,14 @@ public final class SparkDpp implements java.io.Serializable {
         // after agg, the type of sum column maybe be changed, so should add type cast for value column
         for (Map.Entry<String, DataType> entry : valueColumnsOriginalType.entrySet()) {
             DataType currentType = aggDataFrame.schema().apply(entry.getKey()).dataType();
-            if (!currentType.equals(entry.getValue())) {
+            if (indexMeta.isBaseIndex && indexMeta.getColumn(entry.getKey()).aggregationType.equalsIgnoreCase("BITMAP_UNION") ) {
+                aggDataFrame = aggDataFrame.withColumn(entry.getKey(), aggDataFrame.col(entry.getKey()).cast(DataTypes.BinaryType));
+                System.err.println(entry.getKey() + " complete type cast to bitmap");
+            } else if (!currentType.equals(entry.getValue())) {
                 aggDataFrame = aggDataFrame.withColumn(entry.getKey(), aggDataFrame.col(entry.getKey()).cast(entry.getValue()));
             }
         }
+        aggDataFrame.printSchema();
         return aggDataFrame;
     }
 
