@@ -38,9 +38,9 @@ public class BitmapUnion extends UserDefinedAggregateFunction {
     private StructType inputSchema;
     private StructType bufferSchema;
 
-    public BitmapUnion() {
+    public BitmapUnion(DataType dataType) {
         List<StructField> inputFields = new ArrayList<>();
-        inputFields.add(DataTypes.createStructField("str", DataTypes.StringType,true));
+        inputFields.add(DataTypes.createStructField("str", dataType,true));
         inputSchema = DataTypes.createStructType(inputFields);
 
         List<StructField> bufferFields = new ArrayList<>();
