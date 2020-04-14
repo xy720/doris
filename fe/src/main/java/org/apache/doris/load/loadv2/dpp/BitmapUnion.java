@@ -71,7 +71,7 @@ public class BitmapUnion extends UserDefinedAggregateFunction {
     @Override
     public void initialize(MutableAggregationBuffer buffer) {
         RoaringBitmap roaringBitmap = new RoaringBitmap();
-        roaringBitmap.runOptimize();
+//        roaringBitmap.runOptimize();
         buffer.update(0, serializeBitmap(roaringBitmap));
     }
 
