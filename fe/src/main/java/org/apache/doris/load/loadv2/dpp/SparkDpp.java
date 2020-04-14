@@ -156,6 +156,7 @@ public final class SparkDpp implements java.io.Serializable {
         System.out.println("print current schema: index id=" + indexMeta.toString());
         dataframe.printSchema();
 
+        System.out.println(aggSql);
         Dataset<Row> aggDataFrame = spark.sql(aggSql);
         // after agg, the type of sum column maybe be changed, so should add type cast for value column
         for (Map.Entry<String, DataType> entry : valueColumnsOriginalType.entrySet()) {
