@@ -1009,7 +1009,8 @@ OLAPStatus PushBrokerReader::next(ContiguousRow* row) {
     //LOG(INFO) << "row data: " << _tuple->to_string(*_tuple_desc);
 
     auto slot_descs = _tuple_desc->slots();
-	for (size_t i = 0; i < slot_descs.size(); ++i) {
+    size_t num_key_columns = _schema->num_key_columns();
+    for (size_t i = 0; i < slot_descs.size(); ++i) {
         auto cell = row->cell(i);
         const SlotDescriptor* slot = slot_descs[i];
 
@@ -1017,6 +1018,9 @@ OLAPStatus PushBrokerReader::next(ContiguousRow* row) {
         const void* value = _tuple->get_slot(slot->tuple_offset());
         _schema->column(i)->consume(&cell, (const char*)value, is_null, 
                                     _mem_pool.get(), _runtime_state->obj_pool());
+        if (i >= num_key_columns) {
+            _schema->column(i)->agg_finalize(&cell, _mem_pool.get());
+        }
     }
 
 	return OLAP_SUCCESS;
