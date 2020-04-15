@@ -269,6 +269,10 @@ public final class SparkDpp implements java.io.Serializable {
                             group.add(indexMeta.columns.get(i - 1).columnName, row.getString(i));
                         } else if (columnObject instanceof Long) {
                             group.add(indexMeta.columns.get(i - 1).columnName, row.getLong(i));
+                        } else if (columnObject instanceof Float) {
+                            group.add(indexMeta.columns.get(i - 1).columnName, row.getFloat(i));
+                        } else if (columnObject instanceof Double) {
+                            group.add(indexMeta.columns.get(i - 1).columnName, row.getDouble(i));
                         }
                     }
                     try {
