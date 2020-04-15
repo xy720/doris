@@ -24,8 +24,6 @@ import org.apache.doris.load.loadv2.etl.EtlJobConfig;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
 import org.apache.parquet.column.ParquetProperties;
 import org.apache.parquet.example.data.Group;
 import org.apache.parquet.example.data.simple.SimpleGroupFactory;
@@ -78,7 +76,6 @@ import scala.collection.JavaConverters;
 // do ETL job/sort/preaggregate/convert data format job in spark job
 // to boost the process of large amount of data load.
 public final class SparkDpp implements java.io.Serializable {
-    private static final Logger LOG = LogManager.getLogger(SparkDpp.class);
     private static final String NULL_FLAG = "\\N";
     private static final String DPP_RESULT_FILE = "dpp_result.json";
     private static final String BITMAP_TYPE = "bitmap";
@@ -798,7 +795,6 @@ public final class SparkDpp implements java.io.Serializable {
                 RollupTreeBuilder rollupTreeParser = new MinimalCoverRollupTreeBuilder();
                 RollupTreeNode rootNode = rollupTreeParser.build(etlTable);
                 System.out.println("Rollup Tree:" + rootNode);
-                LOG.info("Rollup Tree:" + rootNode);
 
                 for (EtlJobConfig.EtlFileGroup fileGroup : etlTable.fileGroups) {
                     List<String> filePaths = fileGroup.filePaths;
@@ -855,7 +851,6 @@ public final class SparkDpp implements java.io.Serializable {
 
     public void doDpp() throws Exception {
         // write dpp result to output
-        LOG.info("start to do data pre-process");
         DppResult dppResult = process();
         String outputPath = etlJobConfig.getOutputPath();
         String resultFilePath = outputPath + "/" + DPP_RESULT_FILE;
