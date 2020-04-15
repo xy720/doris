@@ -38,9 +38,9 @@ public class BitmapUnion extends UserDefinedAggregateFunction {
     private StructType inputSchema;
     private StructType bufferSchema;
 
-    public BitmapUnion() {
+    public BitmapUnion(DataType dataType) {
         List<StructField> inputFields = new ArrayList<>();
-        inputFields.add(DataTypes.createStructField("str", DataTypes.StringType,true));
+        inputFields.add(DataTypes.createStructField("str", dataType,true));
         inputSchema = DataTypes.createStructType(inputFields);
 
         List<StructField> bufferFields = new ArrayList<>();
@@ -71,7 +71,7 @@ public class BitmapUnion extends UserDefinedAggregateFunction {
     @Override
     public void initialize(MutableAggregationBuffer buffer) {
         RoaringBitmap roaringBitmap = new RoaringBitmap();
-        roaringBitmap.runOptimize();
+//        roaringBitmap.runOptimize();
         buffer.update(0, serializeBitmap(roaringBitmap));
     }
 
@@ -105,14 +105,23 @@ public class BitmapUnion extends UserDefinedAggregateFunction {
     public void update(MutableAggregationBuffer buffer, Row input) {
         // here maybe there is performance problems
         if (!input.isNullAt(0)) {
-            String value = input.getString(0);
-            int id = Integer.parseInt(value);
-            Object bitmapObj = buffer.get(0);
-            byte[] bitmapBytes = (byte[])bitmapObj;
-            RoaringBitmap bitmap = deserializeBitmap(bitmapBytes);
-            bitmap.add(id);
-            bitmap.runOptimize();
-            buffer.update(0, serializeBitmap(bitmap));
+            Object dstBitmapBuffer = buffer.get(0);
+            byte[] dstBitmapByte = (byte[])dstBitmapBuffer;
+            RoaringBitmap dstBitmap = deserializeBitmap(dstBitmapByte);
+            Object srcValue = input.get(0);
+
+            if (srcValue instanceof String) {
+                String valueStr = srcValue.toString();
+                int id = Integer.parseInt(valueStr);
+                dstBitmap.add(id);
+            } else if (srcValue instanceof byte[]) {
+                byte[] srcByte = (byte[])srcValue;
+                dstBitmap.or(deserializeBitmap(srcByte));
+            } else {
+                throw new RuntimeException("unknown column type:" + srcValue.getClass());
+            }
+
+            buffer.update(0, serializeBitmap(dstBitmap));
         }
     }
 

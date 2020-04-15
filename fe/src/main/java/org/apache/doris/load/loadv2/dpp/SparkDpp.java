@@ -43,16 +43,16 @@ import org.apache.spark.sql.Row;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Column;
 import org.apache.spark.sql.SparkSession;
-import org.apache.spark.sql.functions;
+//import org.apache.spark.sql.functions;
 import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
-import org.apache.spark.sql.expressions.UserDefinedAggregateFunction;
+//import org.apache.spark.sql.expressions.UserDefinedAggregateFunction;
 import org.apache.spark.util.LongAccumulator;
 import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.api.java.JavaRDD;
-import org.apache.spark.sql.SparkSession;
+//import org.apache.spark.sql.SparkSession;
 
 import scala.Tuple2;
 import scala.collection.Seq;
@@ -74,6 +74,8 @@ import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import scala.collection.JavaConverters;
 
+//import static org.apache.spark.sql.types.DataTypes.BinaryType;
+
 // This class is a Spark-based data preprocessing program,
 // which will make use of the distributed compute framework of spark to
 // do ETL job/sort/preaggregate/convert data format job in spark job
@@ -90,7 +92,6 @@ public final class SparkDpp implements java.io.Serializable {
     private LongAccumulator fileSizeAcc = null;
     private DppResult dppResult;
     private SparkSession spark = null;
-    private UserDefinedAggregateFunction bitmap_union = null;
 
     public SparkDpp(SparkSession spark, EtlJobConfig etlJobConfig) {
         this.spark = spark;
@@ -98,7 +99,8 @@ public final class SparkDpp implements java.io.Serializable {
     }
 
     public void init() {
-        bitmap_union = spark.udf().register("bitmap_union", new BitmapUnion());
+        spark.udf().register("bitmap_union_str", new BitmapUnion(DataTypes.StringType));
+        spark.udf().register("bitmap_union_binary", new BitmapUnion(DataTypes.BinaryType));
         abnormalRowAcc = spark.sparkContext().longAccumulator();
         unselectedRowAcc = spark.sparkContext().longAccumulator();
         scannedRowsAcc = spark.sparkContext().longAccumulator();
@@ -134,8 +136,13 @@ public final class SparkDpp implements java.io.Serializable {
                     sb.append("sum(" + column.columnName + ") as " + column.columnName);
                     sb.append(",");
                 }  else if (column.aggregationType.equalsIgnoreCase("BITMAP_UNION")) {
-                    sb.append("bitmap_union(" + column.columnName + ") as " + column.columnName);
-                    sb.append(",");
+                    if (indexMeta.isBaseIndex) {
+                        sb.append("bitmap_union_str(" + column.columnName + ") as " + column.columnName);
+                        sb.append(",");
+                    } else {
+                        sb.append("bitmap_union_binary(" + column.columnName + ") as " + column.columnName);
+                        sb.append(",");
+                    }
                 }
             }
         }
@@ -145,6 +152,11 @@ public final class SparkDpp implements java.io.Serializable {
         sb.append(" group by ");
         sb.append(groupBySb.toString());
         String aggSql = sb.toString();
+
+        System.out.println("print current schema: index id=" + indexMeta.toString());
+        dataframe.printSchema();
+
+        System.out.println(aggSql);
         Dataset<Row> aggDataFrame = spark.sql(aggSql);
         // after agg, the type of sum column maybe be changed, so should add type cast for value column
         for (Map.Entry<String, DataType> entry : valueColumnsOriginalType.entrySet()) {
@@ -153,6 +165,7 @@ public final class SparkDpp implements java.io.Serializable {
                 aggDataFrame = aggDataFrame.withColumn(entry.getKey(), aggDataFrame.col(entry.getKey()).cast(entry.getValue()));
             }
         }
+        aggDataFrame.printSchema();
         return aggDataFrame;
     }
 
