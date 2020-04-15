@@ -122,12 +122,14 @@ public class DppUtils {
             case "DATE":
                 dataType = DataTypes.DateType;
                 break;
-            case "HLL":
             case "CHAR":
             case "VARCHAR":
+                dataType = DataTypes.StringType;
+                break;
+            case "HLL":
             case "BITMAP":
             case "OBJECT":
-                dataType = DataTypes.StringType;
+                dataType = DataTypes.BinaryType;
                 break;
             default:
                 throw new UserException("Reason: invalid column type:" + columnType);

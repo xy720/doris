@@ -24,6 +24,8 @@ import org.apache.doris.load.loadv2.etl.EtlJobConfig;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.apache.parquet.column.ParquetProperties;
 import org.apache.parquet.example.data.Group;
 import org.apache.parquet.example.data.simple.SimpleGroupFactory;
@@ -43,16 +45,13 @@ import org.apache.spark.sql.Row;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Column;
 import org.apache.spark.sql.SparkSession;
-//import org.apache.spark.sql.functions;
 import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
-//import org.apache.spark.sql.expressions.UserDefinedAggregateFunction;
 import org.apache.spark.util.LongAccumulator;
 import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.api.java.JavaRDD;
-//import org.apache.spark.sql.SparkSession;
 
 import scala.Tuple2;
 import scala.collection.Seq;
@@ -74,13 +73,12 @@ import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import scala.collection.JavaConverters;
 
-//import static org.apache.spark.sql.types.DataTypes.BinaryType;
-
 // This class is a Spark-based data preprocessing program,
 // which will make use of the distributed compute framework of spark to
 // do ETL job/sort/preaggregate/convert data format job in spark job
 // to boost the process of large amount of data load.
 public final class SparkDpp implements java.io.Serializable {
+    private static final Logger LOG = LogManager.getLogger(SparkDpp.class);
     private static final String NULL_FLAG = "\\N";
     private static final String DPP_RESULT_FILE = "dpp_result.json";
     private static final String BITMAP_TYPE = "bitmap";
@@ -541,104 +539,104 @@ public final class SparkDpp implements java.io.Serializable {
         // now we first support csv file
         // TODO: support parquet file and orc file
         JavaRDD<Row> rowRDD = sourceDataRdd.flatMap(
-                record -> {
-                    scannedRowsAcc.add(1);
-                    String[] attributes = record.split(fileGroup.columnSeparator);
-                    List<Row> result = new ArrayList<>();
-                    if (attributes.length != columnSize) {
-                        abnormalRowAcc.add(1);
-                        System.err.println("invalid src schema, data columns:"
-                                + attributes.length + ", file group columns:"
-                                + columnSize + ", row:" + record);
-                    } else {
-                        boolean validRow = true;
-                        for (int i = 0; i < attributes.length; ++i) {
-                            if (attributes[i].equals(NULL_FLAG)) {
-                                if (baseIndex.columns.get(i).isAllowNull) {
-                                    attributes[i] = null;
-                                } else {
-                                    abnormalRowAcc.add(1);
-                                    System.err.println("colunm:" + i + " can not be null. row:" + record);
-                                    validRow = false;
-                                    break;
-                                }
+            record -> {
+                scannedRowsAcc.add(1);
+                String[] attributes = record.split(fileGroup.columnSeparator);
+                List<Row> result = new ArrayList<>();
+                if (attributes.length != columnSize) {
+                    abnormalRowAcc.add(1);
+                    System.err.println("invalid src schema, data columns:"
+                            + attributes.length + ", file group columns:"
+                            + columnSize + ", row:" + record);
+                } else {
+                    boolean validRow = true;
+                    for (int i = 0; i < attributes.length; ++i) {
+                        if (attributes[i].equals(NULL_FLAG)) {
+                            if (baseIndex.columns.get(i).isAllowNull) {
+                                attributes[i] = null;
+                            } else {
+                                abnormalRowAcc.add(1);
+                                System.err.println("colunm:" + i + " can not be null. row:" + record);
+                                validRow = false;
+                                break;
                             }
-                            boolean isStrictMode = (boolean)etlJobConfig.properties.strictMode;
-                            if (isStrictMode) {
-                                StructField field = srcSchema.apply(i);
-                                if (dstTableNames.contains(field.name())) {
-                                    DataType type = dstTableSchema.apply(field.name()).dataType();
-                                    if (!type.equals(DataTypes.StringType)) {
-                                        if (type.equals(DataTypes.ShortType)) {
-                                            try{
-                                                Short value = Short.parseShort(attributes[i]);
-                                            } catch (NumberFormatException e) {
-                                                abnormalRowAcc.add(1);
-                                                validRow = false;
-                                                break;
-                                            }
-                                        } else if (type.equals(DataTypes.IntegerType)) {
-                                            try {
-                                                Integer value = Integer.parseInt(attributes[i]);
-                                            } catch (NumberFormatException e) {
-                                                abnormalRowAcc.add(1);
-                                                validRow = false;
-                                                break;
-                                            }
-                                        } else if (type.equals(DataTypes.LongType)) {
-                                            try {
-                                                Long value = Long.parseLong(attributes[i]);
-                                            } catch (NumberFormatException e) {
-                                                abnormalRowAcc.add(1);
-                                                validRow = false;
-                                                break;
-                                            }
-                                        } else if (type.equals(DataTypes.FloatType)) {
-                                            try {
-                                                Float value = Float.parseFloat(attributes[i]);
-                                            } catch (NumberFormatException e) {
-                                                abnormalRowAcc.add(1);
-                                                validRow = false;
-                                                break;
-                                            }
-                                        } else if (type.equals(DataTypes.DoubleType)) {
-                                            try {
-                                                Double value = Double.parseDouble(attributes[i]);
-                                            } catch (NumberFormatException e) {
-                                                abnormalRowAcc.add(1);
-                                                validRow = false;
-                                                break;
-                                            }
-                                        } else if (type.equals(DataTypes.DateType)) {
-                                            try {
-                                                long value = Date.parse(attributes[i]);
-                                            } catch (IllegalArgumentException e) {
-                                                abnormalRowAcc.add(1);
-                                                validRow = false;
-                                                break;
-                                            }
+                        }
+                        boolean isStrictMode = (boolean)etlJobConfig.properties.strictMode;
+                        if (isStrictMode) {
+                            StructField field = srcSchema.apply(i);
+                            if (dstTableNames.contains(field.name())) {
+                                DataType type = dstTableSchema.apply(field.name()).dataType();
+                                if (!type.equals(DataTypes.StringType)) {
+                                    if (type.equals(DataTypes.ShortType)) {
+                                        try{
+                                            Short value = Short.parseShort(attributes[i]);
+                                        } catch (NumberFormatException e) {
+                                            abnormalRowAcc.add(1);
+                                            validRow = false;
+                                            break;
+                                        }
+                                    } else if (type.equals(DataTypes.IntegerType)) {
+                                        try {
+                                            Integer value = Integer.parseInt(attributes[i]);
+                                        } catch (NumberFormatException e) {
+                                            abnormalRowAcc.add(1);
+                                            validRow = false;
+                                            break;
+                                        }
+                                    } else if (type.equals(DataTypes.LongType)) {
+                                        try {
+                                            Long value = Long.parseLong(attributes[i]);
+                                        } catch (NumberFormatException e) {
+                                            abnormalRowAcc.add(1);
+                                            validRow = false;
+                                            break;
+                                        }
+                                    } else if (type.equals(DataTypes.FloatType)) {
+                                        try {
+                                            Float value = Float.parseFloat(attributes[i]);
+                                        } catch (NumberFormatException e) {
+                                            abnormalRowAcc.add(1);
+                                            validRow = false;
+                                            break;
+                                        }
+                                    } else if (type.equals(DataTypes.DoubleType)) {
+                                        try {
+                                            Double value = Double.parseDouble(attributes[i]);
+                                        } catch (NumberFormatException e) {
+                                            abnormalRowAcc.add(1);
+                                            validRow = false;
+                                            break;
+                                        }
+                                    } else if (type.equals(DataTypes.DateType)) {
+                                        try {
+                                            long value = Date.parse(attributes[i]);
+                                        } catch (IllegalArgumentException e) {
+                                            abnormalRowAcc.add(1);
+                                            validRow = false;
+                                            break;
                                         }
                                     }
                                 }
                             }
                         }
-                        if (validRow) {
-                            Row row = null;
-                            if (fileGroup.columnsFromPath == null) {
-                                row = RowFactory.create(attributes);
-                            } else {
-                                // process columns from path
-                                // append columns from path to the tail
-                                List<String> columnAttributes = new ArrayList<>();
-                                columnAttributes.addAll(Arrays.asList(attributes));
-                                columnAttributes.addAll(columnValueFromPath);
-                                row = RowFactory.create(columnAttributes.toArray());
-                            }
-                            result.add(row);
-                        }
                     }
-                    return result.iterator();
+                    if (validRow) {
+                        Row row = null;
+                        if (fileGroup.columnsFromPath == null) {
+                            row = RowFactory.create(attributes);
+                        } else {
+                            // process columns from path
+                            // append columns from path to the tail
+                            List<String> columnAttributes = new ArrayList<>();
+                            columnAttributes.addAll(Arrays.asList(attributes));
+                            columnAttributes.addAll(columnValueFromPath);
+                            row = RowFactory.create(columnAttributes.toArray());
+                        }
+                        result.add(row);
+                    }
                 }
+                return result.iterator();
+            }
         );
 
         Dataset<Row> dataframe = spark.createDataFrame(rowRDD, srcSchema);
@@ -800,6 +798,7 @@ public final class SparkDpp implements java.io.Serializable {
                 RollupTreeBuilder rollupTreeParser = new MinimalCoverRollupTreeBuilder();
                 RollupTreeNode rootNode = rollupTreeParser.build(etlTable);
                 System.out.println("Rollup Tree:" + rootNode);
+                LOG.info("Rollup Tree:" + rootNode);
 
                 for (EtlJobConfig.EtlFileGroup fileGroup : etlTable.fileGroups) {
                     List<String> filePaths = fileGroup.filePaths;
@@ -856,6 +855,7 @@ public final class SparkDpp implements java.io.Serializable {
 
     public void doDpp() throws Exception {
         // write dpp result to output
+        LOG.info("start to do data pre-process");
         DppResult dppResult = process();
         String outputPath = etlJobConfig.getOutputPath();
         String resultFilePath = outputPath + "/" + DPP_RESULT_FILE;
