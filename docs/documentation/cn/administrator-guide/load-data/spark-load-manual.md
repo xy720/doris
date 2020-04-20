@@ -63,7 +63,7 @@ Spark load 任务的执行主要分为以下5个阶段。
             +----+----+                                 |
                  | 3. FE send push tasks                |
                  | 5. FE publish version                |
-    +-------------------------+                         |
+    +------------+------------+                         |
     |            |            |                         |
 +---v---+    +---v---+    +---v---+                     |
 |  BE   |    |  BE   |    |  BE   |                     |1. FE submit Spark ETL job
