@@ -860,16 +860,25 @@ public class Load {
         }
     }
 
-    // for spark load job
+    /*
+     * used for spark load job
+     * not init slot desc and analyze exprs
+     */
     public static void initColumns(Table tbl, List<ImportColumnDesc> columnExprs,
-                                   Map<String, Pair<String, List<String>>> columnToHadoopFunction,
-                                   Analyzer analyzer) throws UserException {
-        Map<String, Expr> exprsByName = Maps.newHashMap();
-        TupleDescriptor srcTupleDesc = analyzer.getDescTbl().createTupleDescriptor();
-        Map<String, SlotDescriptor> slotDescByName = Maps.newHashMap();
-        TBrokerScanRangeParams params = new TBrokerScanRangeParams();
-        initColumns(tbl, columnExprs, columnToHadoopFunction, exprsByName, analyzer, srcTupleDesc,
-                    slotDescByName, params);
+                                   Map<String, Pair<String, List<String>>> columnToHadoopFunction) throws UserException {
+        initColumns(tbl, columnExprs, columnToHadoopFunction, null, null, null, null, null, false);
+    }
+
+    /*
+     * This function should be used for broker load v2 and stream load.
+     * And it must be called in same db lock when planing.
+     */
+    public static void initColumns(Table tbl, List<ImportColumnDesc> columnExprs,
+            Map<String, Pair<String, List<String>>> columnToHadoopFunction,
+            Map<String, Expr> exprsByName, Analyzer analyzer, TupleDescriptor srcTupleDesc,
+            Map<String, SlotDescriptor> slotDescByName, TBrokerScanRangeParams params) throws UserException {
+        initColumns(tbl, columnExprs, columnToHadoopFunction, exprsByName, analyzer,
+                    srcTupleDesc, slotDescByName, params, true);
     }
 
     /*
@@ -879,14 +888,12 @@ public class Load {
      * 3. Add any shadow columns if have.
      * 4. validate hadoop functions
      * 5. init slot descs and expr map for load plan
-     * 
-     * This function should be used for broker load v2 and stream load.
-     * And it must be called in same db lock when planing.
      */
     public static void initColumns(Table tbl, List<ImportColumnDesc> columnExprs,
             Map<String, Pair<String, List<String>>> columnToHadoopFunction,
             Map<String, Expr> exprsByName, Analyzer analyzer, TupleDescriptor srcTupleDesc,
-            Map<String, SlotDescriptor> slotDescByName, TBrokerScanRangeParams params) throws UserException {
+            Map<String, SlotDescriptor> slotDescByName, TBrokerScanRangeParams params,
+            boolean needInitSlotAndAnalyzeExprs) throws UserException {
         // If user does not specify the file field names, generate it by using base schema of table.
         // So that the following process can be unified
         boolean specifyFileFieldNames = columnExprs.stream().anyMatch(p -> p.isColumn());
@@ -984,6 +991,10 @@ public class Load {
                     throw new DdlException(e.getMessage());
                 }
             }
+        }
+
+        if (!needInitSlotAndAnalyzeExprs) {
+            return;
         }
 
         // init slot desc add expr map, also transform hadoop functions
