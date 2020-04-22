@@ -17,17 +17,15 @@
 
 package org.apache.doris.load.loadv2.etl;
 
-import org.apache.commons.lang.StringUtils;
 import org.apache.doris.load.loadv2.dpp.SparkDpp;
 import org.apache.doris.load.loadv2.etl.EtlJobConfig.EtlColumn;
 import org.apache.doris.load.loadv2.etl.EtlJobConfig.EtlFileGroup;
 import org.apache.doris.load.loadv2.etl.EtlJobConfig.EtlIndex;
 import org.apache.doris.load.loadv2.etl.EtlJobConfig.EtlTable;
 
-import org.apache.spark.SparkConf;
-import org.apache.spark.api.java.JavaRDD;
-import org.apache.spark.api.java.JavaSparkContext;
+import org.apache.commons.lang.StringUtils;
 import org.apache.spark.sql.AnalysisException;
+import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
 
@@ -50,21 +48,20 @@ public class SparkEtlJob {
     private String jobConfigFilePath;
     private EtlJobConfig etlJobConfig;
     private boolean hasBitMapColumns;
-    private JavaSparkContext sc;
+    private SparkSession spark;
 
     private SparkEtlJob(String jobConfigFilePath) {
         this.jobConfigFilePath = jobConfigFilePath;
     }
 
     private void initSparkEnvironment() {
-        SparkConf conf = new SparkConf();
-        sc = new JavaSparkContext(conf);
+        spark = SparkSession.builder().enableHiveSupport().getOrCreate();
     }
 
     private void initConfig() {
         System.err.println("****** job config file path: " + jobConfigFilePath);
-        JavaRDD<String> textFileRdd = sc.textFile(jobConfigFilePath);
-        String jobJsonConfigs = String.join("", textFileRdd.collect());
+        Dataset<Row> ds = spark.read().csv(jobConfigFilePath);
+        String jobJsonConfigs = ds.first().mkString(",");
         System.err.println("****** rdd read json configs: " + jobJsonConfigs);
 
         GsonBuilder gsonBuilder = new GsonBuilder();
@@ -103,13 +100,13 @@ public class SparkEtlJob {
         }
     }
 
-    private void processDpp(SparkSession spark) throws Exception {
+    private void processDpp() throws Exception {
         SparkDpp sparkDpp = new SparkDpp(spark, etlJobConfig);
         sparkDpp.init();
         sparkDpp.doDpp();
     }
 
-    private void buildGlobalDictAndEncodeSourceTable(EtlTable table, long tableId, SparkSession spark) {
+    private void buildGlobalDictAndEncodeSourceTable(EtlTable table, long tableId) {
         List<String> distinctColumnList = Lists.newArrayList();
         List<String> dorisOlapTableColumnList = Lists.newArrayList();
         List<String> mapSideJoinColumns = Lists.newArrayList();
@@ -162,7 +159,7 @@ public class SparkEtlJob {
         }
     }
 
-    private void processDataFromHiveTable(SparkSession spark) throws Exception {
+    private void processDataFromHiveTable() throws Exception {
         // only one table
         long tableId = -1;
         EtlTable table = null;
@@ -173,18 +170,17 @@ public class SparkEtlJob {
         }
 
         // build global dict and and encode source hive table
-        buildGlobalDictAndEncodeSourceTable(table, tableId, spark);
+        buildGlobalDictAndEncodeSourceTable(table, tableId);
 
         // data partition sort and aggregation
-        processDpp(spark);
+        processDpp();
     }
 
     private void processData() throws Exception {
-        SparkSession spark = SparkSession.builder().master("local").enableHiveSupport().getOrCreate();
         if (hasBitMapColumns) {
-            processDataFromHiveTable(spark);
+            processDataFromHiveTable();
         } else {
-            processDpp(spark);
+            processDpp();
         }
     }
 
