@@ -17,9 +17,12 @@
 
 package org.apache.doris.load.loadv2;
 
+import org.apache.doris.analysis.Analyzer;
 import org.apache.doris.analysis.BrokerDesc;
+import org.apache.doris.analysis.Expr;
 import org.apache.doris.analysis.ImportColumnDesc;
 import org.apache.doris.analysis.LiteralExpr;
+import org.apache.doris.catalog.AggregateType;
 import org.apache.doris.catalog.Catalog;
 import org.apache.doris.catalog.Column;
 import org.apache.doris.catalog.Database;
@@ -36,9 +39,11 @@ import org.apache.doris.catalog.RangePartitionInfo;
 import org.apache.doris.catalog.SparkEtlCluster;
 import org.apache.doris.common.LoadException;
 import org.apache.doris.common.Pair;
+import org.apache.doris.common.UserException;
 import org.apache.doris.load.BrokerFileGroup;
 import org.apache.doris.load.BrokerFileGroupAggInfo.FileGroupAggKey;
 import org.apache.doris.load.FailMsg;
+import org.apache.doris.load.Load;
 import org.apache.doris.load.loadv2.etl.EtlJobConfig;
 import org.apache.doris.load.loadv2.etl.EtlJobConfig.EtlColumn;
 import org.apache.doris.load.loadv2.etl.EtlJobConfig.EtlColumnMapping;
@@ -48,8 +53,8 @@ import org.apache.doris.load.loadv2.etl.EtlJobConfig.EtlJobProperty;
 import org.apache.doris.load.loadv2.etl.EtlJobConfig.EtlPartition;
 import org.apache.doris.load.loadv2.etl.EtlJobConfig.EtlPartitionInfo;
 import org.apache.doris.load.loadv2.etl.EtlJobConfig.EtlTable;
-
 import org.apache.doris.transaction.TransactionState;
+
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -77,6 +82,8 @@ public class SparkLoadPendingTask extends LoadTask {
     private final long transactionId;
     private EtlJobConfig etlJobConfig;
 
+    private final Analyzer analyzer;
+
     public SparkLoadPendingTask(SparkLoadJob loadTaskCallback,
                                 Map<FileGroupAggKey, List<BrokerFileGroup>> aggKeyToBrokerFileGroups,
                                 SparkEtlCluster etlCluster, BrokerDesc brokerDesc) {
@@ -91,6 +98,7 @@ public class SparkLoadPendingTask extends LoadTask {
         this.loadLabel = loadTaskCallback.getLabel();
         this.transactionId = loadTaskCallback.getTransactionId();
         this.failMsg = new FailMsg(FailMsg.CancelType.ETL_SUBMIT_FAIL);
+        this.analyzer = new Analyzer(Catalog.getInstance(), null);
     }
 
     @Override
@@ -162,7 +170,7 @@ public class SparkLoadPendingTask extends LoadTask {
 
                 // file group
                 for (BrokerFileGroup fileGroup : entry.getValue()) {
-                    etlTable.addFileGroup(createEtlFileGroup(fileGroup, tableIdToPartitionIds.get(tableId)));
+                    etlTable.addFileGroup(createEtlFileGroup(fileGroup, tableIdToPartitionIds.get(tableId), table));
                 }
             }
         } finally {
@@ -388,7 +396,53 @@ public class SparkLoadPendingTask extends LoadTask {
         return new EtlPartitionInfo(type.typeString, partitionColumnRefs, distributionColumnRefs, etlPartitions);
     }
 
-    private EtlFileGroup createEtlFileGroup(BrokerFileGroup fileGroup, Set<Long> tablePartitionIds) {
+    private EtlFileGroup createEtlFileGroup(BrokerFileGroup fileGroup, Set<Long> tablePartitionIds, OlapTable table)
+            throws LoadException {
+        // check columns and add shadow_column mapping
+        List<ImportColumnDesc> columnExprList = fileGroup.getColumnExprList();
+        try {
+            Load.initColumns(table, columnExprList, fileGroup.getColumnToHadoopFunction(), analyzer);
+        } catch (UserException e) {
+            throw new LoadException(e.getMessage());
+        }
+        // check hll and bitmap func
+        // TODO: more check
+        Map<String, Expr> exprByName = Maps.newHashMap();
+        for (ImportColumnDesc columnDesc : columnExprList) {
+            if (!columnDesc.isColumn()) {
+                exprByName.put(columnDesc.getColumnName(), columnDesc.getExpr());
+            }
+        }
+        for (Column column : table.getBaseSchema()) {
+            String columnName = column.getName();
+            PrimitiveType columnType = column.getDataType();
+            Expr expr = exprByName.get(columnName);
+            if (columnType == PrimitiveType.HLL || columnType == PrimitiveType.BITMAP) {
+                if (expr == null) {
+                    throw new LoadException("column func is not assigned. column:" + column.getName()
+                                                    + ", type: " + columnType.name());
+                }
+            }
+        }
+
+        // check negative for sum aggregate type
+        if (fileGroup.isNegative()) {
+            for (Column column : table.getBaseSchema()) {
+                if (!column.isKey() && column.getAggregationType() != AggregateType.SUM) {
+                    throw new LoadException("Column is not SUM AggreateType. column:" + column.getName());
+                }
+            }
+        }
+
+        // fill file field names if empty
+        List<String> fileFieldNames = fileGroup.getFileFieldNames();
+        if (fileFieldNames == null || fileFieldNames.isEmpty()) {
+            fileFieldNames = Lists.newArrayList();
+            for (Column column : table.getBaseSchema()) {
+                fileFieldNames.add(column.getName());
+            }
+        }
+
         // column mappings
         Map<String, Pair<String, List<String>>> columnToHadoopFunction = fileGroup.getColumnToHadoopFunction();
         Map<String, EtlColumnMapping> columnMappings = Maps.newHashMap();
@@ -398,7 +452,7 @@ public class SparkLoadPendingTask extends LoadTask {
                                    new EtlColumnMapping(entry.getValue().first, entry.getValue().second));
             }
         }
-        for (ImportColumnDesc columnDesc : fileGroup.getColumnExprList()) {
+        for (ImportColumnDesc columnDesc : columnExprList) {
             if (columnDesc.isColumn() || columnMappings.containsKey(columnDesc.getColumnName())) {
                 continue;
             }
@@ -413,19 +467,19 @@ public class SparkLoadPendingTask extends LoadTask {
         }
 
         // where
+        // TODO: check
         String where = "";
         if (fileGroup.getWhereExpr() != null) {
             where = fileGroup.getWhereExpr().toSql();
         }
-        EtlFileGroup etlFileGroup = new EtlFileGroup(fileGroup.getFilePaths(), fileGroup.getFileFieldNames(),
+
+        EtlFileGroup etlFileGroup = new EtlFileGroup(fileGroup.getFilePaths(), fileFieldNames,
                                                      fileGroup.getColumnsFromPath(), fileGroup.getValueSeparator(),
                                                      fileGroup.getLineDelimiter(), fileGroup.isNegative(),
                                                      fileGroup.getFileFormat(), columnMappings,
                                                      where, partitionIds);
-
         // set hive table
         etlFileGroup.hiveTableName = ((SparkLoadJob) callback).getHiveTableName();
-
         return etlFileGroup;
     }
 }

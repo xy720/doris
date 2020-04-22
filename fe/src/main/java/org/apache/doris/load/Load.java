@@ -860,6 +860,18 @@ public class Load {
         }
     }
 
+    // for spark load job
+    public static void initColumns(Table tbl, List<ImportColumnDesc> columnExprs,
+                                   Map<String, Pair<String, List<String>>> columnToHadoopFunction,
+                                   Analyzer analyzer) throws UserException {
+        Map<String, Expr> exprsByName = Maps.newHashMap();
+        TupleDescriptor srcTupleDesc = analyzer.getDescTbl().createTupleDescriptor();
+        Map<String, SlotDescriptor> slotDescByName = Maps.newHashMap();
+        TBrokerScanRangeParams params = new TBrokerScanRangeParams();
+        initColumns(tbl, columnExprs, columnToHadoopFunction, exprsByName, analyzer, srcTupleDesc,
+                    slotDescByName, params);
+    }
+
     /*
      * This function will do followings:
      * 1. fill the column exprs if user does not specify any column or column mapping.
