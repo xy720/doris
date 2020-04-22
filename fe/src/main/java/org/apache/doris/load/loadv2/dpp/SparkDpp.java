@@ -25,18 +25,15 @@ import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.parquet.column.ParquetProperties;
-import org.apache.parquet.example.data.Group;
-import org.apache.parquet.example.data.simple.SimpleGroupFactory;
 import org.apache.parquet.hadoop.ParquetWriter;
-import org.apache.parquet.hadoop.example.GroupWriteSupport;
 import org.apache.parquet.hadoop.metadata.CompressionCodecName;
-import org.apache.parquet.schema.MessageType;
-import org.apache.parquet.schema.OriginalType;
-import org.apache.parquet.schema.PrimitiveType;
-import org.apache.parquet.schema.Types;
 import org.apache.spark.Partitioner;
 import org.apache.spark.api.java.function.ForeachPartitionFunction;
 import org.apache.spark.api.java.function.PairFlatMapFunction;
+import org.apache.spark.sql.catalyst.InternalRow;
+import org.apache.spark.sql.catalyst.encoders.ExpressionEncoder;
+import org.apache.spark.sql.catalyst.encoders.RowEncoder;
+import org.apache.spark.sql.execution.datasources.parquet.ParquetWriteSupport;
 import org.apache.spark.sql.functions;
 import org.apache.spark.sql.RowFactory;
 import org.apache.spark.sql.Row;
@@ -55,6 +52,7 @@ import scala.Tuple2;
 import scala.collection.Seq;
 import java.math.BigInteger;
 import java.net.URI;
+import java.net.URI;
 import java.util.Map;
 import java.util.Set;
 import java.util.List;
@@ -66,6 +64,7 @@ import java.util.Queue;
 import java.util.LinkedList;
 import java.util.HashSet;
 import java.util.Arrays;
+import java.util.stream.Collectors;
 
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FSDataOutputStream;
@@ -168,6 +167,11 @@ public final class SparkDpp implements java.io.Serializable {
                                                              String pathPattern,
                                                              long tableId,
                                                              EtlJobConfig.EtlIndex indexMeta) throws UserException {
+        StructType outputSchema = dataframe.schema();
+        StructType dstSchema = DataTypes.createStructType(
+                Arrays.asList(outputSchema.fields()).stream()
+                        .filter(field -> !field.name().equalsIgnoreCase(DppUtils.BUCKET_ID))
+                        .collect(Collectors.toList()));
         dataframe.foreachPartition(new ForeachPartitionFunction<Row>() {
             @Override
             public void call(Iterator<Row> t) throws Exception {
@@ -175,56 +179,7 @@ public final class SparkDpp implements java.io.Serializable {
                 Configuration conf = new Configuration();
                 FileSystem fs = FileSystem.get(URI.create(etlJobConfig.outputPath), conf);
                 String lastBucketKey = null;
-                ParquetWriter<Group> writer = null;
-                Types.MessageTypeBuilder builder = Types.buildMessage();
-                for (EtlJobConfig.EtlColumn column : indexMeta.columns) {
-                    if (column.isAllowNull) {
-                        if (column.columnType.equals("SMALLINT") ||column.columnType.equals("INT")) {
-                            builder.optional(PrimitiveType.PrimitiveTypeName.INT32).named(column.columnName);
-                        } else if (column.columnType.equals("BIGINT")) {
-                            builder.optional(PrimitiveType.PrimitiveTypeName.INT64).named(column.columnName);
-                        } else if (column.columnType.equals("BOOL")) {
-                            builder.optional(PrimitiveType.PrimitiveTypeName.BOOLEAN).named(column.columnName);
-                        } else if (column.columnType.equals("VARCHAR")) {
-                            // should use as(OriginalType.UTF8), or result will be binary
-                            builder.optional(PrimitiveType.PrimitiveTypeName.BINARY).as(OriginalType.UTF8).named(column.columnName);
-                        } else if (column.columnType.equals("FLOAT")) {
-                            builder.optional(PrimitiveType.PrimitiveTypeName.FLOAT).named(column.columnName);
-                        } else if (column.columnType.equals("DOUBLE")) {
-                            builder.optional(PrimitiveType.PrimitiveTypeName.DOUBLE).named(column.columnName);
-                        } else if (column.columnType.equals("BITMAP")) {
-                            builder.optional(PrimitiveType.PrimitiveTypeName.BINARY).named(column.columnName);
-                        } else if (column.columnType.equals("HLL")) {
-                            builder.optional(PrimitiveType.PrimitiveTypeName.BINARY).named(column.columnName);
-                        } else {
-                            System.err.println("invalid column type:" + column);
-                            throw new UserException("invalid column type:" + column);
-                        }
-                    } else {
-                        if (column.columnType.equals("SMALLINT") ||column.columnType.equals("INT")) {
-                            builder.required(PrimitiveType.PrimitiveTypeName.INT32).named(column.columnName);
-                        } else if (column.columnType.equals("BIGINT")) {
-                            builder.required(PrimitiveType.PrimitiveTypeName.INT64).named(column.columnName);
-                        } else if (column.columnType.equals("BOOL")) {
-                            builder.required(PrimitiveType.PrimitiveTypeName.BOOLEAN).named(column.columnName);
-                        }  else if (column.columnType.equals("VARCHAR")) {
-                            // should use as(OriginalType.UTF8), or result will be binary
-                            builder.required(PrimitiveType.PrimitiveTypeName.BINARY).as(OriginalType.UTF8).named(column.columnName);
-                        } else if (column.columnType.equals("FLOAT")) {
-                            builder.required(PrimitiveType.PrimitiveTypeName.FLOAT).named(column.columnName);
-                        } else if (column.columnType.equals("DOUBLE")) {
-                            builder.required(PrimitiveType.PrimitiveTypeName.DOUBLE).named(column.columnName);
-                        } else if (column.columnType.equals("BITMAP")) {
-                            builder.required(PrimitiveType.PrimitiveTypeName.BINARY).named(column.columnName);
-                        } else if (column.columnType.equals("HLL")) {
-                            builder.required(PrimitiveType.PrimitiveTypeName.BINARY).named(column.columnName);
-                        } else {
-                            System.err.println("invalid column type:" + column);
-                            throw new UserException("invalid column type:" + column);
-                        }
-                    }
-                }
-                MessageType index_schema = builder.named("index_" + indexMeta.indexId);
+                ParquetWriter<InternalRow> parquetWriter = null;
                 while (t.hasNext()) {
                     Row row = t.next();
                     if (row.length() <= 1) {
@@ -232,10 +187,15 @@ public final class SparkDpp implements java.io.Serializable {
                         continue;
                     }
                     String curBucketKey = row.getString(0);
+                    List<Object> columnObjects = new ArrayList<>();
+                    for (int i = 1; i < row.length(); ++i) {
+                        columnObjects.add(row.get(i));
+                    }
+                    Row rowWithoutBucketKey = RowFactory.create(columnObjects.toArray());
                     if (lastBucketKey == null || !curBucketKey.equals(lastBucketKey)) {
-                        if (writer != null) {
+                        if (parquetWriter != null) {
                             System.out.println("close writer");
-                            writer.close();
+                            parquetWriter.close();
                         }
                         // flush current writer and create a new writer
                         String[] bucketKey = curBucketKey.split("_");
@@ -247,43 +207,28 @@ public final class SparkDpp implements java.io.Serializable {
                         int bucketId = Integer.parseInt(bucketKey[1]);
                         String path = String.format(pathPattern, tableId, partitionId, indexMeta.indexId,
                                 bucketId, indexMeta.schemaHash);
-                        GroupWriteSupport.setSchema(index_schema, conf);
-                        writer = new ParquetWriter<Group>(new Path(path), new GroupWriteSupport(),
-                                CompressionCodecName.SNAPPY, 1024, 1024, 512,
+                        conf.setBoolean("spark.sql.parquet.writeLegacyFormat", false);
+                        conf.setBoolean("spark.sql.parquet.int64AsTimestampMillis", false);
+                        conf.setBoolean("spark.sql.parquet.int96AsTimestamp", true);
+                        conf.setBoolean("spark.sql.parquet.binaryAsString", false);
+                        conf.set("spark.sql.parquet.outputTimestampType", "INT96");
+                        ParquetWriteSupport.setSchema(dstSchema, conf);
+                        ParquetWriteSupport parquetWriteSupport = new ParquetWriteSupport();
+                        parquetWriter = new ParquetWriter<InternalRow>(new Path(path), parquetWriteSupport,
+                                CompressionCodecName.SNAPPY, 256 * 1024 * 1024, 16 * 1024, 1024 * 1024,
                                 true, false,
                                 ParquetProperties.WriterVersion.PARQUET_1_0, conf);
-                        if(writer != null){
+                        if(parquetWriter != null) {
                             System.out.println("[HdfsOperate]>> initialize writer succeed! path:" + path);
                         }
                         lastBucketKey = curBucketKey;
                     }
-                    SimpleGroupFactory groupFactory = new SimpleGroupFactory(index_schema);
-                    Group group = groupFactory.newGroup();
-                    for (int i = 1; i < row.length(); i++) {
-                        Object columnObject = row.get(i);
-                        if (columnObject instanceof Short) {
-                            group.add(indexMeta.columns.get(i - 1).columnName, row.getShort(i));
-                        } else if (columnObject instanceof Integer) {
-                            group.add(indexMeta.columns.get(i - 1).columnName, row.getInt(i));
-                        } else if (columnObject instanceof String) {
-                            group.add(indexMeta.columns.get(i - 1).columnName, row.getString(i));
-                        } else if (columnObject instanceof Long) {
-                            group.add(indexMeta.columns.get(i - 1).columnName, row.getLong(i));
-                        } else if (columnObject instanceof Float) {
-                            group.add(indexMeta.columns.get(i - 1).columnName, row.getFloat(i));
-                        } else if (columnObject instanceof Double) {
-                            group.add(indexMeta.columns.get(i - 1).columnName, row.getDouble(i));
-                        }
-                    }
-                    try {
-                        writer.write(group);
-                    } catch (Exception e) {
-                        System.err.println("exception caught:" + e);
-                        e.printStackTrace();
-                    }
+                    ExpressionEncoder encoder = RowEncoder.apply(dstSchema);
+                    InternalRow internalRow = encoder.toRow(rowWithoutBucketKey);
+                    parquetWriter.write(internalRow);
                 }
-                if (writer != null) {
-                    writer.close();
+                if (parquetWriter != null) {
+                    parquetWriter.close();
                 }
             }
         });
@@ -480,13 +425,15 @@ public final class SparkDpp implements java.io.Serializable {
                     throw new UserException("Reason: no data for column:" + dstField.name());
                 }
             }
-            if (!column.columnType.equalsIgnoreCase(BITMAP_TYPE) && !dstField.dataType().equals(DataTypes.StringType)) {
+            if (column.columnType.equalsIgnoreCase("DATE")) {
+                dataframe = dataframe.withColumn(dstField.name(), dataframe.col(dstField.name()).cast("date"));
+            } else if (!column.columnType.equalsIgnoreCase(BITMAP_TYPE) && !dstField.dataType().equals(DataTypes.StringType)) {
                 dataframe = dataframe.withColumn(dstField.name(), dataframe.col(dstField.name()).cast(dstField.dataType()));
-                if (fileGroup.isNegative && !column.isKey) {
-                    // negative load
-                    // value will be convert te -1 * value
-                    dataframe = dataframe.withColumn(dstField.name(), functions.expr("-1 *" + dstField.name()));
-                }
+            }
+            if (fileGroup.isNegative && !column.isKey) {
+                // negative load
+                // value will be convert te -1 * value
+                dataframe = dataframe.withColumn(dstField.name(), functions.expr("-1 *" + dstField.name()));
             }
         }
         // 2. process the mapping columns

@@ -28,6 +28,7 @@ import org.apache.spark.sql.Row;
 
 import com.google.common.collect.Lists;
 
+import javax.xml.crypto.Data;
 import java.math.BigInteger;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -65,7 +66,7 @@ public class DppUtils {
 
     public static Class columnTypeToClass(String columnType) {
         switch (columnType) {
-            case "BOOL":
+            case "BOOLEAN":
                 return Boolean.class;
             case "TINYINT":
             case "SMALLINT":
@@ -97,7 +98,7 @@ public class DppUtils {
     public static DataType columnTypeToDataType(String columnType) throws UserException {
         DataType dataType = DataTypes.StringType;
         switch (columnType) {
-            case "BOOL":
+            case "BOOLEAN":
                 dataType = DataTypes.BooleanType;
                 break;
             case "TINYINT":
@@ -108,6 +109,8 @@ public class DppUtils {
                 dataType = DataTypes.IntegerType;
                 break;
             case "DATETIME":
+                dataType = DataTypes.TimestampType;
+                break;
             case "BIGINT":
             case "LARGEINT":
                 // todo: special treat LARGEINT because spark do not support int128
