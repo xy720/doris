@@ -323,7 +323,7 @@ public class SparkLoadPendingTask extends LoadTask {
                 partitionColumnRefs.add(column.getName());
             }
 
-            for (Map.Entry<Long, Range<PartitionKey>> entry : rangePartitionInfo.getSortedRangeMap()) {
+            for (Map.Entry<Long, Range<PartitionKey>> entry : rangePartitionInfo.getSortedRangeMap(false)) {
                 long partitionId = entry.getKey();
                 if (!partitionIds.contains(partitionId)) {
                     continue;
@@ -395,21 +395,28 @@ public class SparkLoadPendingTask extends LoadTask {
 
     private EtlFileGroup createEtlFileGroup(BrokerFileGroup fileGroup, Set<Long> tablePartitionIds, OlapTable table)
             throws LoadException {
-        // check columns and add shadow_column mapping
-        List<ImportColumnDesc> columnExprList = fileGroup.getColumnExprList();
-        try {
-            Load.initColumns(table, columnExprList, fileGroup.getColumnToHadoopFunction());
-        } catch (UserException e) {
-            throw new LoadException(e.getMessage());
-        }
-        // check hll and bitmap func
-        // TODO: more check
-        Map<String, Expr> exprByName = Maps.newHashMap();
-        for (ImportColumnDesc columnDesc : columnExprList) {
+        List<ImportColumnDesc> copiedColumnExprList = Lists.newArrayList(fileGroup.getColumnExprList());
+        Map<String, Expr> exprByName = Maps.newTreeMap(String.CASE_INSENSITIVE_ORDER);
+        for (ImportColumnDesc columnDesc : copiedColumnExprList) {
             if (!columnDesc.isColumn()) {
                 exprByName.put(columnDesc.getColumnName(), columnDesc.getExpr());
             }
         }
+
+        // check columns
+        try {
+            Load.initColumns(table, copiedColumnExprList, fileGroup.getColumnToHadoopFunction());
+        } catch (UserException e) {
+            throw new LoadException(e.getMessage());
+        }
+        // add shadow column mapping when schema change
+        for (ImportColumnDesc columnDesc : Load.getSchemaChangeShadowColumnDesc(table, exprByName)) {
+            copiedColumnExprList.add(columnDesc);
+            exprByName.put(columnDesc.getColumnName(), columnDesc.getExpr());
+        }
+
+        // check hll and bitmap func
+        // TODO: more check
         for (Column column : table.getBaseSchema()) {
             String columnName = column.getName();
             PrimitiveType columnType = column.getDataType();
@@ -449,7 +456,7 @@ public class SparkLoadPendingTask extends LoadTask {
                                    new EtlColumnMapping(entry.getValue().first, entry.getValue().second));
             }
         }
-        for (ImportColumnDesc columnDesc : columnExprList) {
+        for (ImportColumnDesc columnDesc : copiedColumnExprList) {
             if (columnDesc.isColumn() || columnMappings.containsKey(columnDesc.getColumnName())) {
                 continue;
             }

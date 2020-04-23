@@ -1849,7 +1849,7 @@ public class Catalog {
     }
 
     public long loadEtlClusters(DataInputStream dis, long checksum) throws IOException {
-        if (MetaContext.get().getMetaVersion() >= FeMetaVersion.VERSION_75) {
+        if (MetaContext.get().getMetaVersion() >= FeMetaVersion.VERSION_85) {
             int count = dis.readInt();
             checksum ^= count;
             for (long i = 0; i < count; ++i) {

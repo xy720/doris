@@ -58,6 +58,7 @@ import org.apache.doris.load.loadv2.dpp.DppResult;
 import org.apache.doris.load.loadv2.etl.EtlJobConfig;
 import org.apache.doris.planner.PlanNodeId;
 import org.apache.doris.planner.ScanNode;
+import org.apache.doris.qe.OriginStatement;
 import org.apache.doris.service.FrontendOptions;
 import org.apache.doris.system.Backend;
 import org.apache.doris.task.AgentBatchTask;
@@ -80,6 +81,8 @@ import org.apache.doris.transaction.BeginTransactionException;
 import org.apache.doris.transaction.TabletCommitInfo;
 import org.apache.doris.transaction.TabletQuorumFailedException;
 import org.apache.doris.transaction.TransactionState.LoadJobSourceType;
+import org.apache.doris.transaction.TransactionState.TxnCoordinator;
+import org.apache.doris.transaction.TransactionState.TxnSourceType;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -260,7 +263,7 @@ public class SparkLoadJob extends BulkLoadJob {
         jobType = EtlJobType.SPARK;
     }
 
-    public SparkLoadJob(long dbId, String label, EtlClusterDesc etlClusterDesc, String originStmt)
+    public SparkLoadJob(long dbId, String label, EtlClusterDesc etlClusterDesc, OriginStatement originStmt)
             throws MetaNotFoundException {
         super(dbId, label, originStmt);
         this.etlClusterDesc = etlClusterDesc;
@@ -317,8 +320,9 @@ public class SparkLoadJob extends BulkLoadJob {
     public void beginTxn()
             throws LabelAlreadyUsedException, BeginTransactionException, AnalysisException, DuplicatedRequestException {
        transactionId = Catalog.getCurrentGlobalTransactionMgr()
-               .beginTransaction(dbId, label, null, "FE: " + FrontendOptions.getLocalHostAddress(),
-                                 LoadJobSourceType.FRONTEND, id, timeoutSecond);
+                .beginTransaction(dbId, Lists.newArrayList(fileGroupAggInfo.getAllTableIds()), label, null,
+                                  new TxnCoordinator(TxnSourceType.FE, FrontendOptions.getLocalHostAddress()),
+                                  LoadJobSourceType.FRONTEND, id, timeoutSecond);
     }
 
     @Override
