@@ -29,7 +29,6 @@ import org.apache.spark.sql.Row;
 
 import com.google.common.collect.Lists;
 
-import javax.xml.crypto.Data;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.nio.ByteBuffer;
