@@ -30,6 +30,7 @@ import org.apache.parquet.example.data.simple.SimpleGroupFactory;
 import org.apache.parquet.hadoop.ParquetWriter;
 import org.apache.parquet.hadoop.example.GroupWriteSupport;
 import org.apache.parquet.hadoop.metadata.CompressionCodecName;
+import org.apache.parquet.io.api.Binary;
 import org.apache.parquet.schema.MessageType;
 import org.apache.parquet.schema.OriginalType;
 import org.apache.parquet.schema.PrimitiveType;
@@ -96,6 +97,13 @@ public final class SparkDpp implements java.io.Serializable {
     public void init() {
         spark.udf().register("bitmap_union_str", new BitmapUnion(DataTypes.StringType));
         spark.udf().register("bitmap_union_binary", new BitmapUnion(DataTypes.BinaryType));
+
+        spark.udf().register("hll_union_str", new HllUnionUDAF(DataTypes.StringType));
+        spark.udf().register("hll_union_binary", new HllUnionUDAF(DataTypes.BinaryType));
+
+        spark.udf().register("replace_if_not_null_str", new ReplaceUDAF(false));
+        spark.udf().register("replace_str", new ReplaceUDAF(true));
+
         abnormalRowAcc = spark.sparkContext().longAccumulator();
         unselectedRowAcc = spark.sparkContext().longAccumulator();
         scannedRowsAcc = spark.sparkContext().longAccumulator();
@@ -112,7 +120,7 @@ public final class SparkDpp implements java.io.Serializable {
         // assume that keys are all before values
         StringBuilder groupBySb = new StringBuilder();
         groupBySb.append(DppUtils.BUCKET_ID + ",");
-        Map<String, DataType> valueColumnsOriginalType = new HashMap<>();
+        Map<EtlJobConfig.EtlColumn, DataType> valueColumnsOriginalType = new HashMap<>();
         for (EtlJobConfig.EtlColumn column : indexMeta.columns) {
             if (column.isKey) {
                 sb.append(column.columnName + ",");
@@ -120,7 +128,7 @@ public final class SparkDpp implements java.io.Serializable {
             } else {
                 // get the value columns's original type
                 DataType originalType = dataframe.schema().apply(column.columnName).dataType();
-                valueColumnsOriginalType.put(column.columnName, originalType);
+                valueColumnsOriginalType.put(column, originalType);
                 if (column.aggregationType.equalsIgnoreCase("MAX")) {
                     sb.append("max(" + column.columnName + ") as " + column.columnName);
                     sb.append(",");
@@ -138,6 +146,20 @@ public final class SparkDpp implements java.io.Serializable {
                         sb.append("bitmap_union_binary(" + column.columnName + ") as " + column.columnName);
                         sb.append(",");
                     }
+                } else if (column.aggregationType.equalsIgnoreCase("HLL_UNION")) {
+                    if (indexMeta.isBaseIndex) {
+                        sb.append("hll_union_str(" + column.columnName + ") as " + column.columnName);
+                        sb.append(",");
+                    } else {
+                        sb.append("hll_union_binary(" + column.columnName + ") as " + column.columnName);
+                        sb.append(",");
+                    }
+                } else if (column.aggregationType.equalsIgnoreCase("REPLACE_IF_NOT_NULL")) {
+                    sb.append("replace_if_not_null_str(" + column.columnName + ") as " + column.columnName);
+                    sb.append(",");
+                } else if (column.aggregationType.equalsIgnoreCase("REPLACE")) {
+                    sb.append("replace_str(" + column.columnName + ") as " + column.columnName);
+                    sb.append(",");
                 }
             }
         }
@@ -151,13 +173,16 @@ public final class SparkDpp implements java.io.Serializable {
         System.out.println("print current schema: index id=" + indexMeta.toString());
         dataframe.printSchema();
 
-        System.out.println(aggSql);
         Dataset<Row> aggDataFrame = spark.sql(aggSql);
         // after agg, the type of sum column maybe be changed, so should add type cast for value column
-        for (Map.Entry<String, DataType> entry : valueColumnsOriginalType.entrySet()) {
-            DataType currentType = aggDataFrame.schema().apply(entry.getKey()).dataType();
+        for (Map.Entry<EtlJobConfig.EtlColumn, DataType> entry : valueColumnsOriginalType.entrySet()) {
+            // need keep bitmap_union and hll union output dataframe 's schema is binary
+            if (entry.getKey().aggregationType.equalsIgnoreCase("BITMAP_UNION") || entry.getKey().aggregationType.equalsIgnoreCase("HLL_UNION")) {
+                continue;
+            }
+            DataType currentType = aggDataFrame.schema().apply(entry.getKey().columnName).dataType();
             if (!currentType.equals(entry.getValue())) {
-                aggDataFrame = aggDataFrame.withColumn(entry.getKey(), aggDataFrame.col(entry.getKey()).cast(entry.getValue()));
+                aggDataFrame = aggDataFrame.withColumn(entry.getKey().columnName, aggDataFrame.col(entry.getKey().columnName).cast(entry.getValue()));
             }
         }
         aggDataFrame.printSchema();
@@ -273,6 +298,8 @@ public final class SparkDpp implements java.io.Serializable {
                             group.add(indexMeta.columns.get(i - 1).columnName, row.getFloat(i));
                         } else if (columnObject instanceof Double) {
                             group.add(indexMeta.columns.get(i - 1).columnName, row.getDouble(i));
+                        } else if (columnObject instanceof byte[]) {
+                            group.add(indexMeta.columns.get(i - 1).columnName, Binary.fromConstantByteArray((byte[]) row.get(i)));
                         }
                     }
                     try {
