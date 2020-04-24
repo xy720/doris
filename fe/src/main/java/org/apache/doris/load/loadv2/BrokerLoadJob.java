@@ -17,6 +17,7 @@
 
 package org.apache.doris.load.loadv2;
 
+
 import org.apache.doris.analysis.BrokerDesc;
 import org.apache.doris.catalog.Catalog;
 import org.apache.doris.catalog.Database;
@@ -29,11 +30,11 @@ import org.apache.doris.common.MetaNotFoundException;
 import org.apache.doris.common.UserException;
 import org.apache.doris.common.util.LogBuilder;
 import org.apache.doris.common.util.LogKey;
-import org.apache.doris.common.util.SqlParserUtils;
 import org.apache.doris.load.BrokerFileGroup;
 import org.apache.doris.load.BrokerFileGroupAggInfo.FileGroupAggKey;
 import org.apache.doris.load.EtlJobType;
 import org.apache.doris.load.FailMsg;
+import org.apache.doris.qe.OriginStatement;
 import org.apache.doris.service.FrontendOptions;
 import org.apache.doris.thrift.TUniqueId;
 import org.apache.doris.transaction.BeginTransactionException;
@@ -67,7 +68,7 @@ public class BrokerLoadJob extends BulkLoadJob {
         this.jobType = EtlJobType.BROKER;
     }
 
-    BrokerLoadJob(long dbId, String label, BrokerDesc brokerDesc, String originStmt)
+    BrokerLoadJob(long dbId, String label, BrokerDesc brokerDesc, OriginStatement originStmt)
             throws MetaNotFoundException {
         super(dbId, label, originStmt);
         this.timeoutSecond = Config.broker_load_default_timeout_second;
@@ -83,6 +84,7 @@ public class BrokerLoadJob extends BulkLoadJob {
                                   new TxnCoordinator(TxnSourceType.FE, FrontendOptions.getLocalHostAddress()),
                                   TransactionState.LoadJobSourceType.BATCH_LOAD_JOB, id,
                                   timeoutSecond);
+    }
 
     @Override
     protected void unprotectedExecuteJob() {
@@ -178,8 +180,8 @@ public class BrokerLoadJob extends BulkLoadJob {
 
                 // Generate loading task and init the plan of task
                 LoadLoadingTask task = new LoadLoadingTask(db, table, brokerDesc,
-                        brokerFileGroups, getDeadlineMs(), execMemLimit,
-                        strictMode, transactionId, this, timezone, timeoutSecond);
+                                                           brokerFileGroups, getDeadlineMs(), execMemLimit,
+                                                           strictMode, transactionId, this, timezone, timeoutSecond);
                 UUID uuid = UUID.randomUUID();
                 TUniqueId loadId = new TUniqueId(uuid.getMostSignificantBits(), uuid.getLeastSignificantBits());
                 task.init(loadId, attachment.getFileStatusByTable(aggKey), attachment.getFileNumByTable(aggKey));
@@ -246,7 +248,7 @@ public class BrokerLoadJob extends BulkLoadJob {
         // check data quality
         if (!checkDataQuality()) {
             cancelJobWithoutCheck(new FailMsg(FailMsg.CancelType.ETL_QUALITY_UNSATISFIED, QUALITY_FAIL_MSG),
-                    true, true);
+                                  true, true);
             return;
         }
         Database db = null;
