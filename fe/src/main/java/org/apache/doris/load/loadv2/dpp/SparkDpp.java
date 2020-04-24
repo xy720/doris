@@ -736,7 +736,7 @@ public final class SparkDpp implements java.io.Serializable {
                         EtlJobConfig.EtlColumn column = baseIndex.columns.get(i);
                         if (column.columnName.equals(key)) {
                             partitionKeyIndex.add(i);
-                            partitionKeySchema.add(DppUtils.columnTypeToClass(column.columnType));
+                            partitionKeySchema.add(DppUtils.getClassFromColumn(column));
                             break;
                         }
                     }
