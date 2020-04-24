@@ -137,12 +137,10 @@ public class DppUtils {
                 break;
             case "CHAR":
             case "VARCHAR":
-                dataType = DataTypes.StringType;
-                break;
             case "HLL":
             case "BITMAP":
             case "OBJECT":
-                dataType = DataTypes.BinaryType;
+                dataType = DataTypes.StringType;
                 break;
             case "DECIMALV2":
                 dataType = DecimalType.apply(column.precision, column.scale);

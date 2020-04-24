@@ -68,8 +68,8 @@ public class SparkEtlJob {
 
     private void initConfig() {
         System.err.println("****** job config file path: " + jobConfigFilePath);
-        Dataset<Row> ds = spark.read().csv(jobConfigFilePath);
-        String jobJsonConfigs = ds.first().mkString(",");
+        Dataset<String> ds = spark.read().textFile(jobConfigFilePath);
+        String jobJsonConfigs = ds.first();
         System.err.println("****** rdd read json configs: " + jobJsonConfigs);
 
         GsonBuilder gsonBuilder = new GsonBuilder();
