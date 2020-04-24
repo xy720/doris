@@ -348,7 +348,7 @@ public class MasterImpl {
                                                                        task.getDbId());
             // handle load job
             // TODO yiguolei: why delete should check request version and task version?
-           	if (pushTask.getPushType() == TPushType.LOAD || pushTask.getPushType() == TPushType.LOAD_DELETE) {
+            if (pushTask.getPushType() == TPushType.LOAD || pushTask.getPushType() == TPushType.LOAD_DELETE) {
                 long loadJobId = pushTask.getLoadJobId();
                 LoadJob job = Catalog.getInstance().getLoadInstance().getLoadJob(loadJobId);
                 if (job == null) {
