@@ -52,7 +52,6 @@ import scala.Tuple2;
 import scala.collection.Seq;
 import java.math.BigInteger;
 import java.net.URI;
-import java.net.URI;
 import java.util.Map;
 import java.util.Set;
 import java.util.List;
@@ -427,6 +426,10 @@ public final class SparkDpp implements java.io.Serializable {
             }
             if (column.columnType.equalsIgnoreCase("DATE")) {
                 dataframe = dataframe.withColumn(dstField.name(), dataframe.col(dstField.name()).cast("date"));
+            } else if (column.columnType.equalsIgnoreCase("BOOLEAN")) {
+                dataframe = dataframe.withColumn(dstField.name(),
+                                                 functions.when(dataframe.col(dstField.name()).equalTo("true"), "1")
+                                                         .otherwise("0"));
             } else if (!column.columnType.equalsIgnoreCase(BITMAP_TYPE) && !dstField.dataType().equals(DataTypes.StringType)) {
                 dataframe = dataframe.withColumn(dstField.name(), dataframe.col(dstField.name()).cast(dstField.dataType()));
             }

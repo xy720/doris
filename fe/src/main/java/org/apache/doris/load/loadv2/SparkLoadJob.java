@@ -19,6 +19,7 @@ package org.apache.doris.load.loadv2;
 
 import org.apache.doris.analysis.Analyzer;
 import org.apache.doris.analysis.BrokerDesc;
+import org.apache.doris.analysis.CastExpr;
 import org.apache.doris.analysis.DescriptorTable;
 import org.apache.doris.analysis.EtlClusterDesc;
 import org.apache.doris.analysis.Expr;
@@ -39,6 +40,7 @@ import org.apache.doris.catalog.Replica;
 import org.apache.doris.catalog.ScalarType;
 import org.apache.doris.catalog.SparkEtlCluster;
 import org.apache.doris.catalog.Tablet;
+import org.apache.doris.catalog.Type;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.Config;
 import org.apache.doris.common.DdlException;
@@ -222,7 +224,13 @@ public class SparkLoadJob extends BulkLoadJob {
                 SlotDescriptor srcSlotDesc = srcSlotDescByName.get(destSlotDesc.getColumn().getName());
                 destSidToSrcSidWithoutTrans.put(destSlotDesc.getId().asInt(), srcSlotDesc.getId().asInt());
                 Expr expr = new SlotRef(srcSlotDesc);
-                expr = castToSlot(destSlotDesc, expr);
+                if (destSlotDesc.getType().getPrimitiveType() == PrimitiveType.BOOLEAN) {
+                    // there is no cast string to boolean function
+                    // so we cast string to tinyint first, then cast tinyint to boolean
+                    expr = new CastExpr(Type.BOOLEAN, new CastExpr(Type.TINYINT, expr));
+                } else {
+                    expr = castToSlot(destSlotDesc, expr);
+                }
                 params.putToExpr_of_dest_slot(destSlotDesc.getId().asInt(), expr.treeToThrift());
             }
             params.setDest_sid_to_src_sid_without_trans(destSidToSrcSidWithoutTrans);

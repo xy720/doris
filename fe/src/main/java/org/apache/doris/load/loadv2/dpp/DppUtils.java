@@ -107,7 +107,7 @@ public class DppUtils {
         DataType dataType = DataTypes.StringType;
         switch (column.columnType) {
             case "BOOLEAN":
-                dataType = DataTypes.BooleanType;
+                dataType = DataTypes.StringType;
                 break;
             case "TINYINT":
             case "SMALLINT":
