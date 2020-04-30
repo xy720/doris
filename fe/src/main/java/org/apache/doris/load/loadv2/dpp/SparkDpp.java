@@ -692,7 +692,7 @@ public final class SparkDpp implements java.io.Serializable {
     }
 
     private DppResult process() throws Exception {
-        dppResult = new DppResult();
+        DppResult dppResult = new DppResult();
         try {
             for (Map.Entry<Long, EtlJobConfig.EtlTable> entry : etlJobConfig.tables.entrySet()) {
                 Long tableId = entry.getKey();
