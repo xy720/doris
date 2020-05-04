@@ -17,6 +17,7 @@
 
 package org.apache.doris.load.loadv2;
 
+import com.google.common.base.Strings;
 import com.google.gson.FieldNamingPolicy;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
@@ -58,6 +59,14 @@ import java.io.UnsupportedEncodingException;
 import java.util.List;
 import java.util.Map;
 
+/**
+ * SparkEtlJobHandler is responsible for
+ * 1. submit spark etl job
+ * 2. get spark etl job status
+ * 3. kill spark etl job
+ * 4. get spark etl file paths
+ * 5. delete etl output path
+ */
 public class SparkEtlJobHandler {
     private static final Logger LOG = LogManager.getLogger(SparkEtlJobHandler.class);
 
@@ -79,8 +88,8 @@ public class SparkEtlJobHandler {
         public void infoChanged(SparkAppHandle sparkAppHandle) {}
     }
 
-    public void submitEtlJob(long loadJobId, String loadLabel, SparkEtlCluster etlCluster, BrokerDesc brokerDesc,
-                             EtlJobConfig etlJobConfig, SparkPendingTaskAttachment attachment) throws LoadException {
+    public void submitEtlJob(long loadJobId, String loadLabel, EtlJobConfig etlJobConfig, SparkEtlCluster etlCluster,
+                             BrokerDesc brokerDesc, SparkPendingTaskAttachment attachment) throws LoadException {
         // delete outputPath
         deleteEtlOutputPath(etlJobConfig.outputPath, brokerDesc);
 
@@ -153,13 +162,13 @@ public class SparkEtlJobHandler {
                 throw new LoadException(errMsg + "spark app state: " + state.toString());
             }
             if (retry >= GET_APPID_MAX_RETRY) {
-                throw new LoadException(errMsg + "wait too much time for getting appid, spark app state: "
+                throw new LoadException(errMsg + "wait too much time for getting appid. spark app state: "
                                                 + state.toString());
             }
 
             // log
             if (retry % 10 == 0) {
-                LOG.info("spark appid that handle get is null, load job id: {}, state: {}, retry times: {}",
+                LOG.info("spark appid that handle get is null. load job id: {}, state: {}, retry times: {}",
                          loadJobId, state.toString(), retry);
             }
             try {
@@ -174,8 +183,8 @@ public class SparkEtlJobHandler {
         attachment.setHandle(handle);
     }
 
-    public EtlStatus getEtlJobStatus(SparkAppHandle handle, String appId, long loadJobId, SparkEtlCluster etlCluster,
-                                     String etlOutputPath, BrokerDesc brokerDesc) {
+    public EtlStatus getEtlJobStatus(SparkAppHandle handle, String appId, long loadJobId, String etlOutputPath,
+                                     SparkEtlCluster etlCluster, BrokerDesc brokerDesc) {
         EtlStatus status = new EtlStatus();
 
         if (etlCluster.isYarnMaster()) {
@@ -184,7 +193,7 @@ public class SparkEtlJobHandler {
             YarnClient client = startYarnClient(etlCluster);
             try {
                 ApplicationReport report = client.getApplicationReport(ConverterUtils.toApplicationId(appId));
-                LOG.info("yarn application -status {}, load job id: {}, result: {}", appId, loadJobId, report);
+                LOG.info("yarn application -status {}. load job id: {}, result: {}", appId, loadJobId, report);
 
                 YarnApplicationState state = report.getYarnApplicationState();
                 FinalApplicationStatus faStatus = report.getFinalApplicationStatus();
@@ -199,11 +208,11 @@ public class SparkEtlJobHandler {
                 status.setTrackingUrl(report.getTrackingUrl());
                 status.setProgress((int) (report.getProgress() * 100));
             } catch (ApplicationNotFoundException e) {
-                LOG.warn("spark app not found, spark app id: {}, load job id: {}", appId, loadJobId, e);
+                LOG.warn("spark app not found. spark app id: {}, load job id: {}", appId, loadJobId, e);
                 status.setState(TEtlState.CANCELLED);
                 status.setFailMsg(e.getMessage());
             } catch (YarnException | IOException e) {
-                LOG.warn("yarn application status failed, spark app id: {}, load job id: {}", appId, loadJobId, e);
+                LOG.warn("yarn application status failed. spark app id: {}, load job id: {}", appId, loadJobId, e);
             } finally {
                 stopYarnClient(client);
             }
@@ -230,11 +239,11 @@ public class SparkEtlJobHandler {
                 String dppResultStr = BrokerUtil.readBrokerFile(dppResultFilePath, brokerDesc);
                 DppResult dppResult = new Gson().fromJson(dppResultStr, DppResult.class);
                 status.setDppResult(dppResult);
-                if (status.getState() == TEtlState.CANCELLED) {
+                if (status.getState() == TEtlState.CANCELLED && !Strings.isNullOrEmpty(dppResult.failedReason)) {
                     status.setFailMsg(dppResult.failedReason);
                 }
             } catch (UserException | JsonSyntaxException e) {
-                LOG.warn("read broker file failed, path: {}", dppResultFilePath, e);
+                LOG.warn("read broker file failed. path: {}", dppResultFilePath, e);
             }
         }
 
@@ -250,7 +259,7 @@ public class SparkEtlJobHandler {
                     client.killApplication(ConverterUtils.toApplicationId(appId));
                     LOG.info("yarn application -kill {}", appId);
                 } catch (YarnException | IOException e) {
-                    LOG.warn("yarn application kill failed, app id: {}, load job id: {}", appId, loadJobId, e);
+                    LOG.warn("yarn application kill failed. app id: {}, load job id: {}", appId, loadJobId, e);
                 }
             } finally {
                 stopYarnClient(client);

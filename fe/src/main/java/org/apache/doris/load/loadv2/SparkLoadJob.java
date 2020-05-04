@@ -415,7 +415,7 @@ public class SparkLoadJob extends BulkLoadJob {
 
         // get etl status
         SparkEtlJobHandler handler = new SparkEtlJobHandler();
-        EtlStatus status = handler.getEtlJobStatus(sparkAppHandle, appId, id, etlCluster, etlOutputPath, brokerDesc);
+        EtlStatus status = handler.getEtlJobStatus(sparkAppHandle, appId, id, etlOutputPath, etlCluster, brokerDesc);
         switch (status.getState()) {
             case RUNNING:
                 updateEtlStatusInternal(status);
@@ -424,7 +424,7 @@ public class SparkLoadJob extends BulkLoadJob {
                 processEtlFinish(status, handler);
                 break;
             case CANCELLED:
-                throw new LoadException("spark etl job failed, msg: " + status.getFailMsg());
+                throw new LoadException("spark etl job failed. msg: " + status.getFailMsg());
             default:
                 LOG.warn("unknown etl state: {}", status.getState().name());
                 break;
@@ -767,7 +767,7 @@ public class SparkLoadJob extends BulkLoadJob {
                 try {
                     handler.killEtlJob(sparkAppHandle, appId, id, etlCluster);
                 } catch (Exception e) {
-                    LOG.warn("kill etl job fail. id: {}, state: {}", id, state, e);
+                    LOG.warn("kill etl job failed. id: {}, state: {}", id, state, e);
                 }
             }
         }
@@ -777,7 +777,7 @@ public class SparkLoadJob extends BulkLoadJob {
                 String outputPath = etlOutputPath.substring(0, etlOutputPath.lastIndexOf("/"));
                 handler.deleteEtlOutputPath(outputPath, brokerDesc);
             } catch (Exception e) {
-                LOG.warn("delete etl files fail. id: {}, state: {}", id, state, e);
+                LOG.warn("delete etl files failed. id: {}, state: {}", id, state, e);
             }
         }
 
@@ -893,7 +893,7 @@ public class SparkLoadJob extends BulkLoadJob {
                 prepareLoadingInfos();
                 break;
             default:
-                LOG.warn("replay update load job state info failed, error: wrong state. job id: {}, state: {}",
+                LOG.warn("replay update load job state info failed. error: wrong state. job id: {}, state: {}",
                          id, state);
                 break;
         }

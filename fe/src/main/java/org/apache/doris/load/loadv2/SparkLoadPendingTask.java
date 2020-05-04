@@ -113,7 +113,7 @@ public class SparkLoadPendingTask extends LoadTask {
 
         // handler submit etl job
         SparkEtlJobHandler handler = new SparkEtlJobHandler();
-        handler.submitEtlJob(loadJobId, loadLabel, etlCluster, brokerDesc, etlJobConfig, sparkAttachment);
+        handler.submitEtlJob(loadJobId, loadLabel, etlJobConfig, etlCluster, brokerDesc, sparkAttachment);
         LOG.info("submit spark etl job success. load job id: {}, attachment: {}", loadJobId, sparkAttachment);
     }
 
