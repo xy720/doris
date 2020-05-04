@@ -108,9 +108,9 @@ import java.util.Set;
 /**
  * There are 4 steps in SparkLoadJob:
  * Step1: SparkLoadPendingTask will be created by unprotectedExecuteJob method and submit spark etl job.
- * Step2: LoadEtlChecker will check spark etl job status periodly and submit push tasks when spark etl job is finished.
+ * Step2: LoadEtlChecker will check spark etl job status periodly and send push tasks to be when spark etl job is finished.
  * Step3: LoadLoadingChecker will check loading status periodly and commit transaction when push tasks are finished.
- * Step4: CommitTxn will be called by updateLoadingStatus method when push tasks are finished.
+ * Step4: PublishVersionDaemon will send publish version tasks to be and finish transaction.
  */
 public class SparkLoadJob extends BulkLoadJob {
     private static final Logger LOG = LogManager.getLogger(SparkLoadJob.class);
@@ -245,13 +245,13 @@ public class SparkLoadJob extends BulkLoadJob {
 
             // broker range desc
             TBrokerRangeDesc tBrokerRangeDesc = new TBrokerRangeDesc();
-            tBrokerScanRange.setRanges(Lists.newArrayList(tBrokerRangeDesc));
             tBrokerRangeDesc.setFile_type(TFileType.FILE_BROKER);
             tBrokerRangeDesc.setFormat_type(TFileFormatType.FORMAT_PARQUET);
             tBrokerRangeDesc.setSplittable(false);
             tBrokerRangeDesc.setStart_offset(0);
             tBrokerRangeDesc.setSize(-1);
             // path and file size updated for each replica
+            tBrokerScanRange.setRanges(Lists.newArrayList(tBrokerRangeDesc));
         }
 
         public TBrokerScanRange getTBrokerScanRange() {
@@ -618,9 +618,9 @@ public class SparkLoadJob extends BulkLoadJob {
                                         tBrokerScanRange.getBroker_addresses().add(
                                                 new TNetworkAddress(fsBroker.ip, fsBroker.port));
 
-                                        PushTask pushTask = new PushTask(replica.getBackendId(), dbId, tableId, partitionId,
-                                                                         indexId, tabletId, replica.getId(), schemaHash,
-                                                                         0, getId(), TPushType.LOAD_V2,
+                                        PushTask pushTask = new PushTask(backendId, dbId, tableId, partitionId,
+                                                                         indexId, tabletId, replicaId, schemaHash,
+                                                                         0, id, TPushType.LOAD_V2,
                                                                          TPriority.NORMAL, transactionId, taskSignature,
                                                                          tBrokerScanRange, params.tDescriptorTable);
                                         if (AgentTaskQueue.addTask(pushTask)) {

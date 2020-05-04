@@ -17,48 +17,60 @@
 
 package org.apache.doris.load.loadv2;
 
+import org.apache.doris.analysis.BrokerDesc;
 import org.apache.doris.analysis.DataDescription;
 import org.apache.doris.analysis.DataProcessorDesc;
 import org.apache.doris.analysis.EtlClusterDesc;
 import org.apache.doris.analysis.LabelName;
 import org.apache.doris.analysis.LoadStmt;
 import org.apache.doris.catalog.Catalog;
+import org.apache.doris.catalog.Column;
 import org.apache.doris.catalog.Database;
 import org.apache.doris.catalog.EtlClusterMgr;
+import org.apache.doris.catalog.MaterializedIndex;
 import org.apache.doris.catalog.OlapTable;
+import org.apache.doris.catalog.Partition;
+import org.apache.doris.catalog.PartitionInfo;
+import org.apache.doris.catalog.PrimitiveType;
+import org.apache.doris.catalog.RangePartitionInfo;
+import org.apache.doris.catalog.Replica;
 import org.apache.doris.catalog.SparkEtlCluster;
-import org.apache.doris.catalog.SparkEtlCluster.DeployMode;
-import org.apache.doris.common.AnalysisException;
+import org.apache.doris.catalog.Tablet;
 import org.apache.doris.common.DdlException;
-import org.apache.doris.common.DuplicatedRequestException;
-import org.apache.doris.common.LabelAlreadyUsedException;
 import org.apache.doris.common.LoadException;
 import org.apache.doris.common.MetaNotFoundException;
+import org.apache.doris.common.Pair;
 import org.apache.doris.common.jmockit.Deencapsulation;
 import org.apache.doris.load.EtlJobType;
+import org.apache.doris.load.EtlStatus;
+import org.apache.doris.load.FailMsg;
+import org.apache.doris.load.loadv2.etl.EtlJobConfig;
+import org.apache.doris.qe.OriginStatement;
+import org.apache.doris.task.AgentBatchTask;
+import org.apache.doris.task.AgentTaskExecutor;
+import org.apache.doris.task.MasterTaskExecutor;
+import org.apache.doris.task.PushTask;
+import org.apache.doris.thrift.TEtlState;
+import org.apache.doris.transaction.GlobalTransactionMgr;
+import org.apache.doris.transaction.TabletCommitInfo;
+import org.apache.doris.transaction.TransactionState;
+import org.apache.doris.transaction.TransactionState.LoadJobSourceType;
 
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import mockit.Expectations;
 import mockit.Injectable;
 import mockit.Mocked;
-import org.apache.doris.qe.OriginStatement;
-import org.apache.doris.service.FrontendOptions;
-import org.apache.doris.task.MasterTaskExecutor;
-import org.apache.doris.transaction.BeginTransactionException;
-import org.apache.doris.transaction.GlobalTransactionMgr;
-import org.apache.doris.transaction.TransactionState.LoadJobSourceType;
-import org.apache.doris.transaction.TransactionState.TxnCoordinator;
-import org.apache.doris.transaction.TransactionState.TxnSourceType;
+import org.apache.spark.launcher.SparkAppHandle;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 public class SparkLoadJobTest {
-    private long loadJobId;
     private long dbId;
     private String dbName;
     private String tableName;
@@ -67,10 +79,18 @@ public class SparkLoadJobTest {
     private String broker;
     private long transactionId;
     private long pendingTaskId;
+    private String appId;
+    private String etlOutputPath;
+    private long tableId;
+    private long partitionId;
+    private long indexId;
+    private long tabletId;
+    private long replicaId;
+    private long backendId;
+    private int schemaHash;
 
     @Before
     public void setUp() {
-        loadJobId = 0L;
         dbId = 1L;
         dbName = "database0";
         tableName = "table0";
@@ -79,6 +99,15 @@ public class SparkLoadJobTest {
         broker = "broker0";
         transactionId = 2L;
         pendingTaskId = 3L;
+        appId = "app-20200412192444-0088";
+        etlOutputPath = "hdfs://127.0.0.1:10000/tmp/doris/100/label/101";
+        tableId = 10L;
+        partitionId = 11L;
+        indexId = 12L;
+        tabletId = 13L;
+        replicaId = 14L;
+        backendId = 15L;
+        schemaHash = 146886;
     }
 
     @Test
@@ -135,10 +164,10 @@ public class SparkLoadJobTest {
             BulkLoadJob bulkLoadJob = BulkLoadJob.fromLoadStmt(loadStmt, new OriginStatement(originStmt, 0));
             SparkLoadJob sparkLoadJob = (SparkLoadJob) bulkLoadJob;
             // check member
-            Assert.assertEquals(dbId, (long) Deencapsulation.getField(bulkLoadJob, "dbId"));
-            Assert.assertEquals(label, Deencapsulation.getField(bulkLoadJob, "label"));
-            Assert.assertEquals(JobState.PENDING, Deencapsulation.getField(bulkLoadJob, "state"));
-            Assert.assertEquals(EtlJobType.SPARK, Deencapsulation.getField(bulkLoadJob, "jobType"));
+            Assert.assertEquals(dbId, bulkLoadJob.dbId);
+            Assert.assertEquals(label, bulkLoadJob.label);
+            Assert.assertEquals(JobState.PENDING, bulkLoadJob.getState());
+            Assert.assertEquals(EtlJobType.SPARK, bulkLoadJob.getJobType());
             Assert.assertEquals(clusterName, sparkLoadJob.getEtlClusterName());
             Assert.assertEquals(-1L, sparkLoadJob.getEtlStartTimestamp());
             Assert.assertEquals(hiveTable, sparkLoadJob.getHiveTableName());
@@ -155,34 +184,226 @@ public class SparkLoadJobTest {
         }
     }
 
-    /*
     @Test
-    public void testExecute(@Mocked Catalog catalog, @Injectable String originStmt,
-                            @Injectable GlobalTransactionMgr transactionMgr, @Injectable SparkLoadPendingTask pendingTask,
-                            @Injectable TxnCoordinator txnCoordinator, @Injectable MasterTaskExecutor executor)
-            throws MetaNotFoundException, LabelAlreadyUsedException, AnalysisException, LoadException,
-                    BeginTransactionException, DuplicatedRequestException {
-        EtlClusterDesc etlClusterDesc = new EtlClusterDesc(clusterName, Maps.newHashMap());
-        SparkLoadJob job = new SparkLoadJob(dbId, label, etlClusterDesc, new OriginStatement(originStmt, 0));
-
+    public void testExecute(@Mocked Catalog catalog, @Mocked SparkLoadPendingTask pendingTask,
+                            @Injectable String originStmt, @Injectable GlobalTransactionMgr transactionMgr,
+                            @Injectable MasterTaskExecutor executor) throws Exception {
         new Expectations() {
             {
                 Catalog.getCurrentGlobalTransactionMgr();
                 result = transactionMgr;
-                transactionMgr.beginTransaction(dbId, Lists.newArrayList(), label, null, txnCoordinator,
-                                                LoadJobSourceType.FRONTEND, loadJobId, 3600);
+                transactionMgr.beginTransaction(dbId, Lists.newArrayList(), label, null,
+                                                (TransactionState.TxnCoordinator) any, LoadJobSourceType.FRONTEND,
+                                                anyLong, anyLong);
                 result = transactionId;
+                pendingTask.init();
                 pendingTask.getSignature();
                 result = pendingTaskId;
-                pendingTask.init();
                 catalog.getLoadTaskScheduler();
                 result = executor;
-                executor.submit(pendingTask);
+                executor.submit((SparkLoadPendingTask) any);
+                result = true;
             }
         };
 
+        EtlClusterDesc etlClusterDesc = new EtlClusterDesc(clusterName, Maps.newHashMap());
+        SparkLoadJob job = new SparkLoadJob(dbId, label, etlClusterDesc, new OriginStatement(originStmt, 0));
         job.execute();
+
+        // check transaction id and id to tasks
         Assert.assertEquals(transactionId, job.getTransactionId());
+        Assert.assertTrue(job.idToTasks.containsKey(pendingTaskId));
     }
-    */
+
+    @Test
+    public void testOnPendingTaskFinished(@Mocked Catalog catalog, @Injectable String originStmt) throws MetaNotFoundException {
+        EtlClusterDesc etlClusterDesc = new EtlClusterDesc(clusterName, Maps.newHashMap());
+        SparkLoadJob job = new SparkLoadJob(dbId, label, etlClusterDesc, new OriginStatement(originStmt, 0));
+        SparkPendingTaskAttachment attachment = new SparkPendingTaskAttachment(pendingTaskId);
+        attachment.setAppId(appId);
+        attachment.setOutputPath(etlOutputPath);
+        job.onTaskFinished(attachment);
+
+        // check pending task finish
+        Assert.assertTrue(job.finishedTaskIds.contains(pendingTaskId));
+        Assert.assertEquals(appId, Deencapsulation.getField(job, "appId"));
+        Assert.assertEquals(etlOutputPath, Deencapsulation.getField(job, "etlOutputPath"));
+        Assert.assertEquals(JobState.ETL, job.getState());
+    }
+
+    private SparkLoadJob getEtlStateJob(String originStmt) throws MetaNotFoundException {
+        SparkEtlCluster etlCluster = new SparkEtlCluster(clusterName);
+        Deencapsulation.setField(etlCluster, "master", "yarn");
+        SparkLoadJob job = new SparkLoadJob(dbId, label, null, new OriginStatement(originStmt, 0));
+        job.state = JobState.ETL;
+        job.maxFilterRatio = 0.15;
+        job.transactionId = transactionId;
+        Deencapsulation.setField(job, "appId", appId);
+        Deencapsulation.setField(job, "etlOutputPath", etlOutputPath);
+        Deencapsulation.setField(job, "etlCluster", etlCluster);
+        BrokerDesc brokerDesc = new BrokerDesc("broker0", Maps.newHashMap());
+        job.brokerDesc = brokerDesc;
+        return job;
+    }
+
+    @Test
+    public void testUpdateEtlStatusRunning(@Mocked Catalog catalog, @Injectable String originStmt,
+                                           @Mocked SparkEtlJobHandler handler) throws Exception {
+        String trackingUrl = "http://127.0.0.1:8080/proxy/application_1586619723848_0088/";
+        int progress = 66;
+        EtlStatus status = new EtlStatus();
+        status.setState(TEtlState.RUNNING);
+        status.setTrackingUrl(trackingUrl);
+        status.setProgress(progress);
+
+        new Expectations() {
+            {
+                handler.getEtlJobStatus((SparkAppHandle) any, appId, anyLong, (SparkEtlCluster) any,
+                                        etlOutputPath, (BrokerDesc) any);
+                result = status;
+            }
+        };
+
+        SparkLoadJob job = getEtlStateJob(originStmt);
+        job.updateEtlStatus();
+
+        // check update etl running
+        Assert.assertEquals(JobState.ETL, job.getState());
+        Assert.assertEquals(progress, job.progress);
+        Assert.assertEquals(trackingUrl, job.loadingStatus.getTrackingUrl());
+    }
+
+    @Test(expected = LoadException.class)
+    public void testUpdateEtlStatusCancelled(@Mocked Catalog catalog, @Injectable String originStmt,
+                                             @Mocked SparkEtlJobHandler handler) throws Exception {
+        EtlStatus status = new EtlStatus();
+        status.setState(TEtlState.CANCELLED);
+
+        new Expectations() {
+            {
+                handler.getEtlJobStatus((SparkAppHandle) any, appId, anyLong, (SparkEtlCluster) any,
+                                        etlOutputPath, (BrokerDesc) any);
+                result = status;
+            }
+        };
+
+        SparkLoadJob job = getEtlStateJob(originStmt);
+        job.updateEtlStatus();
+    }
+
+    @Test
+    public void testUpdateEtlStatusFinishedQualityFailed(@Mocked Catalog catalog, @Injectable String originStmt,
+                                                         @Mocked SparkEtlJobHandler handler) throws Exception {
+        EtlStatus status = new EtlStatus();
+        status.setState(TEtlState.FINISHED);
+        status.getCounters().put("dpp.norm.ALL", "8");
+        status.getCounters().put("dpp.abnorm.ALL", "2");
+
+        new Expectations() {
+            {
+                handler.getEtlJobStatus((SparkAppHandle) any, appId, anyLong, (SparkEtlCluster) any,
+                                        etlOutputPath, (BrokerDesc) any);
+                result = status;
+            }
+        };
+
+        SparkLoadJob job = getEtlStateJob(originStmt);
+        job.updateEtlStatus();
+
+        // check update etl finished, but quality failed
+        Assert.assertEquals(JobState.CANCELLED, job.getState());
+        Assert.assertEquals(FailMsg.CancelType.ETL_QUALITY_UNSATISFIED, job.failMsg.getCancelType());
+    }
+
+    @Test
+    public void testUpdateEtlStatusFinishedAndCommitTransaction(
+            @Mocked Catalog catalog, @Injectable String originStmt,
+            @Mocked SparkEtlJobHandler handler, @Mocked AgentTaskExecutor executor,
+            @Injectable Database db, @Injectable OlapTable table, @Injectable Partition partition,
+            @Injectable MaterializedIndex index, @Injectable Tablet tablet, @Injectable Replica replica,
+            @Injectable GlobalTransactionMgr transactionMgr) throws Exception {
+        EtlStatus status = new EtlStatus();
+        status.setState(TEtlState.FINISHED);
+        status.getCounters().put("dpp.norm.ALL", "9");
+        status.getCounters().put("dpp.abnorm.ALL", "1");
+        Map<String, Long> filePathToSize = Maps.newHashMap();
+        String filePath = String.format("hdfs://127.0.0.1:10000/doris/jobs/1/label6/9/label6.%d.%d.%d.0.%d.parquet",
+                                        tableId, partitionId, indexId, schemaHash);
+        long fileSize = 6L;
+        filePathToSize.put(filePath, fileSize);
+        PartitionInfo partitionInfo = new RangePartitionInfo();
+        partitionInfo.addPartition(partitionId, null, (short) 1, false);
+
+        new Expectations() {
+            {
+                handler.getEtlJobStatus((SparkAppHandle) any, appId, anyLong, (SparkEtlCluster) any,
+                                        etlOutputPath, (BrokerDesc) any);
+                result = status;
+                handler.getEtlFilePaths(etlOutputPath, (BrokerDesc) any);
+                result = filePathToSize;
+                catalog.getDb(dbId);
+                result = db;
+                db.getTable(tableId);
+                result = table;
+                table.getPartition(partitionId);
+                result = partition;
+                table.getPartitionInfo();
+                result = partitionInfo;
+                table.getSchemaByIndexId(Long.valueOf(12));
+                result = Lists.newArrayList(new Column("k1", PrimitiveType.VARCHAR));
+                partition.getMaterializedIndices(MaterializedIndex.IndexExtState.ALL);
+                result = Lists.newArrayList(index);
+                index.getId();
+                result = indexId;
+                index.getTablets();
+                result = Lists.newArrayList(tablet);
+                tablet.getId();
+                result = tabletId;
+                tablet.getReplicas();
+                result = Lists.newArrayList(replica);
+                replica.getId();
+                result = replicaId;
+                replica.getBackendId();
+                result = backendId;
+                replica.getLastFailedVersion();
+                result = -1;
+                AgentTaskExecutor.submit((AgentBatchTask) any);
+                Catalog.getCurrentGlobalTransactionMgr();
+                result = transactionMgr;
+                transactionMgr.commitTransaction(dbId, transactionId, (List<TabletCommitInfo>) any,
+                                                 (LoadJobFinalOperation) any);
+            }
+        };
+
+        SparkLoadJob job = getEtlStateJob(originStmt);
+        job.updateEtlStatus();
+
+        // check update etl finished
+        Assert.assertEquals(JobState.LOADING, job.getState());
+        Assert.assertEquals(0, job.progress);
+        Map<String, Pair<String, Long>> tabletMetaToFileInfo = Deencapsulation.getField(job, "tabletMetaToFileInfo");
+        Assert.assertEquals(1, tabletMetaToFileInfo.size());
+        String tabletMetaStr = EtlJobConfig.getTabletMetaStr(filePath);
+        Assert.assertTrue(tabletMetaToFileInfo.containsKey(tabletMetaStr));
+        Pair<String, Long> fileInfo = tabletMetaToFileInfo.get(tabletMetaStr);
+        Assert.assertEquals(filePath, fileInfo.first);
+        Assert.assertEquals(fileSize, (long) fileInfo.second);
+        Map<Long, Map<Long, PushTask>> tabletToSentReplicaPushTask
+                = Deencapsulation.getField(job, "tabletToSentReplicaPushTask");
+        Assert.assertTrue(tabletToSentReplicaPushTask.containsKey(tabletId));
+        Assert.assertTrue(tabletToSentReplicaPushTask.get(tabletId).containsKey(replicaId));
+        Map<Long, Set<Long>> tableToLoadPartitions = Deencapsulation.getField(job, "tableToLoadPartitions");
+        Assert.assertTrue(tableToLoadPartitions.containsKey(tableId));
+        Assert.assertTrue(tableToLoadPartitions.get(tableId).contains(partitionId));
+        Map<Long, Integer> indexToSchemaHash = Deencapsulation.getField(job, "indexToSchemaHash");
+        Assert.assertTrue(indexToSchemaHash.containsKey(indexId));
+        Assert.assertEquals(schemaHash, (long) indexToSchemaHash.get(indexId));
+
+        // finish push task
+        job.addFinishedReplica(replicaId, tabletId, backendId);
+        job.updateLoadingStatus();
+        Assert.assertEquals(99, job.progress);
+        Set<Long> fullTablets = Deencapsulation.getField(job, "fullTablets");
+        Assert.assertTrue(fullTablets.contains(tabletId));
+    }
 }
