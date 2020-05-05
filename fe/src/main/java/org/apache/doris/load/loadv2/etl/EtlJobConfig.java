@@ -19,6 +19,9 @@ package org.apache.doris.load.loadv2.etl;
 
 import com.google.common.collect.Lists;
 import com.google.common.collect.ImmutableMap;
+import com.google.gson.FieldNamingPolicy;
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
 
 import java.io.Serializable;
 import java.util.Comparator;
@@ -184,6 +187,20 @@ public class EtlJobConfig implements Serializable {
 
         // tableId.partitionId.indexId.bucket.schemaHash
         return fileName.substring(fileName.indexOf(".") + 1, fileName.lastIndexOf("."));
+    }
+
+    public String configToJson() {
+        GsonBuilder gsonBuilder = new GsonBuilder();
+        gsonBuilder.setFieldNamingPolicy(FieldNamingPolicy.LOWER_CASE_WITH_UNDERSCORES);
+        Gson gson = gsonBuilder.create();
+        return gson.toJson(this);
+    }
+
+    public static EtlJobConfig configFromJson(String jsonConfig) {
+        GsonBuilder gsonBuilder = new GsonBuilder();
+        gsonBuilder.setFieldNamingPolicy(FieldNamingPolicy.LOWER_CASE_WITH_UNDERSCORES);
+        Gson gson = gsonBuilder.create();
+        return gson.fromJson(jsonConfig, EtlJobConfig.class);
     }
 
     public static class EtlJobProperty implements Serializable {

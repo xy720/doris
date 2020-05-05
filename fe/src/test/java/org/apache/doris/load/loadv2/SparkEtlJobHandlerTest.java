@@ -193,12 +193,17 @@ public class SparkEtlJobHandlerTest {
         SparkEtlCluster etlCluster = new SparkEtlCluster(clusterName);
         Deencapsulation.setField(etlCluster, "master", "yarn");
         SparkEtlJobHandler handler = new SparkEtlJobHandler();
-        handler.killEtlJob(null, appId, loadJobId, etlCluster);
+        try {
+            handler.killEtlJob(null, appId, loadJobId, etlCluster);
+        } catch (Exception e) {
+            Assert.fail(e.getMessage());
+        }
     }
 
     @Test
     public void testGetEtlFilePaths(@Mocked TPaloBrokerService.Client client, @Mocked Catalog catalog,
                                     @Injectable BrokerMgr brokerMgr) throws Exception {
+        // list response
         TBrokerListResponse response = new TBrokerListResponse();
         TBrokerOperationStatus status = new TBrokerOperationStatus();
         status.statusCode = TBrokerOperationStatusCode.OK;
@@ -209,7 +214,6 @@ public class SparkEtlJobHandlerTest {
         response.files = files;
 
         FsBroker fsBroker = new FsBroker("127.0.0.1", 9999);
-
         new Expectations() {
             {
                 client.listPath((TBrokerListPathRequest) any);
@@ -239,6 +243,10 @@ public class SparkEtlJobHandlerTest {
 
         BrokerDesc brokerDesc = new BrokerDesc(broker, Maps.newHashMap());
         SparkEtlJobHandler handler = new SparkEtlJobHandler();
-        handler.deleteEtlOutputPath(etlOutputPath, brokerDesc);
+        try {
+            handler.deleteEtlOutputPath(etlOutputPath, brokerDesc);
+        } catch (Exception e) {
+            Assert.fail(e.getMessage());
+        }
     }
 }

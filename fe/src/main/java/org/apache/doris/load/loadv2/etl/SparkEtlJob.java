@@ -35,9 +35,6 @@ import org.apache.spark.sql.catalog.Column;
 import org.apache.spark.sql.functions;
 
 import com.google.common.collect.Lists;
-import com.google.gson.FieldNamingPolicy;
-import com.google.gson.Gson;
-import com.google.gson.GsonBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -47,18 +44,25 @@ import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
+/**
+ * SparkEtlJob is responsible for global dict building, data partition, data sort and data aggregation.
+ * 1. init job config
+ * 2. check if job has bitmap_dict function columns
+ * 3. build global dict if step 2 is true
+ * 4. dpp (data partition, data sort and data aggregation)
+ */
 public class SparkEtlJob {
     private static final String BITMAP_DICT_FUNC = "bitmap_dict";
     private static final String TO_BITMAP_FUNC = "to_bitmap";
 
     private String jobConfigFilePath;
     private EtlJobConfig etlJobConfig;
-    private SparkSession spark;
-
     private Map<Long, Set<String>> tableToBitmapDictColumns;
+    private SparkSession spark;
 
     private SparkEtlJob(String jobConfigFilePath) {
         this.jobConfigFilePath = jobConfigFilePath;
+        this.etlJobConfig = null;
         this.tableToBitmapDictColumns = Maps.newHashMap();
     }
 
@@ -69,14 +73,10 @@ public class SparkEtlJob {
     private void initConfig() {
         System.err.println("****** job config file path: " + jobConfigFilePath);
         Dataset<String> ds = spark.read().textFile(jobConfigFilePath);
-        String jobJsonConfigs = ds.first();
-        System.err.println("****** rdd read json configs: " + jobJsonConfigs);
-
-        GsonBuilder gsonBuilder = new GsonBuilder();
-        gsonBuilder.setFieldNamingPolicy(FieldNamingPolicy.LOWER_CASE_WITH_UNDERSCORES);
-        Gson gson = gsonBuilder.create();
-        etlJobConfig = gson.fromJson(jobJsonConfigs, EtlJobConfig.class);
-        System.err.println("****** etl job configs: " + etlJobConfig.toString());
+        String jsonConfig = ds.first();
+        System.err.println("****** rdd read json config: " + jsonConfig);
+        etlJobConfig = EtlJobConfig.configFromJson(jsonConfig);
+        System.err.println("****** etl job config: " + etlJobConfig.toString());
     }
 
     /*
@@ -171,29 +171,23 @@ public class SparkEtlJob {
         }
     }
 
-    private void processDataFromHiveTable() throws Exception {
-        // only one table
-        long tableId = -1;
-        EtlTable table = null;
-        for (Map.Entry<Long, EtlTable> entry : etlJobConfig.tables.entrySet()) {
-            tableId = entry.getKey();
-            table = entry.getValue();
-            break;
+    private void processData() throws Exception {
+        // build global dict if has bitmap dict columns
+        if (!tableToBitmapDictColumns.isEmpty()) {
+            // only one table
+            long tableId = -1;
+            EtlTable table = null;
+            for (Map.Entry<Long, EtlTable> entry : etlJobConfig.tables.entrySet()) {
+                tableId = entry.getKey();
+                table = entry.getValue();
+                break;
+            }
+            // build global dict and encode source hive table
+            buildGlobalDictAndEncodeSourceTable(table, tableId);
         }
-
-        // build global dict and and encode source hive table
-        buildGlobalDictAndEncodeSourceTable(table, tableId);
 
         // data partition sort and aggregation
         processDpp();
-    }
-
-    private void processData() throws Exception {
-        if (!tableToBitmapDictColumns.isEmpty()) {
-            processDataFromHiveTable();
-        } else {
-            processDpp();
-        }
     }
 
     private void run() throws Exception {

@@ -18,9 +18,7 @@
 package org.apache.doris.load.loadv2;
 
 import com.google.common.base.Strings;
-import com.google.gson.FieldNamingPolicy;
 import com.google.gson.Gson;
-import com.google.gson.GsonBuilder;
 import com.google.gson.JsonSyntaxException;
 import org.apache.doris.PaloFe;
 import org.apache.doris.analysis.BrokerDesc;
@@ -99,7 +97,7 @@ public class SparkEtlJobHandler {
         String jobConfigHdfsPath = configsHdfsDir + CONFIG_FILE_NAME;
         try {
             BrokerUtil.writeBrokerFile(APP_RESOURCE_LOCAL_PATH, appResourceHdfsPath, brokerDesc);
-            byte[] configData = configToJson(etlJobConfig).getBytes("UTF-8");
+            byte[] configData = etlJobConfig.configToJson().getBytes("UTF-8");
             BrokerUtil.writeBrokerFile(configData, jobConfigHdfsPath, brokerDesc);
         } catch (UserException | UnsupportedEncodingException e) {
             throw new LoadException(e.getMessage());
@@ -300,13 +298,6 @@ public class SparkEtlJobHandler {
         } catch (UserException e) {
             LOG.warn("delete path failed. path: {}", outputPath, e);
         }
-    }
-
-    private String configToJson(EtlJobConfig etlJobConfig) {
-        GsonBuilder gsonBuilder = new GsonBuilder();
-        gsonBuilder.setFieldNamingPolicy(FieldNamingPolicy.LOWER_CASE_WITH_UNDERSCORES);
-        Gson gson = gsonBuilder.create();
-        return gson.toJson(etlJobConfig);
     }
 
     private YarnClient startYarnClient(SparkEtlCluster etlCluster) {
