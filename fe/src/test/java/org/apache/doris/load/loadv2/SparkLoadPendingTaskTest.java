@@ -130,8 +130,8 @@ public class SparkLoadPendingTaskTest {
         String appId = "application_15888888888_0088";
         new MockUp<SparkEtlJobHandler>() {
             @Mock
-            public void submitEtlJob(long loadJobId, String loadLabel, SparkEtlCluster etlCluster,
-                                     BrokerDesc brokerDesc, EtlJobConfig etlJobConfig,
+            public void submitEtlJob(long loadJobId, String loadLabel, EtlJobConfig etlJobConfig,
+                                     SparkEtlCluster etlCluster, BrokerDesc brokerDesc,
                                      SparkPendingTaskAttachment attachment) throws LoadException {
                 attachment.setAppId(appId);
             }
