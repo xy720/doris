@@ -45,7 +45,9 @@ public abstract class ColumnParser implements Serializable {
         } else if (columnType.equalsIgnoreCase("DATETIME")) {
             return new DatetimeParser();
         } else if (columnType.equalsIgnoreCase("VARCHAR")
-                || columnType.equalsIgnoreCase("CHAR")) {
+                || columnType.equalsIgnoreCase("CHAR")
+                || columnType.equalsIgnoreCase("BITMAP")
+                || columnType.equalsIgnoreCase("HLL")) {
             return new StringParser();
         } else {
             throw new UserException("unsupported type:" + columnType);
