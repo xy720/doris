@@ -252,6 +252,9 @@ public class EtlJobConfig implements Serializable {
         public int precision;
         public int scale;
 
+        // for unit test
+        public EtlColumn() { }
+
         public EtlColumn(String columnName, String columnType, boolean isAllowNull, boolean isKey,
                          String aggregationType, String defaultValue, int stringLength, int precision, int scale) {
             this.columnName = columnName;
