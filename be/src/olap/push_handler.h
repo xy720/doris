@@ -225,14 +225,13 @@ public:
         finalize();
     }
 
-    OLAPStatus init(const TabletSharedPtr tablet, 
-                    const Schema* schema,
-                    const TBrokerScanRange& scan_range,
-                    const TDescriptorTable& desc_tbl);
+    OLAPStatus init(const Schema* schema,
+                    const TBrokerScanRange& t_scan_range,
+                    const TDescriptorTable& t_desc_tbl);
     OLAPStatus next(ContiguousRow* row);
 
     OLAPStatus finalize() {
-        _ready = true;
+        _ready = false;
         return OLAP_SUCCESS;
     }
     bool eof() {
@@ -245,7 +244,6 @@ public:
 private:
     bool _ready;
     bool _eof;
-    TupleId _tuple_id;
     TupleDescriptor* _tuple_desc;
     Tuple* _tuple;
     const Schema* _schema;

@@ -274,7 +274,36 @@ OLAPStatus PushHandler::_convert_v2(TabletSharedPtr cur_tablet,
     do {
         VLOG(3) << "start to convert delta file.";
 
-        // 1. Init PushBrokerReader to read broker file if exist,
+        // 1. init RowsetBuilder of cur_tablet for current push
+        VLOG(3) << "init rowset builder. tablet=" << cur_tablet->full_name()
+            << ", block_row_size=" << cur_tablet->num_rows_per_row_block();
+        RowsetWriterContext context;
+        context.rowset_id = StorageEngine::instance()->next_rowset_id();
+        context.tablet_uid = cur_tablet->tablet_uid();
+        context.tablet_id = cur_tablet->tablet_id();
+        context.partition_id = _request.partition_id;
+        context.tablet_schema_hash = cur_tablet->schema_hash();
+        context.rowset_type = StorageEngine::instance()->default_rowset_type();
+        context.rowset_path_prefix = cur_tablet->tablet_path();
+        context.tablet_schema = &(cur_tablet->tablet_schema());
+        context.rowset_state = PREPARED;
+        context.txn_id = _request.transaction_id;
+        context.load_id = load_id;
+        // although the spark load output files are fully sorted,
+        // but it depends on thirparty implementation, so we conservatively
+        // set this value to OVERLAP_UNKNOWN
+        context.segments_overlap = OVERLAP_UNKNOWN;
+
+        std::unique_ptr<RowsetWriter> rowset_writer;
+        res = RowsetFactory::create_rowset_writer(context, &rowset_writer);
+        if (OLAP_SUCCESS != res) {
+            LOG(WARNING) << "failed to init rowset writer, tablet=" << cur_tablet->full_name()
+                         << ", txn_id=" << _request.transaction_id
+                         << ", res=" << res;
+            break;
+        }
+
+        // 2. Init PushBrokerReader to read broker file if exist,
         //    in case of empty push this will be skipped.
         std::string path = _request.broker_scan_range.ranges[0].path;
         if (!path.empty()) {
@@ -293,9 +322,8 @@ OLAPStatus PushHandler::_convert_v2(TabletSharedPtr cur_tablet,
                 break;
             }
 
-            // init BinaryReader
-            if (OLAP_SUCCESS != (res = reader->init(cur_tablet, 
-                                                    schema, 
+            // init Reader
+            if (OLAP_SUCCESS != (res = reader->init(schema, 
                                                     _request.broker_scan_range,
                                                     _request.desc_tbl))) {
                 LOG(WARNING) << "fail to init reader. res=" << res
@@ -303,46 +331,12 @@ OLAPStatus PushHandler::_convert_v2(TabletSharedPtr cur_tablet,
                 res = OLAP_ERR_PUSH_INIT_ERROR;
                 break;
             }
-        }
 
-        // 2. init RowsetBuilder of cur_tablet for current push
-        VLOG(3) << "init RowsetBuilder.";
-        RowsetWriterContext context;
-        context.rowset_id = StorageEngine::instance()->next_rowset_id();
-        context.tablet_uid = cur_tablet->tablet_uid();
-        context.tablet_id = cur_tablet->tablet_id();
-        context.partition_id = _request.partition_id;
-        context.tablet_schema_hash = cur_tablet->schema_hash();
-        context.rowset_type = StorageEngine::instance()->default_rowset_type();
-        context.rowset_path_prefix = cur_tablet->tablet_path();
-        context.tablet_schema = &(cur_tablet->tablet_schema());
-        context.rowset_state = PREPARED;
-        context.txn_id = _request.transaction_id;
-        context.load_id = load_id;
-        // although the hadoop load output files are fully sorted,
-        // but it depends on thirparty implementation, so we conservatively
-        // set this value to OVERLAP_UNKNOWN
-        context.segments_overlap = OVERLAP_UNKNOWN;
-
-        std::unique_ptr<RowsetWriter> rowset_writer;
-        res = RowsetFactory::create_rowset_writer(context, &rowset_writer);
-        if (OLAP_SUCCESS != res) {
-            LOG(WARNING) << "failed to init rowset writer, tablet=" << cur_tablet->full_name()
-                         << ", txn_id=" << _request.transaction_id
-                         << ", res=" << res;
-            break;
-        }
-
-        // 3. New RowsetBuilder to write data into rowset
-        VLOG(3) << "init rowset builder. tablet=" << cur_tablet->full_name()
-            << ", block_row_size=" << cur_tablet->num_rows_per_row_block();
-
-        if (!path.empty()) {
-            // 4. Init Row
+            // 3. Init Row
             uint8_t* tuple_buf = reader->mem_pool()->allocate(schema->schema_size());
             ContiguousRow row(schema, tuple_buf);
 
-            // 5. Read data from broker and write into SegmentGroup of cur_tablet
+            // 4. Read data from broker and write into SegmentGroup of cur_tablet
             // Convert from raw to delta
             VLOG(3) << "start to convert row file to delta.";
             while (!reader->eof()) {
@@ -353,13 +347,13 @@ OLAPStatus PushHandler::_convert_v2(TabletSharedPtr cur_tablet,
                     break;
                 } else {
                     if (reader->eof()) {
-                        continue;
+                        break;
                     }
                     if (OLAP_SUCCESS != (res = rowset_writer->add_row(row))) {
                         LOG(WARNING) << "fail to attach row to rowset_writer. "
-                            << " res=" << res
+                            << "res=" << res
                             << ", tablet=" << cur_tablet->full_name()
-                            << " read_rows=" << num_rows;
+                            << ", read_rows=" << num_rows;
                         break;
                     }
                     num_rows++;
@@ -370,11 +364,10 @@ OLAPStatus PushHandler::_convert_v2(TabletSharedPtr cur_tablet,
         }
 
         if (rowset_writer->flush() != OLAP_SUCCESS) {
-            LOG(WARNING) << "failed to finalize writer.";
+            LOG(WARNING) << "failed to finalize writer";
             break;
         }
         *cur_rowset = rowset_writer->build();
-
         if (*cur_rowset == nullptr) {
             LOG(WARNING) << "fail to build rowset";
             res = OLAP_ERR_MALLOC_ERROR;
@@ -384,7 +377,7 @@ OLAPStatus PushHandler::_convert_v2(TabletSharedPtr cur_tablet,
         _write_bytes += (*cur_rowset)->data_disk_size();
         _write_rows += (*cur_rowset)->num_rows();
 
-        // 7. Convert data for schema change tables
+        // 5. Convert data for schema change tables
         VLOG(10) << "load to related tables of schema_change if possible.";
         if (new_tablet != nullptr) {
             SchemaChangeHandler schema_change;
@@ -919,20 +912,19 @@ OLAPStatus LzoBinaryReader::_next_block() {
   return res;
 }
 
-OLAPStatus PushBrokerReader::init(const TabletSharedPtr tablet, 
-                                  const Schema* schema,
-                                  const TBrokerScanRange& scan_range,
+OLAPStatus PushBrokerReader::init(const Schema* schema,
+                                  const TBrokerScanRange& t_scan_range,
                                   const TDescriptorTable& t_desc_tbl) {
     // init schema
     _schema = schema;
 
     // init runtime state, runtime profile, counter
+    TUniqueId dummy_id;
+    dummy_id.hi = 0;
+    dummy_id.lo = 0;
     TPlanFragmentExecParams params;
-    TUniqueId params_id;
-    params_id.hi = 0;
-    params_id.lo = 0;
-    params.fragment_instance_id = params_id;
-    params.query_id = params_id;
+    params.fragment_instance_id = dummy_id;
+    params.query_id = dummy_id;
     TExecPlanFragmentParams fragment_params;
     fragment_params.params = params;
     fragment_params.protocol_version = PaloInternalServiceVersion::V1;
@@ -941,42 +933,50 @@ OLAPStatus PushBrokerReader::init(const TabletSharedPtr tablet,
     _runtime_state.reset(new RuntimeState(fragment_params, query_options, query_globals,
                                           ExecEnv::GetInstance()));
     DescriptorTbl* desc_tbl = NULL;
-    //RETURN_IF_ERROR(DescriptorTbl::create())
-    DescriptorTbl::create(_runtime_state->obj_pool(), t_desc_tbl, &desc_tbl);
+    Status status = DescriptorTbl::create(_runtime_state->obj_pool(), t_desc_tbl, &desc_tbl);
+    if (UNLIKELY(!status.ok())) {
+        LOG(WARNING) << "Failed to create descriptor table, msg: " << status.get_error_msg();
+        return OLAP_ERR_PUSH_INIT_ERROR;
+    }
     _runtime_state->set_desc_tbl(desc_tbl);
-    _runtime_state->init_mem_trackers(params_id);
+    status = _runtime_state->init_mem_trackers(dummy_id);
+    if (UNLIKELY(!status.ok())) {
+        LOG(WARNING) << "Failed to init mem trackers, msg: " << status.get_error_msg();
+        return OLAP_ERR_PUSH_INIT_ERROR;
+    }
     _runtime_profile.reset(new RuntimeProfile(_runtime_state->obj_pool(), "PushBrokerReader"));
     _mem_tracker.reset(new MemTracker(-1));
     _mem_pool.reset(new MemPool(_mem_tracker.get()));
     _counter.reset(new ScannerCounter());
 
     // init scanner
-    BaseScanner *scan = nullptr;
-    switch (scan_range.ranges[0].format_type) {
+    BaseScanner *scanner = nullptr;
+    switch (t_scan_range.ranges[0].format_type) {
     case TFileFormatType::FORMAT_PARQUET:
-        scan = new ParquetScanner(_runtime_state.get(),
+        scanner = new ParquetScanner(_runtime_state.get(),
                                   _runtime_profile.get(),
-                                  scan_range.params,
-                                  scan_range.ranges,
-                                  scan_range.broker_addresses,
+                                  t_scan_range.params,
+                                  t_scan_range.ranges,
+                                  t_scan_range.broker_addresses,
                                   _counter.get());
         break;
     default:
+        LOG(WARNING) << "Unsupported file format type: " << t_scan_range.ranges[0].format_type;
 		return OLAP_ERR_PUSH_INIT_ERROR;
 	}
-    _scanner.reset(scan); 
-    Status status = _scanner->open();
+    _scanner.reset(scanner); 
+    status = _scanner->open();
     if (UNLIKELY(!status.ok())) {
         LOG(WARNING) << "Failed to open scanner, msg: " << status.get_error_msg();
         return OLAP_ERR_PUSH_INIT_ERROR;
     }
 
     // init tuple
-    _tuple_id = scan_range.params.dest_tuple_id;
-    _tuple_desc = _runtime_state->desc_tbl().get_tuple_descriptor(_tuple_id);
+    auto tuple_id = t_scan_range.params.dest_tuple_id;
+    _tuple_desc = _runtime_state->desc_tbl().get_tuple_descriptor(tuple_id);
     if (_tuple_desc == nullptr) {
         std::stringstream ss;
-        LOG(WARNING) << "Failed to get tuple descriptor, _tuple_id: " << _tuple_id;
+        LOG(WARNING) << "Failed to get tuple descriptor, tuple_id: " << tuple_id;
         return OLAP_ERR_PUSH_INIT_ERROR;
     }
 
@@ -986,7 +986,7 @@ OLAPStatus PushBrokerReader::init(const TabletSharedPtr tablet,
         LOG(WARNING) << "Allocate memory for tuple failed";
         return OLAP_ERR_PUSH_INIT_ERROR;
     }
-    _tuple = reinterpret_cast<Tuple*>(tuple_buffer);   
+    _tuple = reinterpret_cast<Tuple*>(tuple_buffer);
 
     _ready = true;
 	return OLAP_SUCCESS;
@@ -1001,7 +1001,7 @@ OLAPStatus PushBrokerReader::next(ContiguousRow* row) {
     // Get from scanner
     Status status = _scanner->get_next(_tuple, _mem_pool.get(), &_eof);
     if (UNLIKELY(!status.ok())) {
-        LOG(WARNING) << "Scanner get next tuple fail";
+        LOG(WARNING) << "Scanner get next tuple failed";
         return OLAP_ERR_PUSH_INPUT_DATA_ERROR;
     }
     if (_eof) {
@@ -1014,7 +1014,6 @@ OLAPStatus PushBrokerReader::next(ContiguousRow* row) {
     for (size_t i = 0; i < slot_descs.size(); ++i) {
         auto cell = row->cell(i);
         const SlotDescriptor* slot = slot_descs[i];
-
         bool is_null = _tuple->is_null(slot->null_indicator_offset());
         const void* value = _tuple->get_slot(slot->tuple_offset());
         _schema->column(i)->consume(&cell, (const char*)value, is_null, 
