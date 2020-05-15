@@ -22,7 +22,7 @@ import org.apache.doris.analysis.Analyzer;
 import org.apache.doris.analysis.BrokerDesc;
 import org.apache.doris.analysis.CastExpr;
 import org.apache.doris.analysis.DescriptorTable;
-import org.apache.doris.analysis.EtlClusterDesc;
+import org.apache.doris.analysis.ResourceDesc;
 import org.apache.doris.analysis.Expr;
 import org.apache.doris.analysis.SlotDescriptor;
 import org.apache.doris.analysis.SlotRef;
@@ -30,7 +30,7 @@ import org.apache.doris.analysis.TupleDescriptor;
 import org.apache.doris.catalog.Catalog;
 import org.apache.doris.catalog.Column;
 import org.apache.doris.catalog.Database;
-import org.apache.doris.catalog.EtlCluster;
+import org.apache.doris.catalog.Resource;
 import org.apache.doris.catalog.FsBroker;
 import org.apache.doris.catalog.MaterializedIndex;
 import org.apache.doris.catalog.MaterializedIndex.IndexExtState;
@@ -39,7 +39,7 @@ import org.apache.doris.catalog.Partition;
 import org.apache.doris.catalog.PrimitiveType;
 import org.apache.doris.catalog.Replica;
 import org.apache.doris.catalog.ScalarType;
-import org.apache.doris.catalog.SparkEtlCluster;
+import org.apache.doris.catalog.SparkResource;
 import org.apache.doris.catalog.Tablet;
 import org.apache.doris.catalog.Type;
 import org.apache.doris.common.AnalysisException;
@@ -119,8 +119,8 @@ public class SparkLoadJob extends BulkLoadJob {
     public static final String BITMAP_DATA_PROPERTY = "bitmap_data";
 
     // --- members below need persist ---
-    // create from etlClusterDesc when job created
-    private SparkEtlCluster etlCluster;
+    // create from resourceDesc when job created
+    private SparkResource sparkResource;
     // members below updated when job state changed to etl
     private long etlStartTimestamp = -1;
     // for spark yarn
@@ -136,7 +136,7 @@ public class SparkLoadJob extends BulkLoadJob {
     // one SparkLoadJob has only one table to load
     // hivedb.table for global dict
     private String hiveTableName = "";
-    private EtlClusterDesc etlClusterDesc;
+    private ResourceDesc resourceDesc;
     // for spark standalone
     private SparkAppHandle sparkAppHandle;
     // for straggler wait long time to commit transaction
@@ -273,10 +273,10 @@ public class SparkLoadJob extends BulkLoadJob {
         jobType = EtlJobType.SPARK;
     }
 
-    public SparkLoadJob(long dbId, String label, EtlClusterDesc etlClusterDesc, OriginStatement originStmt)
+    public SparkLoadJob(long dbId, String label, ResourceDesc resourceDesc, OriginStatement originStmt)
             throws MetaNotFoundException {
         super(dbId, label, originStmt);
-        this.etlClusterDesc = etlClusterDesc;
+        this.resourceDesc = resourceDesc;
         timeoutSecond = Config.spark_load_default_timeout_second;
         jobType = EtlJobType.SPARK;
     }
@@ -289,8 +289,8 @@ public class SparkLoadJob extends BulkLoadJob {
     protected void setJobProperties(Map<String, String> properties) throws DdlException {
         super.setJobProperties(properties);
 
-        // set etl cluster and broker desc
-        setEtlClusterInfo();
+        // set spark resource and broker desc
+        setResourceInfo();
 
         // global dict
         if (properties != null) {
@@ -304,26 +304,20 @@ public class SparkLoadJob extends BulkLoadJob {
      * merge system conf with load stmt
      * @throws DdlException
      */
-    private void setEtlClusterInfo() throws DdlException {
-        // etl cluster
-        String clusterName = etlClusterDesc.getName();
-        EtlCluster oriEtlCluster = Catalog.getCurrentCatalog().getEtlClusterMgr().getEtlCluster(clusterName);
-        if (oriEtlCluster == null) {
-            throw new DdlException("Etl cluster does not exist. name: " + clusterName);
+    private void setResourceInfo() throws DdlException {
+        // spark resource
+        String resourceName = resourceDesc.getName();
+        Resource oriResource = Catalog.getCurrentCatalog().getResourceMgr().getResource(resourceName);
+        if (oriResource == null) {
+            throw new DdlException("Resource does not exist. name: " + resourceName);
         }
-        Preconditions.checkState(oriEtlCluster instanceof SparkEtlCluster);
-        etlCluster = ((SparkEtlCluster) oriEtlCluster).getCopiedEtlCluster();
-        etlCluster.update(etlClusterDesc);
+        Preconditions.checkState(oriResource instanceof SparkResource);
+        sparkResource = ((SparkResource) oriResource).getCopiedResource();
+        sparkResource.update(resourceDesc);
 
         // broker desc
-        Map<String, String> brokerProperties = Maps.newHashMap();
-        for (Map.Entry<String, String> entry : etlClusterDesc.getProperties().entrySet()) {
-            String key = entry.getKey();
-            if (key.startsWith(EtlClusterDesc.BROKER_PROPERTY_KEY_PREFIX)) {
-                brokerProperties.put(key.substring(key.indexOf(".") + 1), entry.getValue());
-            }
-        }
-        brokerDesc = new BrokerDesc(etlCluster.getBroker(), brokerProperties);
+        Map<String, String> brokerProperties = sparkResource.getBrokerPropertiesWithoutPrefix();
+        brokerDesc = new BrokerDesc(sparkResource.getBroker(), brokerProperties);
     }
 
     @Override
@@ -339,7 +333,7 @@ public class SparkLoadJob extends BulkLoadJob {
     protected void unprotectedExecuteJob() throws LoadException {
         // create pending task
         LoadTask task = new SparkLoadPendingTask(this, fileGroupAggInfo.getAggKeyToFileGroups(),
-                                                 etlCluster, brokerDesc);
+                                                 sparkResource, brokerDesc);
         task.init();
         idToTasks.put(task.getSignature(), task);
         Catalog.getCurrentCatalog().getLoadTaskScheduler().submit(task);
@@ -415,7 +409,7 @@ public class SparkLoadJob extends BulkLoadJob {
 
         // get etl status
         SparkEtlJobHandler handler = new SparkEtlJobHandler();
-        EtlStatus status = handler.getEtlJobStatus(sparkAppHandle, appId, id, etlOutputPath, etlCluster, brokerDesc);
+        EtlStatus status = handler.getEtlJobStatus(sparkAppHandle, appId, id, etlOutputPath, sparkResource, brokerDesc);
         switch (status.getState()) {
             case RUNNING:
                 updateEtlStatusInternal(status);
@@ -436,7 +430,7 @@ public class SparkLoadJob extends BulkLoadJob {
         try {
             loadingStatus = etlStatus;
             progress = etlStatus.getProgress();
-            if (!etlCluster.isYarnMaster()) {
+            if (!sparkResource.isYarnMaster()) {
                 loadingStatus.setTrackingUrl(appId);
             }
 
@@ -763,9 +757,9 @@ public class SparkLoadJob extends BulkLoadJob {
         LOG.debug("kill etl job and delete etl files. id: {}, state: {}", id, state);
         SparkEtlJobHandler handler = new SparkEtlJobHandler();
         if (state == JobState.CANCELLED) {
-            if ((!Strings.isNullOrEmpty(appId) && etlCluster.isYarnMaster()) || sparkAppHandle != null) {
+            if ((!Strings.isNullOrEmpty(appId) && sparkResource.isYarnMaster()) || sparkAppHandle != null) {
                 try {
-                    handler.killEtlJob(sparkAppHandle, appId, id, etlCluster);
+                    handler.killEtlJob(sparkAppHandle, appId, id, sparkResource);
                 } catch (Exception e) {
                     LOG.warn("kill etl job failed. id: {}, state: {}", id, state, e);
                 }
@@ -796,7 +790,7 @@ public class SparkLoadJob extends BulkLoadJob {
             // clear job infos that not persist
             hiveTableName = "";
             sparkAppHandle = null;
-            etlClusterDesc = null;
+            resourceDesc = null;
             tableToLoadPartitions.clear();
             indexToPushBrokerReaderParams.clear();
             indexToSchemaHash.clear();
@@ -828,8 +822,8 @@ public class SparkLoadJob extends BulkLoadJob {
     }
 
     @Override
-    protected String getEtlClusterName() {
-        return etlCluster.getName();
+    protected String getResourceName() {
+        return sparkResource.getName();
     }
 
     @Override
@@ -840,7 +834,7 @@ public class SparkLoadJob extends BulkLoadJob {
     @Override
     public void write(DataOutput out) throws IOException {
         super.write(out);
-        etlCluster.write(out);
+        sparkResource.write(out);
         out.writeLong(etlStartTimestamp);
         Text.writeString(out, appId);
         Text.writeString(out, etlOutputPath);
@@ -854,7 +848,7 @@ public class SparkLoadJob extends BulkLoadJob {
 
     public void readFields(DataInput in) throws IOException {
         super.readFields(in);
-        etlCluster = (SparkEtlCluster) EtlCluster.read(in);
+        sparkResource = (SparkResource) Resource.read(in);
         etlStartTimestamp = in.readLong();
         appId = Text.readString(in);
         etlOutputPath = Text.readString(in);
@@ -900,13 +894,13 @@ public class SparkLoadJob extends BulkLoadJob {
     }
 
     public static class SparkLoadJobStateUpdateInfo extends LoadJobStateUpdateInfo {
-        @SerializedName(value = "etl_start_timestamp")
+        @SerializedName(value = "etlStartTimestamp")
         private long etlStartTimestamp;
-        @SerializedName(value = "app_id")
+        @SerializedName(value = "appId")
         private String appId;
-        @SerializedName(value = "etl_output_path")
+        @SerializedName(value = "etlOutputPath")
         private String etlOutputPath;
-        @SerializedName(value = "tablet_meta_to_file_info")
+        @SerializedName(value = "tabletMetaToFileInfo")
         private Map<String, Pair<String, Long>> tabletMetaToFileInfo;
 
         public SparkLoadJobStateUpdateInfo(long jobId, JobState state, long transactionId, long etlStartTimestamp,

@@ -21,7 +21,7 @@ import org.apache.doris.analysis.BrokerDesc;
 import org.apache.doris.catalog.BrokerMgr;
 import org.apache.doris.catalog.Catalog;
 import org.apache.doris.catalog.FsBroker;
-import org.apache.doris.catalog.SparkEtlCluster;
+import org.apache.doris.catalog.SparkResource;
 import org.apache.doris.common.LoadException;
 import org.apache.doris.common.UserException;
 import org.apache.doris.common.jmockit.Deencapsulation;
@@ -62,7 +62,7 @@ import java.util.Map;
 public class SparkEtlJobHandlerTest {
     private long loadJobId;
     private String label;
-    private String clusterName;
+    private String resourceName;
     private String broker;
     private long pendingTaskId;
     private String appId;
@@ -73,7 +73,7 @@ public class SparkEtlJobHandlerTest {
     public void setUp() {
         loadJobId = 0L;
         label = "label0";
-        clusterName = "cluster0";
+        resourceName = "spark0";
         broker = "broker0";
         pendingTaskId = 3L;
         appId = "application_15888888888_0088";
@@ -96,12 +96,15 @@ public class SparkEtlJobHandlerTest {
         };
 
         EtlJobConfig etlJobConfig = new EtlJobConfig(Maps.newHashMap(), etlOutputPath, label, null);
-        SparkEtlCluster etlCluster = new SparkEtlCluster(clusterName);
-        Deencapsulation.setField(etlCluster, "master", "yarn");
+        SparkResource resource = new SparkResource(resourceName);
+        Map<String, String> sparkConfigs = resource.getSparkConfigs();
+        sparkConfigs.put("spark.master", "yarn");
+        sparkConfigs.put("spark.submit.deployMode", "cluster");
+        sparkConfigs.put("spark.hadoop.yarn.resourcemanager.address", "127.0.0.1:9999");
         BrokerDesc brokerDesc = new BrokerDesc(broker, Maps.newHashMap());
         SparkPendingTaskAttachment attachment = new SparkPendingTaskAttachment(pendingTaskId);
         SparkEtlJobHandler handler = new SparkEtlJobHandler();
-        handler.submitEtlJob(loadJobId, label, etlJobConfig, etlCluster, brokerDesc, attachment);
+        handler.submitEtlJob(loadJobId, label, etlJobConfig, resource, brokerDesc, attachment);
 
         // check submit etl job success
         Assert.assertEquals(appId, attachment.getAppId());
@@ -123,12 +126,15 @@ public class SparkEtlJobHandlerTest {
         };
 
         EtlJobConfig etlJobConfig = new EtlJobConfig(Maps.newHashMap(), etlOutputPath, label, null);
-        SparkEtlCluster etlCluster = new SparkEtlCluster(clusterName);
-        Deencapsulation.setField(etlCluster, "master", "yarn");
+        SparkResource resource = new SparkResource(resourceName);
+        Map<String, String> sparkConfigs = resource.getSparkConfigs();
+        sparkConfigs.put("spark.master", "yarn");
+        sparkConfigs.put("spark.submit.deployMode", "cluster");
+        sparkConfigs.put("spark.hadoop.yarn.resourcemanager.address", "127.0.0.1:9999");
         BrokerDesc brokerDesc = new BrokerDesc(broker, Maps.newHashMap());
         SparkPendingTaskAttachment attachment = new SparkPendingTaskAttachment(pendingTaskId);
         SparkEtlJobHandler handler = new SparkEtlJobHandler();
-        handler.submitEtlJob(loadJobId, label, etlJobConfig, etlCluster, brokerDesc, attachment);
+        handler.submitEtlJob(loadJobId, label, etlJobConfig, resource, brokerDesc, attachment);
     }
 
     @Test
@@ -154,24 +160,27 @@ public class SparkEtlJobHandlerTest {
             }
         };
 
-        SparkEtlCluster etlCluster = new SparkEtlCluster(clusterName);
-        Deencapsulation.setField(etlCluster, "master", "yarn");
+        SparkResource resource = new SparkResource(resourceName);
+        Map<String, String> sparkConfigs = resource.getSparkConfigs();
+        sparkConfigs.put("spark.master", "yarn");
+        sparkConfigs.put("spark.submit.deployMode", "cluster");
+        sparkConfigs.put("spark.hadoop.yarn.resourcemanager.address", "127.0.0.1:9999");
         BrokerDesc brokerDesc = new BrokerDesc(broker, Maps.newHashMap());
         SparkEtlJobHandler handler = new SparkEtlJobHandler();
 
         // running
-        EtlStatus status = handler.getEtlJobStatus(null, appId, loadJobId, etlOutputPath, etlCluster, brokerDesc);
+        EtlStatus status = handler.getEtlJobStatus(null, appId, loadJobId, etlOutputPath, resource, brokerDesc);
         Assert.assertEquals(TEtlState.RUNNING, status.getState());
         Assert.assertEquals(50, status.getProgress());
 
         // yarn finished and spark failed
-        status = handler.getEtlJobStatus(null, appId, loadJobId, etlOutputPath, etlCluster, brokerDesc);
+        status = handler.getEtlJobStatus(null, appId, loadJobId, etlOutputPath, resource, brokerDesc);
         Assert.assertEquals(TEtlState.CANCELLED, status.getState());
         Assert.assertEquals(100, status.getProgress());
         Assert.assertEquals("etl job failed", status.getDppResult().failedReason);
 
         // finished
-        status = handler.getEtlJobStatus(null, appId, loadJobId, etlOutputPath, etlCluster, brokerDesc);
+        status = handler.getEtlJobStatus(null, appId, loadJobId, etlOutputPath, resource, brokerDesc);
         Assert.assertEquals(TEtlState.FINISHED, status.getState());
         Assert.assertEquals(100, status.getProgress());
         Assert.assertEquals(trackingUrl, status.getTrackingUrl());
@@ -190,11 +199,14 @@ public class SparkEtlJobHandlerTest {
             }
         };
 
-        SparkEtlCluster etlCluster = new SparkEtlCluster(clusterName);
-        Deencapsulation.setField(etlCluster, "master", "yarn");
+        SparkResource resource = new SparkResource(resourceName);
+        Map<String, String> sparkConfigs = resource.getSparkConfigs();
+        sparkConfigs.put("spark.master", "yarn");
+        sparkConfigs.put("spark.submit.deployMode", "cluster");
+        sparkConfigs.put("spark.hadoop.yarn.resourcemanager.address", "127.0.0.1:9999");
         SparkEtlJobHandler handler = new SparkEtlJobHandler();
         try {
-            handler.killEtlJob(null, appId, loadJobId, etlCluster);
+            handler.killEtlJob(null, appId, loadJobId, resource);
         } catch (Exception e) {
             Assert.fail(e.getMessage());
         }

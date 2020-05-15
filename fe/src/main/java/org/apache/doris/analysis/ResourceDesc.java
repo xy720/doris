@@ -18,8 +18,8 @@
 package org.apache.doris.analysis;
 
 import org.apache.doris.catalog.Catalog;
-import org.apache.doris.catalog.EtlCluster;
-import org.apache.doris.catalog.EtlCluster.EtlClusterType;
+import org.apache.doris.catalog.Resource;
+import org.apache.doris.catalog.Resource.ResourceType;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.DdlException;
 import org.apache.doris.load.EtlJobType;
@@ -28,29 +28,24 @@ import java.io.DataInput;
 import java.io.IOException;
 import java.util.Map;
 
-// Etl cluster descriptor
+// Resource descriptor
 //
 // Spark example:
-// WITH CLUSTER "cluster0"
+// WITH RESOURCE "spark0"
 // (
-//     "master"="yarn",
-//     "deploy_mode" = "cluster",
-//     "spark_args" = "--jars=xxx.jar,yyy.jar;--files=/tmp/aaa,/tmp/bbb",
-//     "spark_configs" = "spark.driver.memory=1g;spark.executor.memory=1g",
-//     "yarn_configs" = "yarn.resourcemanager.address=host:port;fs.defaultFS=hdfs://host:port",
-//     "hdfs_etl_path" = "hdfs://127.0.0.1:10000/tmp/doris",
-//     "broker" = "broker0",
-//     "broker.username" = "xxx",
-//     "broker.password" = "yyy"
+//     "spark.jars" = "xxx.jar,yyy.jar",
+//     "spark.files" = "/tmp/aaa,/tmp/bbb",
+//     "spark.executor.memory" = "1g",
+//     "spark.yarn.queue" = "queue0",
+//     "spark.hadoop.yarn.resourcemanager.address" = "127.0.0.1:9999",
+//     "spark.hadoop.fs.defaultFS" = "hdfs://127.0.0.1:10000"
 // )
-public class EtlClusterDesc extends DataProcessorDesc {
-    public static final String BROKER_PROPERTY_KEY_PREFIX = "broker.";
-
-    private EtlClusterDesc() {
+public class ResourceDesc extends DataProcessorDesc {
+    private ResourceDesc() {
         this(null, null);
     }
 
-    public EtlClusterDesc(String name, Map<String, String> properties) {
+    public ResourceDesc(String name, Map<String, String> properties) {
         super(name, properties);
     }
 
@@ -59,28 +54,28 @@ public class EtlClusterDesc extends DataProcessorDesc {
         super.analyze();
 
         // check etl cluster exist
-        if (!Catalog.getCurrentCatalog().getEtlClusterMgr().containsEtlCluster(getName())) {
-            throw new AnalysisException("Etl cluster does not exist. name: " + getName());
+        if (!Catalog.getCurrentCatalog().getResourceMgr().containsResource(getName())) {
+            throw new AnalysisException("Resource does not exist. name: " + getName());
         }
     }
 
     @Override
     public EtlJobType getEtlJobType() throws DdlException {
-        EtlCluster etlCluster = Catalog.getCurrentCatalog().getEtlClusterMgr().getEtlCluster(getName());
+        Resource etlCluster = Catalog.getCurrentCatalog().getResourceMgr().getResource(getName());
         if (etlCluster == null) {
-            throw new DdlException("Etl cluster does not exist. name: " + getName());
+            throw new DdlException("Resource does not exist. name: " + getName());
         }
 
-        if (etlCluster.getType() == EtlClusterType.SPARK) {
+        if (etlCluster.getType() == ResourceType.SPARK) {
             return EtlJobType.SPARK;
         }
 
         return null;
     }
 
-    public static EtlClusterDesc read(DataInput in) throws IOException {
-        EtlClusterDesc etlClusterDesc = new EtlClusterDesc();
-        etlClusterDesc.readFields(in);
-        return etlClusterDesc;
+    public static ResourceDesc read(DataInput in) throws IOException {
+        ResourceDesc resourceDesc = new ResourceDesc();
+        resourceDesc.readFields(in);
+        return resourceDesc;
     }
 }

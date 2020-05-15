@@ -19,7 +19,7 @@ package org.apache.doris.load.loadv2;
 
 import org.apache.doris.analysis.BrokerDesc;
 import org.apache.doris.analysis.DataDescription;
-import org.apache.doris.analysis.EtlClusterDesc;
+import org.apache.doris.analysis.ResourceDesc;
 import org.apache.doris.analysis.LoadStmt;
 import org.apache.doris.analysis.SqlParser;
 import org.apache.doris.analysis.SqlScanner;
@@ -117,7 +117,7 @@ public abstract class BulkLoadJob extends LoadJob {
                     break;
                 case SPARK:
                     bulkLoadJob = new SparkLoadJob(db.getId(), stmt.getLabel().getLabelName(),
-                                                   (EtlClusterDesc) stmt.getDataProcessorDesc(), originStmt);
+                                                   (ResourceDesc) stmt.getDataProcessorDesc(), originStmt);
                     break;
                 case MINI:
                 case DELETE:

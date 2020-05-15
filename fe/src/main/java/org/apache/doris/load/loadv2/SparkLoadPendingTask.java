@@ -36,7 +36,7 @@ import org.apache.doris.catalog.PartitionKey;
 import org.apache.doris.catalog.PartitionType;
 import org.apache.doris.catalog.PrimitiveType;
 import org.apache.doris.catalog.RangePartitionInfo;
-import org.apache.doris.catalog.SparkEtlCluster;
+import org.apache.doris.catalog.SparkResource;
 import org.apache.doris.common.LoadException;
 import org.apache.doris.common.Pair;
 import org.apache.doris.common.UserException;
@@ -75,7 +75,7 @@ public class SparkLoadPendingTask extends LoadTask {
     private static final Logger LOG = LogManager.getLogger(SparkLoadPendingTask.class);
 
     private final Map<FileGroupAggKey, List<BrokerFileGroup>> aggKeyToBrokerFileGroups;
-    private final SparkEtlCluster etlCluster;
+    private final SparkResource resource;
     private final BrokerDesc brokerDesc;
     private final long dbId;
     private final String loadLabel;
@@ -85,12 +85,12 @@ public class SparkLoadPendingTask extends LoadTask {
 
     public SparkLoadPendingTask(SparkLoadJob loadTaskCallback,
                                 Map<FileGroupAggKey, List<BrokerFileGroup>> aggKeyToBrokerFileGroups,
-                                SparkEtlCluster etlCluster, BrokerDesc brokerDesc) {
+                                SparkResource resource, BrokerDesc brokerDesc) {
         super(loadTaskCallback);
         this.retryTime = 3;
         this.attachment = new SparkPendingTaskAttachment(signature);
         this.aggKeyToBrokerFileGroups = aggKeyToBrokerFileGroups;
-        this.etlCluster = etlCluster;
+        this.resource = resource;
         this.brokerDesc = brokerDesc;
         this.dbId = loadTaskCallback.getDbId();
         this.loadJobId = loadTaskCallback.getId();
@@ -108,12 +108,12 @@ public class SparkLoadPendingTask extends LoadTask {
     private void submitEtlJob() throws LoadException {
         SparkPendingTaskAttachment sparkAttachment = (SparkPendingTaskAttachment) attachment;
         // retry different output path
-        etlJobConfig.outputPath = EtlJobConfig.getOutputPath(etlCluster.getHdfsEtlPath(), dbId, loadLabel, signature);
+        etlJobConfig.outputPath = EtlJobConfig.getOutputPath(resource.getWorkingDir(), dbId, loadLabel, signature);
         sparkAttachment.setOutputPath(etlJobConfig.outputPath);
 
         // handler submit etl job
         SparkEtlJobHandler handler = new SparkEtlJobHandler();
-        handler.submitEtlJob(loadJobId, loadLabel, etlJobConfig, etlCluster, brokerDesc, sparkAttachment);
+        handler.submitEtlJob(loadJobId, loadLabel, etlJobConfig, resource, brokerDesc, sparkAttachment);
         LOG.info("submit spark etl job success. load job id: {}, attachment: {}", loadJobId, sparkAttachment);
     }
 

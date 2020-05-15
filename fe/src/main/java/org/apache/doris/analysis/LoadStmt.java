@@ -17,6 +17,7 @@
 
 package org.apache.doris.analysis;
 
+import org.apache.doris.catalog.Catalog;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.DdlException;
 import org.apache.doris.common.UserException;
@@ -24,6 +25,7 @@ import org.apache.doris.common.util.PrintableMap;
 import org.apache.doris.common.util.TimeUtils;
 import org.apache.doris.load.Load;
 import org.apache.doris.load.loadv2.SparkLoadJob;
+import org.apache.doris.mysql.privilege.PrivPredicate;
 import org.apache.doris.qe.ConnectContext;
 
 import com.google.common.base.Function;
@@ -57,7 +59,7 @@ import java.util.Map.Entry;
 //          [SET (k1=f1(xx), k2=f2(xx))]
 //
 //      data_processor_desc:
-//          WITH BROKER|CLUSTER name
+//          WITH BROKER|RESOURCE name
 //          (key2=value2, ...)
 public class LoadStmt extends DdlStmt {
     public static final String TIMEOUT_PROPERTY = "timeout";
@@ -250,6 +252,16 @@ public class LoadStmt extends DdlStmt {
 
         if (dataProcessorDesc != null) {
             dataProcessorDesc.analyze();
+            if (dataProcessorDesc instanceof ResourceDesc) {
+                // check resource usage privilege
+                if (!Catalog.getCurrentCatalog().getAuth().checkResourcePriv(ConnectContext.get(),
+                                                                             dataProcessorDesc.getName(),
+                                                                             PrivPredicate.USAGE)) {
+                    throw new AnalysisException("USAGE denied to user '" + ConnectContext.get().getQualifiedUser()
+                                                        + "'@'" + ConnectContext.get().getRemoteIP()
+                                                        + "' for resource '" + dataProcessorDesc.getName() + "'");
+                }
+            }
         }
         
         try {
@@ -295,8 +307,8 @@ public class LoadStmt extends DdlStmt {
             sb.append("\nWITH ");
             if (dataProcessorDesc instanceof BrokerDesc) {
                 sb.append("BROKER");
-            } else if (dataProcessorDesc instanceof EtlClusterDesc) {
-                sb.append("CLUSTER");
+            } else if (dataProcessorDesc instanceof ResourceDesc) {
+                sb.append("RESOURCE");
             } else {
                 sb.append("UNKNOWN");
             }

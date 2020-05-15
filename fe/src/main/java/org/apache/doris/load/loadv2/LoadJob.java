@@ -709,7 +709,7 @@ public abstract class LoadJob extends AbstractTxnStateChangeCallback implements 
             }
 
             // task info
-            jobInfo.add("cluster:" + getEtlClusterName() + "; timeout(s):" + timeoutSecond
+            jobInfo.add("cluster:" + getResourceName() + "; timeout(s):" + timeoutSecond
                                 + "; max_filter_ratio:" + maxFilterRatio);
 
             // error msg
@@ -738,7 +738,7 @@ public abstract class LoadJob extends AbstractTxnStateChangeCallback implements 
         }
     }
 
-    protected String getEtlClusterName() {
+    protected String getResourceName() {
         return "N/A";
     }
 
@@ -1021,13 +1021,13 @@ public abstract class LoadJob extends AbstractTxnStateChangeCallback implements 
     }
 
     public static class LoadJobStateUpdateInfo implements Writable {
-        @SerializedName(value = "job_id")
+        @SerializedName(value = "jobId")
         private long jobId;
         @SerializedName(value = "state")
         private JobState state;
-        @SerializedName(value = "transaction_id")
+        @SerializedName(value = "transactionId")
         private long transactionId;
-        @SerializedName(value = "load_start_timestamp")
+        @SerializedName(value = "loadStartTimestamp")
         private long loadStartTimestamp;
 
         public LoadJobStateUpdateInfo(long jobId, JobState state, long transactionId, long loadStartTimestamp) {

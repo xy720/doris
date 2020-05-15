@@ -22,8 +22,9 @@ import com.google.gson.Gson;
 import com.google.gson.JsonSyntaxException;
 import org.apache.doris.PaloFe;
 import org.apache.doris.analysis.BrokerDesc;
-import org.apache.doris.catalog.SparkEtlCluster;
+import org.apache.doris.catalog.SparkResource;
 import org.apache.doris.common.LoadException;
+import org.apache.doris.common.Pair;
 import org.apache.doris.common.UserException;
 import org.apache.doris.common.util.BrokerUtil;
 import org.apache.doris.load.EtlStatus;
@@ -86,7 +87,7 @@ public class SparkEtlJobHandler {
         public void infoChanged(SparkAppHandle sparkAppHandle) {}
     }
 
-    public void submitEtlJob(long loadJobId, String loadLabel, EtlJobConfig etlJobConfig, SparkEtlCluster etlCluster,
+    public void submitEtlJob(long loadJobId, String loadLabel, EtlJobConfig etlJobConfig, SparkResource resource,
                              BrokerDesc brokerDesc, SparkPendingTaskAttachment attachment) throws LoadException {
         // delete outputPath
         deleteEtlOutputPath(etlJobConfig.outputPath, brokerDesc);
@@ -112,27 +113,15 @@ public class SparkEtlJobHandler {
         // yarn        |  cluster
         // spark://xx  |  cluster
         // spark://xx  |  client
-        launcher.setMaster(etlCluster.getMaster())
-                .setDeployMode(etlCluster.getDeployMode().name().toLowerCase())
+        launcher.setMaster(resource.getMaster())
+                .setDeployMode(resource.getDeployMode().name().toLowerCase())
                 .setAppResource(appResourceHdfsPath)
                 .setMainClass(MAIN_CLASS)
                 .setAppName(String.format(ETL_JOB_NAME, loadLabel))
                 .addAppArgs(jobConfigHdfsPath);
-        // spark args: --jars, --files, --queue
-        for (Map.Entry<String, String> entry : etlCluster.getSparkArgsMap().entrySet()) {
-            launcher.addSparkArg(entry.getKey(), entry.getValue());
-        }
         // spark configs
-        for (Map.Entry<String, String> entry : etlCluster.getSparkConfigsMap().entrySet()) {
+        for (Map.Entry<String, String> entry : resource.getSparkConfigs().entrySet()) {
             launcher.setConf(entry.getKey(), entry.getValue());
-        }
-        // yarn configs:
-        // yarn.resourcemanager.address
-        // fs.defaultFS
-        if (etlCluster.isYarnMaster()) {
-            for (Map.Entry<String, String> entry : etlCluster.getYarnConfigsMap().entrySet()) {
-                launcher.setConf(SPARK_HADOOP_CONFIG_PREFIX + entry.getKey(), entry.getValue());
-            }
         }
 
         // start app
@@ -182,13 +171,13 @@ public class SparkEtlJobHandler {
     }
 
     public EtlStatus getEtlJobStatus(SparkAppHandle handle, String appId, long loadJobId, String etlOutputPath,
-                                     SparkEtlCluster etlCluster, BrokerDesc brokerDesc) {
+                                     SparkResource resource, BrokerDesc brokerDesc) {
         EtlStatus status = new EtlStatus();
 
-        if (etlCluster.isYarnMaster()) {
+        if (resource.isYarnMaster()) {
             // state from yarn
             Preconditions.checkState(appId != null && !appId.isEmpty());
-            YarnClient client = startYarnClient(etlCluster);
+            YarnClient client = startYarnClient(resource);
             try {
                 ApplicationReport report = client.getApplicationReport(ConverterUtils.toApplicationId(appId));
                 LOG.info("yarn application -status {}. load job id: {}, result: {}", appId, loadJobId, report);
@@ -248,10 +237,10 @@ public class SparkEtlJobHandler {
         return status;
     }
 
-    public void killEtlJob(SparkAppHandle handle, String appId, long loadJobId, SparkEtlCluster etlCluster) {
-        if (etlCluster.isYarnMaster()) {
+    public void killEtlJob(SparkAppHandle handle, String appId, long loadJobId, SparkResource resource) {
+        if (resource.isYarnMaster()) {
             Preconditions.checkNotNull(appId);
-            YarnClient client = startYarnClient(etlCluster);
+            YarnClient client = startYarnClient(resource);
             try {
                 try {
                     client.killApplication(ConverterUtils.toApplicationId(appId));
@@ -300,13 +289,12 @@ public class SparkEtlJobHandler {
         }
     }
 
-    private YarnClient startYarnClient(SparkEtlCluster etlCluster) {
+    private YarnClient startYarnClient(SparkResource resource) {
         YarnClient client = YarnClient.createYarnClient();
         Configuration conf = new YarnConfiguration();
         // set yarn.resourcemanager.address
-        for (Map.Entry<String, String> entry : etlCluster.getYarnConfigsMap().entrySet()) {
-            conf.set(entry.getKey(), entry.getValue());
-        }
+        Pair<String, String> pair = resource.getYarnResourcemanagerAddressPair();
+        conf.set(pair.first, pair.second);
         client.init(conf);
         client.start();
         return client;

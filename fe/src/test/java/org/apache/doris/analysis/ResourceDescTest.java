@@ -18,8 +18,8 @@
 package org.apache.doris.analysis;
 
 import org.apache.doris.catalog.Catalog;
-import org.apache.doris.catalog.EtlClusterMgr;
-import org.apache.doris.catalog.SparkEtlCluster;
+import org.apache.doris.catalog.ResourceMgr;
+import org.apache.doris.catalog.SparkResource;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.DdlException;
 import org.apache.doris.load.EtlJobType;
@@ -33,47 +33,47 @@ import mockit.Mocked;
 
 import java.util.Map;
 
-public class EtlClusterDescTest {
+public class ResourceDescTest {
 
     @Test
-    public void testNormal(@Mocked Catalog catalog, @Injectable EtlClusterMgr etlClusterMgr)
+    public void testNormal(@Mocked Catalog catalog, @Injectable ResourceMgr resourceMgr)
             throws AnalysisException, DdlException {
-        String clusterName = "cluster0";
+        String resourceName = "spark0";
         Map<String, String> properties = Maps.newHashMap();
         String key = "outputPath";
         String value = "/tmp/output";
         properties.put(key, value);
-        EtlClusterDesc etlClusterDesc = new EtlClusterDesc(clusterName, properties);
-        SparkEtlCluster etlCluster = new SparkEtlCluster(clusterName);
+        ResourceDesc resourceDesc = new ResourceDesc(resourceName, properties);
+        SparkResource resource = new SparkResource(resourceName);
 
         new Expectations() {
             {
-                catalog.getEtlClusterMgr();
-                result = etlClusterMgr;
-                etlClusterMgr.getEtlCluster(clusterName);
-                result = etlCluster;
+                catalog.getResourceMgr();
+                result = resourceMgr;
+                resourceMgr.getResource(resourceName);
+                result = resource;
             }
         };
 
-        Assert.assertEquals(clusterName, etlClusterDesc.getName());
-        Assert.assertEquals(value, etlClusterDesc.getProperties().get(key));
-        Assert.assertEquals(EtlJobType.SPARK, etlClusterDesc.getEtlJobType());
+        Assert.assertEquals(resourceName, resourceDesc.getName());
+        Assert.assertEquals(value, resourceDesc.getProperties().get(key));
+        Assert.assertEquals(EtlJobType.SPARK, resourceDesc.getEtlJobType());
     }
 
     @Test(expected = AnalysisException.class)
-    public void testNoTable(@Mocked Catalog catalog, @Injectable EtlClusterMgr etlClusterMgr) throws AnalysisException {
-        String clusterName = "cluster1";
-        EtlClusterDesc etlClusterDesc = new EtlClusterDesc(clusterName, null);
+    public void testNoTable(@Mocked Catalog catalog, @Injectable ResourceMgr resourceMgr) throws AnalysisException {
+        String resourceName = "spark1";
+        ResourceDesc resourceDesc = new ResourceDesc(resourceName, null);
 
         new Expectations() {
             {
-                catalog.getEtlClusterMgr();
-                result = etlClusterMgr;
-                etlClusterMgr.containsEtlCluster(clusterName);
+                catalog.getResourceMgr();
+                result = resourceMgr;
+                resourceMgr.containsResource(resourceName);
                 result = false;
             }
         };
 
-        etlClusterDesc.analyze();
+        resourceDesc.analyze();
     }
 }

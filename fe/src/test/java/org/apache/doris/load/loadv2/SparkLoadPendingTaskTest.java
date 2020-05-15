@@ -35,7 +35,7 @@ import org.apache.doris.catalog.PartitionInfo;
 import org.apache.doris.catalog.RangePartitionInfo;
 import org.apache.doris.catalog.ScalarType;
 import org.apache.doris.catalog.SinglePartitionInfo;
-import org.apache.doris.catalog.SparkEtlCluster;
+import org.apache.doris.catalog.SparkResource;
 import org.apache.doris.catalog.Type;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.DdlException;
@@ -68,7 +68,7 @@ public class SparkLoadPendingTaskTest {
 
     @Test
     public void testExecuteTask(@Injectable SparkLoadJob sparkLoadJob,
-                                @Injectable SparkEtlCluster etlCluster,
+                                @Injectable SparkResource resource,
                                 @Injectable BrokerDesc brokerDesc,
                                 @Mocked Catalog catalog,
                                 @Injectable Database database,
@@ -131,13 +131,13 @@ public class SparkLoadPendingTaskTest {
         new MockUp<SparkEtlJobHandler>() {
             @Mock
             public void submitEtlJob(long loadJobId, String loadLabel, EtlJobConfig etlJobConfig,
-                                     SparkEtlCluster etlCluster, BrokerDesc brokerDesc,
+                                     SparkResource resource, BrokerDesc brokerDesc,
                                      SparkPendingTaskAttachment attachment) throws LoadException {
                 attachment.setAppId(appId);
             }
         };
 
-        SparkLoadPendingTask task = new SparkLoadPendingTask(sparkLoadJob, aggKeyToFileGroups, etlCluster, brokerDesc);
+        SparkLoadPendingTask task = new SparkLoadPendingTask(sparkLoadJob, aggKeyToFileGroups, resource, brokerDesc);
         task.init();
         SparkPendingTaskAttachment attachment = Deencapsulation.getField(task, "attachment");
         Assert.assertEquals(null, attachment.getAppId());
@@ -147,7 +147,7 @@ public class SparkLoadPendingTaskTest {
 
     @Test(expected = LoadException.class)
     public void testNoDb(@Injectable SparkLoadJob sparkLoadJob,
-                         @Injectable SparkEtlCluster etlCluster,
+                         @Injectable SparkResource resource,
                          @Injectable BrokerDesc brokerDesc,
                          @Mocked Catalog catalog) throws LoadException {
         long dbId = 0L;
@@ -159,13 +159,13 @@ public class SparkLoadPendingTaskTest {
             }
         };
 
-        SparkLoadPendingTask task = new SparkLoadPendingTask(sparkLoadJob, null, etlCluster, brokerDesc);
+        SparkLoadPendingTask task = new SparkLoadPendingTask(sparkLoadJob, null, resource, brokerDesc);
         task.init();
     }
 
     @Test(expected = LoadException.class)
     public void testNoTable(@Injectable SparkLoadJob sparkLoadJob,
-                            @Injectable SparkEtlCluster etlCluster,
+                            @Injectable SparkResource resource,
                             @Injectable BrokerDesc brokerDesc,
                             @Mocked Catalog catalog,
                             @Injectable Database database) throws LoadException {
@@ -190,13 +190,13 @@ public class SparkLoadPendingTaskTest {
             }
         };
 
-        SparkLoadPendingTask task = new SparkLoadPendingTask(sparkLoadJob, aggKeyToFileGroups, etlCluster, brokerDesc);
+        SparkLoadPendingTask task = new SparkLoadPendingTask(sparkLoadJob, aggKeyToFileGroups, resource, brokerDesc);
         task.init();
     }
 
     @Test
     public void testRangePartitionHashDistribution(@Injectable SparkLoadJob sparkLoadJob,
-                                                   @Injectable SparkEtlCluster etlCluster,
+                                                   @Injectable SparkResource resource,
                                                    @Injectable BrokerDesc brokerDesc,
                                                    @Mocked Catalog catalog,
                                                    @Injectable Database database,
@@ -279,7 +279,7 @@ public class SparkLoadPendingTaskTest {
             }
         };
 
-        SparkLoadPendingTask task = new SparkLoadPendingTask(sparkLoadJob, aggKeyToFileGroups, etlCluster, brokerDesc);
+        SparkLoadPendingTask task = new SparkLoadPendingTask(sparkLoadJob, aggKeyToFileGroups, resource, brokerDesc);
         EtlJobConfig etlJobConfig = Deencapsulation.getField(task, "etlJobConfig");
         Assert.assertEquals(null, etlJobConfig);
         task.init();

@@ -20,13 +20,13 @@ package org.apache.doris.load.loadv2;
 import org.apache.doris.analysis.BrokerDesc;
 import org.apache.doris.analysis.DataDescription;
 import org.apache.doris.analysis.DataProcessorDesc;
-import org.apache.doris.analysis.EtlClusterDesc;
+import org.apache.doris.analysis.ResourceDesc;
 import org.apache.doris.analysis.LabelName;
 import org.apache.doris.analysis.LoadStmt;
 import org.apache.doris.catalog.Catalog;
 import org.apache.doris.catalog.Column;
 import org.apache.doris.catalog.Database;
-import org.apache.doris.catalog.EtlClusterMgr;
+import org.apache.doris.catalog.ResourceMgr;
 import org.apache.doris.catalog.MaterializedIndex;
 import org.apache.doris.catalog.OlapTable;
 import org.apache.doris.catalog.Partition;
@@ -34,7 +34,7 @@ import org.apache.doris.catalog.PartitionInfo;
 import org.apache.doris.catalog.PrimitiveType;
 import org.apache.doris.catalog.RangePartitionInfo;
 import org.apache.doris.catalog.Replica;
-import org.apache.doris.catalog.SparkEtlCluster;
+import org.apache.doris.catalog.SparkResource;
 import org.apache.doris.catalog.Tablet;
 import org.apache.doris.common.DdlException;
 import org.apache.doris.common.LoadException;
@@ -75,7 +75,7 @@ public class SparkLoadJobTest {
     private String dbName;
     private String tableName;
     private String label;
-    private String clusterName;
+    private String resourceName;
     private String broker;
     private long transactionId;
     private long pendingTaskId;
@@ -95,7 +95,7 @@ public class SparkLoadJobTest {
         dbName = "database0";
         tableName = "table0";
         label = "label0";
-        clusterName = "cluster0";
+        resourceName = "spark0";
         broker = "broker0";
         transactionId = 2L;
         pendingTaskId = 3L;
@@ -114,26 +114,26 @@ public class SparkLoadJobTest {
     public void testCreateFromLoadStmt(@Mocked Catalog catalog, @Injectable LoadStmt loadStmt,
                                        @Injectable DataDescription dataDescription, @Injectable LabelName labelName,
                                        @Injectable Database db, @Injectable OlapTable olapTable,
-                                       @Injectable String originStmt, @Injectable EtlClusterMgr etlClusterMgr) {
+                                       @Injectable String originStmt, @Injectable ResourceMgr resourceMgr) {
         List<DataDescription> dataDescriptionList = Lists.newArrayList();
         dataDescriptionList.add(dataDescription);
-        Map<String, String> clusterProperties = Maps.newHashMap();
-        clusterProperties.put("spark_configs", "spark.executor.memory=1g");
-        clusterProperties.put("broker", broker);
-        clusterProperties.put("broker.username", "user0");
-        clusterProperties.put("broker.password", "password0");
-        DataProcessorDesc dataProcessorDesc = new EtlClusterDesc(clusterName, clusterProperties);
+        Map<String, String> resourceProperties = Maps.newHashMap();
+        resourceProperties.put("spark.executor.memory", "1g");
+        resourceProperties.put("broker", broker);
+        resourceProperties.put("broker.username", "user0");
+        resourceProperties.put("broker.password", "password0");
+        DataProcessorDesc dataProcessorDesc = new ResourceDesc(resourceName, resourceProperties);
         Map<String, String> jobProperties = Maps.newHashMap();
         String hiveTable = "hivedb.table0";
         jobProperties.put("bitmap_data", hiveTable);
-        SparkEtlCluster etlCluster = new SparkEtlCluster(clusterName);
+        SparkResource resource = new SparkResource(resourceName);
 
         new Expectations() {
             {
                 catalog.getDb(dbName);
                 result = db;
-                catalog.getEtlClusterMgr();
-                result = etlClusterMgr;
+                catalog.getResourceMgr();
+                result = resourceMgr;
                 db.getTable(tableName);
                 result = olapTable;
                 db.getId();
@@ -154,13 +154,13 @@ public class SparkLoadJobTest {
                 result = tableName;
                 dataDescription.getPartitionNames();
                 result = null;
-                etlClusterMgr.getEtlCluster(clusterName);
-                result = etlCluster;
+                resourceMgr.getResource(resourceName);
+                result = resource;
             }
         };
 
         try {
-            Assert.assertTrue(etlCluster.getSparkConfigsMap().isEmpty());
+            Assert.assertTrue(resource.getSparkConfigs().isEmpty());
             BulkLoadJob bulkLoadJob = BulkLoadJob.fromLoadStmt(loadStmt, new OriginStatement(originStmt, 0));
             SparkLoadJob sparkLoadJob = (SparkLoadJob) bulkLoadJob;
             // check member
@@ -168,17 +168,17 @@ public class SparkLoadJobTest {
             Assert.assertEquals(label, bulkLoadJob.label);
             Assert.assertEquals(JobState.PENDING, bulkLoadJob.getState());
             Assert.assertEquals(EtlJobType.SPARK, bulkLoadJob.getJobType());
-            Assert.assertEquals(clusterName, sparkLoadJob.getEtlClusterName());
+            Assert.assertEquals(resourceName, sparkLoadJob.getResourceName());
             Assert.assertEquals(-1L, sparkLoadJob.getEtlStartTimestamp());
             Assert.assertEquals(hiveTable, sparkLoadJob.getHiveTableName());
 
-            // check update etl cluster properties
+            // check update spark resource properties
             Assert.assertEquals(broker, bulkLoadJob.brokerDesc.getName());
             Assert.assertEquals("user0", bulkLoadJob.brokerDesc.getProperties().get("username"));
             Assert.assertEquals("password0", bulkLoadJob.brokerDesc.getProperties().get("password"));
-            SparkEtlCluster sparkEtlCluster = Deencapsulation.getField(sparkLoadJob, "etlCluster");
-            Assert.assertTrue(sparkEtlCluster.getSparkConfigsMap().containsKey("spark.executor.memory"));
-            Assert.assertEquals("1g", sparkEtlCluster.getSparkConfigsMap().get("spark.executor.memory"));
+            SparkResource sparkResource = Deencapsulation.getField(sparkLoadJob, "sparkResource");
+            Assert.assertTrue(sparkResource.getSparkConfigs().containsKey("spark.executor.memory"));
+            Assert.assertEquals("1g", sparkResource.getSparkConfigs().get("spark.executor.memory"));
         } catch (DdlException e) {
             Assert.fail(e.getMessage());
         }
@@ -206,8 +206,8 @@ public class SparkLoadJobTest {
             }
         };
 
-        EtlClusterDesc etlClusterDesc = new EtlClusterDesc(clusterName, Maps.newHashMap());
-        SparkLoadJob job = new SparkLoadJob(dbId, label, etlClusterDesc, new OriginStatement(originStmt, 0));
+        ResourceDesc resourceDesc = new ResourceDesc(resourceName, Maps.newHashMap());
+        SparkLoadJob job = new SparkLoadJob(dbId, label, resourceDesc, new OriginStatement(originStmt, 0));
         job.execute();
 
         // check transaction id and id to tasks
@@ -217,8 +217,8 @@ public class SparkLoadJobTest {
 
     @Test
     public void testOnPendingTaskFinished(@Mocked Catalog catalog, @Injectable String originStmt) throws MetaNotFoundException {
-        EtlClusterDesc etlClusterDesc = new EtlClusterDesc(clusterName, Maps.newHashMap());
-        SparkLoadJob job = new SparkLoadJob(dbId, label, etlClusterDesc, new OriginStatement(originStmt, 0));
+        ResourceDesc resourceDesc = new ResourceDesc(resourceName, Maps.newHashMap());
+        SparkLoadJob job = new SparkLoadJob(dbId, label, resourceDesc, new OriginStatement(originStmt, 0));
         SparkPendingTaskAttachment attachment = new SparkPendingTaskAttachment(pendingTaskId);
         attachment.setAppId(appId);
         attachment.setOutputPath(etlOutputPath);
@@ -232,15 +232,18 @@ public class SparkLoadJobTest {
     }
 
     private SparkLoadJob getEtlStateJob(String originStmt) throws MetaNotFoundException {
-        SparkEtlCluster etlCluster = new SparkEtlCluster(clusterName);
-        Deencapsulation.setField(etlCluster, "master", "yarn");
+        SparkResource resource = new SparkResource(resourceName);
+        Map<String, String> sparkConfigs = resource.getSparkConfigs();
+        sparkConfigs.put("spark.master", "yarn");
+        sparkConfigs.put("spark.submit.deployMode", "cluster");
+        sparkConfigs.put("spark.hadoop.yarn.resourcemanager.address", "127.0.0.1:9999");
         SparkLoadJob job = new SparkLoadJob(dbId, label, null, new OriginStatement(originStmt, 0));
         job.state = JobState.ETL;
         job.maxFilterRatio = 0.15;
         job.transactionId = transactionId;
         Deencapsulation.setField(job, "appId", appId);
         Deencapsulation.setField(job, "etlOutputPath", etlOutputPath);
-        Deencapsulation.setField(job, "etlCluster", etlCluster);
+        Deencapsulation.setField(job, "sparkResource", resource);
         BrokerDesc brokerDesc = new BrokerDesc(broker, Maps.newHashMap());
         job.brokerDesc = brokerDesc;
         return job;
@@ -259,7 +262,7 @@ public class SparkLoadJobTest {
         new Expectations() {
             {
                 handler.getEtlJobStatus((SparkAppHandle) any, appId, anyLong, etlOutputPath,
-                                        (SparkEtlCluster) any, (BrokerDesc) any);
+                                        (SparkResource) any, (BrokerDesc) any);
                 result = status;
             }
         };
@@ -282,7 +285,7 @@ public class SparkLoadJobTest {
         new Expectations() {
             {
                 handler.getEtlJobStatus((SparkAppHandle) any, appId, anyLong, etlOutputPath,
-                                        (SparkEtlCluster) any, (BrokerDesc) any);
+                                        (SparkResource) any, (BrokerDesc) any);
                 result = status;
             }
         };
@@ -302,7 +305,7 @@ public class SparkLoadJobTest {
         new Expectations() {
             {
                 handler.getEtlJobStatus((SparkAppHandle) any, appId, anyLong, etlOutputPath,
-                                        (SparkEtlCluster) any, (BrokerDesc) any);
+                                        (SparkResource) any, (BrokerDesc) any);
                 result = status;
             }
         };
@@ -337,7 +340,7 @@ public class SparkLoadJobTest {
         new Expectations() {
             {
                 handler.getEtlJobStatus((SparkAppHandle) any, appId, anyLong, etlOutputPath,
-                                        (SparkEtlCluster) any, (BrokerDesc) any);
+                                        (SparkResource) any, (BrokerDesc) any);
                 result = status;
                 handler.getEtlFilePaths(etlOutputPath, (BrokerDesc) any);
                 result = filePathToSize;
