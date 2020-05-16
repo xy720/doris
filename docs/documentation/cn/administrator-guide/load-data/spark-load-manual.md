@@ -200,6 +200,18 @@ root和admin账户可以看到所有的资源。
 资源权限通过GRANT REVOKE来管理，目前仅支持USAGE_PRIV使用权限。
 
 可以将USAGE_PRIV权限赋予某个用户或者某个角色，角色的使用与之前一致。
+```sql
+-- 授予spark0资源的使用权限给用户user0
+GRANT USAGE_PRIV ON RESOURCE "spark0" TO "user0"@"%";
+-- 授予spark0资源的使用权限给角色role0
+GRANT USAGE_PRIV ON RESOURCE "spark0" TO ROLE "role0";
+-- 授予所有资源的使用权限给用户user0
+GRANT USAGE_PRIV ON RESOURCE * TO "user0"@"%";
+-- 授予所有资源的使用权限给角色role0
+GRANT USAGE_PRIV ON RESOURCE * TO ROLE "role0";
+-- 撤销用户user0的spark0资源使用权限
+REVOKE USAGE_PRIV ON RESOURCE "spark0" FROM "user0"@"%";
+```
 
 
 

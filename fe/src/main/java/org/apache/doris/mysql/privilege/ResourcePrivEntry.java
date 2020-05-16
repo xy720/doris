@@ -53,7 +53,7 @@ public class ResourcePrivEntry extends PrivEntry {
                                                                       CaseSensibility.RESOURCE.getCaseSensibility());
         PatternMatcher userPattern = PatternMatcher.createMysqlPattern(user, CaseSensibility.USER.getCaseSensibility());
         if (privs.containsNodePriv() || privs.containsDbTablePriv()) {
-            throw new AnalysisException("Resource privilege can not contains node and db table privileges: " + privs);
+            throw new AnalysisException("Resource privilege can not contains node or db table privileges: " + privs);
         }
         return new ResourcePrivEntry(hostPattern, host, resourcePattern, resourceName, userPattern, user, isDomain, privs);
     }
