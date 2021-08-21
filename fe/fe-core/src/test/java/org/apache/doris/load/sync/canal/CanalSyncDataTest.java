@@ -71,6 +71,7 @@ public class CanalSyncDataTest {
     private long offset = 0;
     private long nextId = 1000L;
     private int batchSize = 8192;
+    private long channelId = 100001L;
 
     ReentrantLock getLock;
 
@@ -217,7 +218,7 @@ public class CanalSyncDataTest {
         CanalSyncDataReceiver receiver = new CanalSyncDataReceiver(
                 syncJob, connector, "test", "mysql_db.mysql_tbl", consumer, 8192, getLock);
         CanalSyncChannel channel = new CanalSyncChannel(
-                syncJob, database, table, Lists.newArrayList("a", "b"), "mysql_db", "mysql_tbl");
+                channelId, syncJob, database, table, Lists.newArrayList("a", "b"), "mysql_db", "mysql_tbl");
 
         Map<Long, CanalSyncChannel> idToChannels = Maps.newHashMap();
         idToChannels.put(channel.getId(), channel);
@@ -290,7 +291,7 @@ public class CanalSyncDataTest {
         CanalSyncDataReceiver receiver = new CanalSyncDataReceiver(
                 syncJob, connector, "test", "mysql_db.mysql_tbl", consumer, 8192, getLock);
         CanalSyncChannel channel = new CanalSyncChannel(
-                syncJob, database, table, Lists.newArrayList("a", "b"), "mysql_db", "mysql_tbl");
+                channelId, syncJob, database, table, Lists.newArrayList("a", "b"), "mysql_db", "mysql_tbl");
 
         Map<Long, CanalSyncChannel> idToChannels = Maps.newHashMap();
         idToChannels.put(channel.getId(), channel);
@@ -353,7 +354,7 @@ public class CanalSyncDataTest {
         CanalSyncDataReceiver receiver = new CanalSyncDataReceiver(
                 syncJob, connector, "test", "mysql_db.mysql_tbl", consumer, 8192, getLock);
         CanalSyncChannel channel = new CanalSyncChannel(
-                syncJob, database, table, Lists.newArrayList("a", "b"), "mysql_db", "mysql_tbl");
+                channelId, syncJob, database, table, Lists.newArrayList("a", "b"), "mysql_db", "mysql_tbl");
 
         Map<Long, CanalSyncChannel> idToChannels = Maps.newHashMap();
         idToChannels.put(channel.getId(), channel);
@@ -435,7 +436,7 @@ public class CanalSyncDataTest {
         CanalSyncDataReceiver receiver = new CanalSyncDataReceiver(
                 syncJob, connector, "test", "mysql_db.mysql_tbl", consumer, 8192, getLock);
         CanalSyncChannel channel = new CanalSyncChannel(
-                syncJob, database, table, Lists.newArrayList("a", "b"), "mysql_db", "mysql_tbl");
+                channelId, syncJob, database, table, Lists.newArrayList("a", "b"), "mysql_db", "mysql_tbl");
 
         Map<Long, CanalSyncChannel> idToChannels = Maps.newHashMap();
         idToChannels.put(channel.getId(), channel);
