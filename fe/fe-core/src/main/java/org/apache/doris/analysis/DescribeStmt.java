@@ -58,6 +58,7 @@ public class DescribeStmt extends ShowStmt {
             ShowResultSetMetaData.builder()
                     .addColumn(new Column("IndexName", ScalarType.createVarchar(20)))
                     .addColumn(new Column("IndexKeysType", ScalarType.createVarchar(20)))
+                    .addColumn(new Column("HitNum", ScalarType.createVarchar(128)))
                     .addColumn(new Column("Field", ScalarType.createVarchar(20)))
                     .addColumn(new Column("Type", ScalarType.createVarchar(20)))
                     .addColumn(new Column("Null", ScalarType.createVarchar(10)))
@@ -168,6 +169,7 @@ public class DescribeStmt extends ShowStmt {
                             List<String> row = Arrays.asList(
                                     "",
                                     "",
+                                    "",
                                     column.getDisplayName(),
                                     column.getOriginType().toString(),
                                     column.isAllowNull() ? "Yes" : "No",
@@ -181,6 +183,7 @@ public class DescribeStmt extends ShowStmt {
                             if (j == 0) {
                                 row.set(0, indexName);
                                 row.set(1, indexMeta.getKeysType().name());
+                                row.set(2, String.valueOf(indexMeta.hitNum));
                             }
 
                             totalRows.add(row);

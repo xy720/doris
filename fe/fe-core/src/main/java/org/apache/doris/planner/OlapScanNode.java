@@ -696,6 +696,7 @@ public class OlapScanNode extends ScanNode {
         }
         final RollupSelector rollupSelector = new RollupSelector(analyzer, desc, olapTable);
         selectedIndexId = rollupSelector.selectBestRollup(selectedPartitionIds, conjuncts, isPreAggregation);
+        olapTable.getIndexMetaByIndexId(selectedIndexId).hitNum++;
         LOG.debug("select best roll up cost: {} ms, best index id: {}",
                 (System.currentTimeMillis() - start), selectedIndexId);
     }
