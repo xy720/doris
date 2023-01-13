@@ -1562,6 +1562,7 @@ build_clucene() {
 
     ${CMAKE_CMD} -G "${GENERATOR}" -DCMAKE_INSTALL_PREFIX="${TP_INSTALL_DIR}" -DBUILD_STATIC_LIBRARIES=ON \
         -DBUILD_SHARED_LIBRARIES=OFF -DCMAKE_CXX_FLAGS="-fno-omit-frame-pointer ${warning_narrowing}" \
+        -DZLIB_LIBRARY="${TP_INSTALL_DIR}/lib/libz.a" -DZLIB_INCLUDE_DIR="${TP_INSTALL_DIR}/include" \
         -DUSE_STAT64=0 -DUSE_AVX2="${USE_AVX2}" -DCMAKE_BUILD_TYPE="${BUILD_TYPE}" -DBUILD_CONTRIBS_LIB=ON ..
     ${BUILD_SYSTEM} -j "${PARALLEL}"
     ${BUILD_SYSTEM} install
@@ -1579,11 +1580,11 @@ if [[ "$(uname -s)" == 'Darwin' ]]; then
     build_gettext
 fi
 
-build_clucene
 build_libunixodbc
 build_openssl
 build_libevent
 build_zlib
+build_clucene
 build_lz4
 build_bzip
 build_lzo2
