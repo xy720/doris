@@ -17,25 +17,48 @@
 
 #include "runtime/broker_mgr.h"
 
+#include <gen_cpp/PaloBrokerService_types.h>
+#include <gen_cpp/TPaloBrokerService.h>
+#include <gen_cpp/Types_types.h>
+#include <glog/logging.h>
+#include <thrift/Thrift.h>
+#include <thrift/transport/TTransportException.h>
+// IWYU pragma: no_include <bits/chrono.h>
+#include <chrono> // IWYU pragma: keep
 #include <sstream>
+#include <vector>
 
 #include "common/config.h"
-#include "gen_cpp/PaloBrokerService_types.h"
-#include "gen_cpp/TPaloBrokerService.h"
-#include "service/backend_options.h"
-#include "runtime/exec_env.h"
+#include "common/status.h"
 #include "runtime/client_cache.h"
-#include "util/thrift_util.h"
+#include "runtime/exec_env.h"
+#include "service/backend_options.h"
+#include "util/doris_metrics.h"
+#include "util/hash_util.hpp"
+#include "util/metrics.h"
+#include "util/thread.h"
 
 namespace doris {
 
-BrokerMgr::BrokerMgr(ExecEnv* exec_env) : 
-        _exec_env(exec_env), _thread_stop(false), _ping_thread(&BrokerMgr::ping_worker, this) {
+DEFINE_GAUGE_METRIC_PROTOTYPE_2ARG(broker_count, MetricUnit::NOUNIT);
+
+BrokerMgr::BrokerMgr(ExecEnv* exec_env) : _exec_env(exec_env), _stop_background_threads_latch(1) {
+    CHECK(Thread::create(
+                  "BrokerMgr", "ping_worker", [this]() { this->ping_worker(); }, &_ping_thread)
+                  .ok());
+
+    REGISTER_HOOK_METRIC(broker_count, [this]() {
+        // std::lock_guard<std::mutex> l(_mutex);
+        return _broker_set.size();
+    });
 }
 
-BrokerMgr::~BrokerMgr() {
-    _thread_stop = true;
-    _ping_thread.join();
+void BrokerMgr::stop() {
+    DEREGISTER_HOOK_METRIC(broker_count);
+    _stop_background_threads_latch.count_down();
+    if (_ping_thread) {
+        _ping_thread->join();
+    }
 }
 
 void BrokerMgr::init() {
@@ -59,12 +82,10 @@ void BrokerMgr::ping(const TNetworkAddress& addr) {
     TBrokerOperationStatus response;
     try {
         Status status;
-        // 500ms is enough
-        BrokerServiceConnection client(
-            _exec_env->broker_client_cache(), addr, 500, &status);
+        BrokerServiceConnection client(_exec_env->broker_client_cache(), addr,
+                                       config::thrift_rpc_timeout_ms, &status);
         if (!status.ok()) {
-            LOG(WARNING) << "Create broker client failed. broker=" << addr
-                << ", status=" << status.get_error_msg();
+            LOG(WARNING) << "Create broker client failed. broker=" << addr << ", status=" << status;
             return;
         }
 
@@ -74,7 +95,7 @@ void BrokerMgr::ping(const TNetworkAddress& addr) {
             status = client.reopen();
             if (!status.ok()) {
                 LOG(WARNING) << "Create broker client failed. broker=" << addr
-                    << ", status=" << status.get_error_msg();
+                             << ", status=" << status << ", reason=" << e.what();
                 return;
             }
             client->ping(response, request);
@@ -85,7 +106,7 @@ void BrokerMgr::ping(const TNetworkAddress& addr) {
 }
 
 void BrokerMgr::ping_worker() {
-    while (!_thread_stop) {
+    do {
         std::vector<TNetworkAddress> addresses;
         {
             std::lock_guard<std::mutex> l(_mutex);
@@ -96,8 +117,7 @@ void BrokerMgr::ping_worker() {
         for (auto& addr : addresses) {
             ping(addr);
         }
-        sleep(5);
-    }
+    } while (!_stop_background_threads_latch.wait_for(std::chrono::seconds(5)));
 }
 
-}
+} // namespace doris

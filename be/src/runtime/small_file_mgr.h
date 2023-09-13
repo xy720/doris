@@ -15,28 +15,22 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_SRC_RUNTIME_SMALL_FILE_MGR_H
-#define DORIS_BE_SRC_RUNTIME_SMALL_FILE_MGR_H
+#pragma once
 
 #include <stdint.h>
 
 #include <mutex>
 #include <string>
 #include <unordered_map>
-#include <utility>
-#include <vector>
-
-#include "gen_cpp/Types_types.h"
 
 #include "common/status.h"
-#include "runtime/client_cache.h"
 
 namespace doris {
 
 class ExecEnv;
 
 struct CacheEntry {
-    std::string path;   // absolute path
+    std::string path; // absolute path
     std::string md5;
 };
 
@@ -55,25 +49,17 @@ public:
 
     // get file by specified file_id, return 'file_path'
     // if file does not exist, it will be downloaded from FE
-    Status get_file(
-        int64_t file_id,
-        const std::string& md5,
-        std::string* file_path);
+    Status get_file(int64_t file_id, const std::string& md5, std::string* file_path);
 
 private:
     Status _load_local_files();
 
     // load one single local file
-    Status _load_single_file(
-            const std::string& path,
-            const std::string& file_name);
+    Status _load_single_file(const std::string& path, const std::string& file_name);
 
     Status _check_file(const CacheEntry& entry, const std::string& md5);
 
-    Status _download_file(
-            int64_t file_id,
-            const std::string& md5,
-            std::string* file_path);
+    Status _download_file(int64_t file_id, const std::string& md5, std::string* file_path);
 
 private:
     std::mutex _lock;
@@ -84,5 +70,3 @@ private:
 };
 
 } // end namespace doris
-
-#endif // DORIS_BE_SRC_RUNTIME_SMALL_FILE_MGR_H

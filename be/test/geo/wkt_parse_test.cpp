@@ -17,18 +17,23 @@
 
 #include "geo/wkt_parse.h"
 
-#include <gtest/gtest.h>
+#include <gtest/gtest-message.h>
+#include <gtest/gtest-test-part.h>
+#include <string.h>
 
-#include "geo/geo_types.h"
-#include "geo/wkt_parse_ctx.h"
+#include <ostream>
+#include <string>
+
 #include "common/logging.h"
+#include "geo/geo_types.h"
+#include "gtest/gtest_pred_impl.h"
 
 namespace doris {
 
 class WktParseTest : public testing::Test {
 public:
-    WktParseTest() { }
-    virtual ~WktParseTest() { }
+    WktParseTest() {}
+    virtual ~WktParseTest() {}
 };
 
 TEST_F(WktParseTest, normal) {
@@ -36,9 +41,10 @@ TEST_F(WktParseTest, normal) {
 
     GeoShape* shape = nullptr;
     auto status = WktParse::parse_wkt(wkt, strlen(wkt), &shape);
-    ASSERT_EQ(GEO_PARSE_OK, status);
-    ASSERT_NE(nullptr, shape);
+    EXPECT_EQ(GEO_PARSE_OK, status);
+    EXPECT_NE(nullptr, shape);
     LOG(INFO) << "parse result: " << shape->to_string();
+    delete shape;
 }
 
 TEST_F(WktParseTest, invalid_wkt) {
@@ -46,13 +52,8 @@ TEST_F(WktParseTest, invalid_wkt) {
 
     GeoShape* shape = nullptr;
     auto status = WktParse::parse_wkt(wkt, strlen(wkt), &shape);
-    ASSERT_NE(GEO_PARSE_OK, status);
-    ASSERT_EQ(nullptr, shape);
+    EXPECT_NE(GEO_PARSE_OK, status);
+    EXPECT_EQ(nullptr, shape);
 }
 
-}
-
-int main(int argc, char* argv[]) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}
+} // namespace doris

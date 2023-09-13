@@ -17,16 +17,17 @@
 
 #pragma once
 
+#include <curl/curl.h>
+#include <curl/system.h>
+#include <stdint.h>
+
 #include <cstdio>
+#include <functional>
 #include <string>
 
-#include <curl/curl.h>
-
 #include "common/status.h"
-#include "http/http_headers.h"
 #include "http/http_method.h"
-#include "http/utils.h"
-#include "http/http_response.h"
+
 namespace doris {
 
 // Helper class to access HTTP resource
@@ -60,28 +61,34 @@ public:
         _header_list = curl_slist_append(_header_list, scratch_str.c_str());
         curl_easy_setopt(_curl, CURLOPT_HTTPHEADER, _header_list);
     }
-    
+
     void set_payload(const std::string& post_body) {
         curl_easy_setopt(_curl, CURLOPT_POSTFIELDSIZE, (long)post_body.length());
         curl_easy_setopt(_curl, CURLOPT_COPYPOSTFIELDS, post_body.c_str());
     }
 
+    // Currently, only fake SSL configurations are supported
+    void use_untrusted_ssl() {
+        curl_easy_setopt(_curl, CURLOPT_SSL_VERIFYPEER, 0L);
+        curl_easy_setopt(_curl, CURLOPT_SSL_VERIFYHOST, 0L);
+    }
+
     // TODO(zc): support set header
     // void set_header(const std::string& key, const std::string& value) {
-        // _cntl.http_request().SetHeader(key, value);
+    // _cntl.http_request().SetHeader(key, value);
     // }
 
     std::string get_response_content_type() {
-        char *ct = nullptr;
+        char* ct = nullptr;
         auto code = curl_easy_getinfo(_curl, CURLINFO_CONTENT_TYPE, &ct);
-        if(code == CURLE_OK && ct != nullptr) {
+        if (code == CURLE_OK && ct != nullptr) {
             return ct;
         }
         return std::string();
     }
 
     // Set the long gohead parameter to 1L to continue send authentication (user+password)
-    // credentials when following locations, even when hostname changed. 
+    // credentials when following locations, even when hostname changed.
     void set_unrestricted_auth(int gohead) {
         curl_easy_setopt(_curl, CURLOPT_UNRESTRICTED_AUTH, gohead);
     }
@@ -91,10 +98,21 @@ public:
     }
 
     // used to get content length
-    int64_t get_content_length() const {
-        double cl = 0.0f;
-        curl_easy_getinfo(_curl, CURLINFO_CONTENT_LENGTH_DOWNLOAD, &cl);
-        return cl;
+    // return -1 as error
+    Status get_content_length(uint64_t* length) const {
+        curl_off_t cl;
+        auto code = curl_easy_getinfo(_curl, CURLINFO_CONTENT_LENGTH_DOWNLOAD_T, &cl);
+        if (!code) {
+            if (cl < 0) {
+                return Status::InternalError(
+                        fmt::format("failed to get content length, it should be a positive value, "
+                                    "actrual is : {}",
+                                    cl));
+            }
+            *length = cl;
+            return Status::OK();
+        }
+        return Status::InternalError("failed to get content length. err code: {}", code);
     }
 
     long get_http_status() const {
@@ -109,8 +127,8 @@ public:
         return execute();
     }
 
-    // helper function to download a file, you can call this function to downlaod
-    // a file to local_path 
+    // helper function to download a file, you can call this function to download
+    // a file to local_path
     Status download(const std::string& local_path);
 
     Status execute_post_request(const std::string& payload, std::string* response);
@@ -133,7 +151,7 @@ private:
     using HttpCallback = std::function<bool(const void* data, size_t length)>;
     const HttpCallback* _callback = nullptr;
     char _error_buf[CURL_ERROR_SIZE];
-    curl_slist *_header_list = nullptr;
+    curl_slist* _header_list = nullptr;
 };
 
-}
+} // namespace doris

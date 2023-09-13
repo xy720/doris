@@ -14,9 +14,11 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/be/src/util/os-info.h
+// and modified by Doris
 
-#ifndef DORIS_BE_UTIL_OS_INFO_H
-#define DORIS_BE_UTIL_OS_INFO_H
+#pragma once
 
 #include <time.h>
 
@@ -28,30 +30,29 @@ namespace doris {
 
 /// Provides information about the OS we're running on.
 class OsInfo {
- public:
-  /// Initialize OsInfo.
-  static void Init();
+public:
+    /// Initialize OsInfo.
+    static void Init();
 
-  static const std::string os_version() {
-    DCHECK(initialized_);
-    return os_version_;
-  }
+    static const std::string os_version() {
+        DCHECK(initialized_);
+        return os_version_;
+    }
 
-  /// Return CLOCK_MONOTONIC if it's fast. Otherwise CLOCK_MONOTONIC_COARSE, which will be
-  /// fast but lower resolution.
-  static clockid_t fast_clock() {
-    DCHECK(initialized_);
-    return fast_clock_;
-  }
+    /// Return CLOCK_MONOTONIC if it's fast. Otherwise CLOCK_MONOTONIC_COARSE, which will be
+    /// fast but lower resolution.
+    static clockid_t fast_clock() {
+        DCHECK(initialized_);
+        return fast_clock_;
+    }
 
-  static std::string DebugString();
+    static std::string DebugString();
 
- private:
-  static bool initialized_;
-  static std::string os_version_;
-  static clockid_t fast_clock_;
-  static std::string clock_name_;
+private:
+    static bool initialized_;
+    static std::string os_version_;
+    static clockid_t fast_clock_;
+    static std::string clock_name_;
 };
 
-}
-#endif
+} // namespace doris

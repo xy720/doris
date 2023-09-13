@@ -15,8 +15,12 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include <gtest/gtest.h>
 #include "util/frame_of_reference_coding.h"
+
+#include <gtest/gtest-message.h>
+#include <gtest/gtest-test-part.h>
+
+#include "gtest/gtest_pred_impl.h"
 
 namespace doris {
 class TestForCoding : public testing::Test {
@@ -37,7 +41,7 @@ public:
         std::vector<int32_t> actual_result(element_size);
         decoder.get_batch(actual_result.data(), element_size);
 
-        ASSERT_EQ(data, actual_result);
+        EXPECT_EQ(data, actual_result);
     }
 
     static void test_skip(int32_t skip_num) {
@@ -62,10 +66,9 @@ public:
         std::vector<uint32_t> actual_result(256 - skip_num);
         decoder.get_batch(actual_result.data(), 256 - skip_num);
 
-        ASSERT_EQ(expect_result, actual_result);
+        EXPECT_EQ(expect_result, actual_result);
     }
 };
-
 
 TEST_F(TestForCoding, TestHalfFrame) {
     test_frame_of_reference_encode_decode(64);
@@ -111,7 +114,7 @@ TEST_F(TestForCoding, TestInt64) {
     std::vector<int64_t> actual_result(320);
     decoder.get_batch(actual_result.data(), 320);
 
-    ASSERT_EQ(data, actual_result);
+    EXPECT_EQ(data, actual_result);
 }
 
 TEST_F(TestForCoding, TestOneMinValue) {
@@ -124,7 +127,7 @@ TEST_F(TestForCoding, TestOneMinValue) {
     decoder.init();
     int32_t actual_value;
     decoder.get(&actual_value);
-    ASSERT_EQ(2019, actual_value);
+    EXPECT_EQ(2019, actual_value);
 }
 
 TEST_F(TestForCoding, TestZeroValue) {
@@ -132,13 +135,13 @@ TEST_F(TestForCoding, TestZeroValue) {
     ForEncoder<int32_t> encoder(&buffer);
     encoder.flush();
 
-    ASSERT_EQ(buffer.length(), 4 + 1);
+    EXPECT_EQ(buffer.length(), 4 + 1);
 
     ForDecoder<int32_t> decoder(buffer.data(), buffer.length());
     decoder.init();
     int32_t actual_value;
     bool result = decoder.get(&actual_value);
-    ASSERT_EQ(result, false);
+    EXPECT_EQ(result, false);
 }
 
 TEST_F(TestForCoding, TestBytesAlign) {
@@ -153,14 +156,94 @@ TEST_F(TestForCoding, TestBytesAlign) {
 
     int32_t actual_value;
     decoder.get(&actual_value);
-    ASSERT_EQ(2019, actual_value);
+    EXPECT_EQ(2019, actual_value);
     decoder.get(&actual_value);
-    ASSERT_EQ(2020, actual_value);
+    EXPECT_EQ(2020, actual_value);
 }
 
+TEST_F(TestForCoding, TestValueSeekSpecialCase) {
+    faststring buffer(1);
+    ForEncoder<int64_t> encoder(&buffer);
+
+    std::vector<int64_t> data;
+    for (int64_t i = 0; i < 128; ++i) {
+        data.push_back(i);
+    }
+
+    for (int64_t i = 300; i < 500; ++i) {
+        data.push_back(i);
+    }
+
+    encoder.put_batch(data.data(), data.size());
+    encoder.flush();
+
+    ForDecoder<int64_t> decoder(buffer.data(), buffer.length());
+    decoder.init();
+
+    int64_t target = 160;
+    bool exact_match;
+    bool has_value = decoder.seek_at_or_after_value(&target, &exact_match);
+    EXPECT_EQ(has_value, true);
+    EXPECT_EQ(exact_match, false);
+
+    int64_t next_value;
+    decoder.get(&next_value);
+    EXPECT_EQ(300, next_value);
 }
 
-int main(int argc, char** argv) {
-    testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
+TEST_F(TestForCoding, TestValueSeek) {
+    faststring buffer(1);
+    ForEncoder<int64_t> encoder(&buffer);
+
+    const int64_t SIZE = 320;
+    std::vector<int64_t> data;
+    for (int64_t i = 0; i < SIZE; ++i) {
+        data.push_back(i);
+    }
+    encoder.put_batch(data.data(), SIZE);
+    encoder.flush();
+
+    ForDecoder<int64_t> decoder(buffer.data(), buffer.length());
+    decoder.init();
+
+    int64_t target = 160;
+    bool exact_match;
+    bool found = decoder.seek_at_or_after_value(&target, &exact_match);
+    EXPECT_EQ(found, true);
+    EXPECT_EQ(exact_match, true);
+
+    int64_t actual_value;
+    decoder.get(&actual_value);
+    EXPECT_EQ(target, actual_value);
+
+    target = -1;
+    found = decoder.seek_at_or_after_value(&target, &exact_match);
+    EXPECT_EQ(found, true);
+    EXPECT_EQ(exact_match, false);
+
+    std::vector<int64_t> actual_result(SIZE);
+    decoder.get_batch(actual_result.data(), SIZE);
+    EXPECT_EQ(data, actual_result);
+
+    target = 0;
+    found = decoder.seek_at_or_after_value(&target, &exact_match);
+    EXPECT_EQ(found, true);
+    EXPECT_EQ(exact_match, true);
+
+    decoder.get_batch(actual_result.data(), SIZE);
+    EXPECT_EQ(data, actual_result);
+
+    target = 319;
+    found = decoder.seek_at_or_after_value(&target, &exact_match);
+    EXPECT_EQ(found, true);
+    EXPECT_EQ(exact_match, true);
+
+    decoder.get(&actual_value);
+    EXPECT_EQ(target, actual_value);
+
+    target = 320;
+    found = decoder.seek_at_or_after_value(&target, &exact_match);
+    EXPECT_EQ(found, false);
 }
+
+} // namespace doris

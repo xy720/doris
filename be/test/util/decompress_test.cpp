@@ -15,16 +15,17 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include <stdlib.h>
-#include <stdio.h>
-#include <iostream>
-#include <gtest/gtest.h>
 #include "util/decompress.h"
-#include "util/compress.h"
+
+#include <gtest/gtest.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+#include <iostream>
+
 #include "gen_cpp/Descriptors_types.h"
 
 using namespace std;
-using namespace boost;
 
 namespace doris {
 
@@ -46,35 +47,34 @@ protected:
     }
 
     void RunTest(THdfsCompression::type format) {
-        scoped_ptr<Codec> compressor;
-        scoped_ptr<Codec> decompressor;
-        MemPool* mem_pool = new MemPool;
+        std::unique_ptr<Codec> compressor;
+        std::unique_ptr<Codec> decompressor;
+        vectorized::Arena* arena = new vectorized::Arena;
 
-        EXPECT_TRUE(
-            Codec::create_compressor(NULL, mem_pool, true, format, &compressor).ok());
-        EXPECT_TRUE(
-            Codec::create_compressor(NULL, mem_pool, true, format, &decompressor).ok());
+        EXPECT_TRUE(Codec::create_compressor(nullptr, arena, true, format, &compressor).ok());
+        EXPECT_TRUE(Codec::create_compressor(nullptr, arena, true, format, &decompressor).ok());
 
-        uint8_t* compressed = NULL;
+        uint8_t* compressed = nullptr;
         int compressed_length = 0;
-        EXPECT_TRUE(compressor->process_block(sizeof(_input),
-                                             _input, &compressed_length, &compressed).ok());
-        uint8_t* output = NULL;
+        EXPECT_TRUE(
+                compressor->process_block(sizeof(_input), _input, &compressed_length, &compressed)
+                        .ok());
+        uint8_t* output = nullptr;
         int out_len = 0;
         EXPECT_TRUE(
-            decompressor->process_block(compressed_length,
-                                       compressed, &out_len, &output).ok());
+                decompressor->process_block(compressed_length, compressed, &out_len, &output).ok());
 
         EXPECT_TRUE(memcmp(&_input, output, sizeof(_input)) == 0);
 
         // Try again specifying the output buffer and length.
         out_len = sizeof(_input);
-        output = mem_pool->allocate(out_len);
-        EXPECT_TRUE(decompressor->process_block(compressed_length,
-                                               compressed, &out_len, &output).ok());
+        output = arena->alloc(out_len);
+        EXPECT_TRUE(
+                decompressor->process_block(compressed_length, compressed, &out_len, &output).ok());
 
         EXPECT_TRUE(memcmp(&_input, output, sizeof(_input)) == 0);
     }
+
 private:
     uint8_t _input[2 * 26 * 1024];
 };
@@ -103,16 +103,4 @@ TEST_F(DecompressorTest, SnappyBlocked) {
     RunTest(THdfsCompression::SNAPPY_BLOCKED);
 }
 
-}
-
-int main(int argc, char** argv) {
-    std::string conffile = std::string(getenv("DORIS_HOME")) + "/conf/be.conf";
-    if (!doris::config::init(conffile.c_str(), false)) {
-        fprintf(stderr, "error read config file. \n");
-        return -1;
-    }
-    init_glog("be-test");
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}
-
+} // namespace doris

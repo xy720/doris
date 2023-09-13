@@ -17,9 +17,8 @@
 
 #pragma once
 
-#include "olap/column_block.h" // for ColumnBlockView
-#include "olap/rowset/segment_v2/common.h" // for rowid_t
 #include "common/status.h" // for Status
+#include "vec/columns/column.h"
 
 namespace doris {
 namespace segment_v2 {
@@ -27,9 +26,9 @@ namespace segment_v2 {
 // PageDecoder is used to decode page.
 class PageDecoder {
 public:
-    PageDecoder() { }
+    PageDecoder() {}
 
-    virtual ~PageDecoder() { }
+    virtual ~PageDecoder() {}
 
     // Call this to do some preparation for decoder.
     // eg: parse data page header
@@ -43,6 +42,24 @@ public:
     // Doing so has undefined results.
     virtual Status seek_to_position_in_page(size_t pos) = 0;
 
+    // Seek the decoder to the given value in the page, or the
+    // lowest value which is greater than the given value.
+    //
+    // If the decoder was able to locate an exact match, then
+    // sets *exact_match to true. Otherwise sets *exact_match to
+    // false, to indicate that the seeked value is _after_ the
+    // requested value.
+    //
+    // If the given value is less than the lowest value in the page,
+    // seeks to the start of the page. If it is higher than the highest
+    // value in the page, then returns Status::Error<ENTRY_NOT_FOUND>
+    //
+    // This will only return valid results when the data page
+    // consists of values in sorted order.
+    virtual Status seek_at_or_after_value(const void* value, bool* exact_match) {
+        return Status::NotSupported("seek_at_or_after_value"); // FIXME
+    }
+
     // Seek the decoder forward by a given number of rows, or to the end
     // of the page. This is primarily used to skip over data.
     //
@@ -54,15 +71,19 @@ public:
         return step;
     }
 
-    // Fetch the next vector of values from the page into 'column_vector_view'.
-    // The output vector must have space for up to n cells.
-    //
-    // Return the size of read entries .
-    //
-    // In the case that the values are themselves references
-    // to other memory (eg Slices), the referred-to memory is
-    // allocated in the column_vector_view's mem_pool.
-    virtual Status next_batch(size_t* n, ColumnBlockView* dst) = 0;
+    virtual Status next_batch(size_t* n, vectorized::MutableColumnPtr& dst) = 0;
+
+    virtual Status read_by_rowids(const rowid_t* rowids, ordinal_t page_first_ordinal, size_t* n,
+                                  vectorized::MutableColumnPtr& dst) {
+        return Status::NotSupported("not implement vec op now");
+    }
+
+    // Same as `next_batch` except for not moving forward the cursor.
+    // When read array's ordinals in `ArrayFileColumnIterator`, we want to read one extra ordinal
+    // but do not want to move forward the cursor.
+    virtual Status peek_next_batch(size_t* n, vectorized::MutableColumnPtr& dst) {
+        return Status::NotSupported("not implement vec op now");
+    }
 
     // Return the number of elements in this page.
     virtual size_t count() const = 0;
@@ -70,6 +91,8 @@ public:
     // Return the position within the page of the currently seeked
     // entry (ie the entry that will next be returned by next_vector())
     virtual size_t current_index() const = 0;
+
+    bool has_remaining() const { return current_index() < count(); }
 
 private:
     DISALLOW_COPY_AND_ASSIGN(PageDecoder);

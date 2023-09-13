@@ -17,66 +17,19 @@
 
 #include "util/debug_util.h"
 
-#include "common/logging.h"
+#include <gen_cpp/HeartbeatService_types.h>
+#include <gen_cpp/PlanNodes_types.h>
+#include <stdint.h>
 
 #include <iomanip>
-#include <sstream>
+#include <map>
+#include <sstream> // IWYU pragma: keep
+#include <utility>
 
-#include "common/logging.h"
-#include "gen_cpp/version.h"
-#include "util/cpu_info.h"
-#include "gen_cpp/Opcodes_types.h"
-#include "gen_cpp/types.pb.h"
-
-#define PRECISION 2
-#define KILOBYTE (1024)
-#define MEGABYTE (1024 * 1024)
-#define GIGABYTE (1024 * 1024 * 1024)
-
-#define SECOND (1000)
-#define MINUTE (1000 * 60)
-#define HOUR (1000 * 60 * 60)
-
-#define THOUSAND (1000)
-#define MILLION (THOUSAND * 1000)
-#define BILLION (MILLION * 1000)
+#include "common/version_internal.h"
+#include "util/uid_util.h"
 
 namespace doris {
-
-#define THRIFT_ENUM_OUTPUT_FN_IMPL(E, MAP) \
-    std::ostream& operator<<(std::ostream& os, const E::type& e) {\
-        std::map<int, const char*>::const_iterator i;\
-        i = MAP.find(e);\
-        if (i != MAP.end()) {\
-            os << i->second;\
-        }\
-        return os;\
-    }
-
-// Macro to stamp out operator<< for thrift enums.  Why doesn't thrift do this?
-#define THRIFT_ENUM_OUTPUT_FN(E) THRIFT_ENUM_OUTPUT_FN_IMPL(E, _##E##_VALUES_TO_NAMES)
-
-// Macro to implement Print function that returns string for thrift enums
-#define THRIFT_ENUM_PRINT_FN(E) \
-    std::string Print##E(const E::type& e) {\
-        std::stringstream ss;\
-        ss << e;\
-        return ss.str();\
-    }
-
-THRIFT_ENUM_OUTPUT_FN(TExprOpcode);
-THRIFT_ENUM_OUTPUT_FN(TAggregationOp);
-THRIFT_ENUM_OUTPUT_FN(THdfsFileFormat);
-THRIFT_ENUM_OUTPUT_FN(THdfsCompression);
-THRIFT_ENUM_OUTPUT_FN(TStmtType);
-THRIFT_ENUM_OUTPUT_FN(QueryState);
-THRIFT_ENUM_OUTPUT_FN(TAgentServiceVersion);
-
-THRIFT_ENUM_PRINT_FN(TStmtType);
-THRIFT_ENUM_PRINT_FN(QueryState);
-
-THRIFT_ENUM_PRINT_FN(TMetricKind);
-THRIFT_ENUM_PRINT_FN(TUnit);
 
 std::string print_plan_node_type(const TPlanNodeType::type& type) {
     std::map<int, const char*>::const_iterator i;
@@ -91,20 +44,48 @@ std::string print_plan_node_type(const TPlanNodeType::type& type) {
 
 std::string get_build_version(bool compact) {
     std::stringstream ss;
-    ss << PALO_BUILD_VERSION
+    ss << version::doris_build_version()
+#if defined(__x86_64__) || defined(_M_X64)
+#ifdef __AVX2__
+       << "(AVX2)"
+#else
+       << "(SSE4.2)"
+#endif
+#elif defined(__aarch64__)
+       << "(AArch64)"
+#endif
 #ifdef NDEBUG
        << " RELEASE"
 #else
        << " DEBUG"
+#if defined(ADDRESS_SANITIZER)
+       << " with ASAN"
+#elif defined(LEAK_SANITIZER)
+       << " with LSAN"
+#elif defined(THREAD_SANITIZER)
+       << " with TSAN"
+#elif defined(UNDEFINED_BEHAVIOR_SANITIZER)
+       << " with UBSAN"
+#elif defined(MEMORY_SANITIZER)
+       << " with MSAN"
+#elif defined(BLACKLIST_SANITIZER)
+       << " with BLSAN"
 #endif
-       << " (build " << PALO_BUILD_HASH
-       << ")";
+#endif
+       << " (build " << version::doris_build_hash() << ")";
 
     if (!compact) {
-        ss << std::endl << "Built on " << PALO_BUILD_TIME << " by " << PALO_BUILD_INFO;
+        ss << std::endl
+           << "Built on " << version::doris_build_time() << " by " << version::doris_build_info();
     }
 
     return ss.str();
+}
+
+std::string get_short_version() {
+    static std::string short_version(std::string(version::doris_build_version()) + "-" +
+                                     version::doris_build_short_hash());
+    return short_version;
 }
 
 std::string get_version_string(bool compact) {
@@ -122,4 +103,35 @@ std::string hexdump(const char* buf, int len) {
     return ss.str();
 }
 
+std::string PrintThriftNetworkAddress(const TNetworkAddress& add) {
+    std::stringstream ss;
+    add.printTo(ss);
+    return ss.str();
 }
+
+std::string PrintFrontendInfos(const std::vector<TFrontendInfo>& fe_infos) {
+    std::stringstream ss;
+    const size_t count = fe_infos.size();
+
+    for (int i = 0; i < count; ++i) {
+        fe_infos[i].printTo(ss);
+        ss << ' ';
+    }
+
+    return ss.str();
+}
+
+std::string PrintFrontendInfo(const TFrontendInfo& fe_info) {
+    std::stringstream ss;
+    fe_info.printTo(ss);
+
+    return ss.str();
+}
+
+std::string PrintInstanceStandardInfo(const TUniqueId& qid, const int fid, const TUniqueId& iid) {
+    std::stringstream ss;
+    ss << print_id(iid) << '|' << fid << '|' << print_id(qid);
+    return ss.str();
+}
+
+} // namespace doris

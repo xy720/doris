@@ -17,15 +17,18 @@
 
 #pragma once
 
+#include <stdint.h>
+
 #include <functional>
-#include <map>
+#include <memory>
 #include <mutex>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 #include "runtime/routine_load/data_consumer_pool.h"
-#include "util/thread_pool.hpp"
 #include "util/uid_util.h"
-
-#include "gen_cpp/internal_service.pb.h"
+#include "util/work_thread_pool.hpp"
 
 namespace doris {
 
@@ -33,6 +36,8 @@ class ExecEnv;
 class Status;
 class StreamLoadContext;
 class TRoutineLoadTask;
+class PIntegerPair;
+class PKafkaMetaProxyRequest;
 
 // A routine load task executor will receive routine load
 // tasks from FE, put it to a fixed thread pool.
@@ -40,46 +45,48 @@ class TRoutineLoadTask;
 // to FE finally.
 class RoutineLoadTaskExecutor {
 public:
-    typedef std::function<void (StreamLoadContext*)> ExecFinishCallback; 
+    using ExecFinishCallback = std::function<void(std::shared_ptr<StreamLoadContext>)>;
 
-    RoutineLoadTaskExecutor(ExecEnv* exec_env):
-        _exec_env(exec_env),
-        _thread_pool(config::routine_load_thread_pool_size, 1),
-        _data_consumer_pool(10) {
+    RoutineLoadTaskExecutor(ExecEnv* exec_env);
 
-        _data_consumer_pool.start_bg_worker();
-    }
+    ~RoutineLoadTaskExecutor();
 
-    ~RoutineLoadTaskExecutor() {
-        _thread_pool.shutdown();
-        _thread_pool.join();
-    }
-    
+    void stop();
+
     // submit a routine load task
     Status submit_task(const TRoutineLoadTask& task);
-    
-    Status get_kafka_partition_meta(const PKafkaMetaProxyRequest& request, std::vector<int32_t>* partition_ids);
+
+    Status get_kafka_partition_meta(const PKafkaMetaProxyRequest& request,
+                                    std::vector<int32_t>* partition_ids);
+
+    Status get_kafka_partition_offsets_for_times(const PKafkaMetaProxyRequest& request,
+                                                 std::vector<PIntegerPair>* partition_offsets);
+
+    Status get_kafka_latest_offsets_for_partitions(const PKafkaMetaProxyRequest& request,
+                                                   std::vector<PIntegerPair>* partition_offsets);
 
 private:
     // execute the task
-    void exec_task(StreamLoadContext* ctx, DataConsumerPool* pool, ExecFinishCallback cb);
-    
-    void err_handler(
-            StreamLoadContext* ctx,
-            const Status& st,
-            const std::string& err_msg);
+    void exec_task(std::shared_ptr<StreamLoadContext> ctx, DataConsumerPool* pool,
+                   ExecFinishCallback cb);
+
+    void err_handler(std::shared_ptr<StreamLoadContext> ctx, const Status& st,
+                     const std::string& err_msg);
 
     // for test only
-    Status _execute_plan_for_test(StreamLoadContext* ctx);
+    Status _execute_plan_for_test(std::shared_ptr<StreamLoadContext> ctx);
+    // create a dummy StreamLoadContext for PKafkaMetaProxyRequest
+    Status _prepare_ctx(const PKafkaMetaProxyRequest& request,
+                        std::shared_ptr<StreamLoadContext> ctx);
 
 private:
     ExecEnv* _exec_env;
-    ThreadPool _thread_pool;
+    PriorityThreadPool _thread_pool;
     DataConsumerPool _data_consumer_pool;
 
     std::mutex _lock;
     // task id -> load context
-    std::unordered_map<UniqueId, StreamLoadContext*> _task_map;
+    std::unordered_map<UniqueId, std::shared_ptr<StreamLoadContext>> _task_map;
 };
 
-} // end namespace
+} // namespace doris

@@ -17,38 +17,45 @@
 
 #pragma once
 
+#include <rapidjson/rapidjson.h>
+
+#include <map>
 #include <string>
+#include <vector>
 
 #include "rapidjson/document.h"
-#include "runtime/descriptors.h"
-#include "runtime/tuple.h"
+#include "vec/data_types/data_type.h"
 
 namespace doris {
 
 class Status;
+class TupleDescriptor;
 
 class ScrollParser {
-
 public:
-    ScrollParser();
+    ScrollParser(bool doc_value_mode);
     ~ScrollParser();
 
-    Status parse(const std::string& scroll_result);
-    Status fill_tuple(const TupleDescriptor* _tuple_desc, Tuple* tuple, 
-                MemPool* mem_pool, bool* line_eof);
+    Status parse(const std::string& scroll_result, bool exactly_once = false);
+    Status fill_columns(const TupleDescriptor* _tuple_desc,
+                        std::vector<vectorized::MutableColumnPtr>& columns, bool* line_eof,
+                        const std::map<std::string, std::string>& docvalue_context);
 
     const std::string& get_scroll_id();
-    int get_total();
-    int get_size();
+    int get_size() const;
 
 private:
-
     std::string _scroll_id;
-    int _total;
     int _size;
     rapidjson::SizeType _line_index;
 
     rapidjson::Document _document_node;
     rapidjson::Value _inner_hits_node;
+
+    // todo(milimin): ScrollParser should be divided into two classes: SourceParser and DocValueParser,
+    // including remove some variables in the current implementation, e.g. pure_doc_value.
+    // All above will be done in the DOE refactoring projects.
+    // Current bug fixes minimize the scope of changes to avoid introducing other new bugs.
+    // bool _doc_value_mode;
 };
-}
+} // namespace doris

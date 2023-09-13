@@ -28,7 +28,7 @@ message ColumnMessage {
     required uint32 length = 4; // ColumnPB.length
     required bool is_key = 5;   // ColumnPB.is_key
     optional string default_value = 6;  // ColumnPB.default_value
-    optional string referenced_column = 7;  // ColumnPB.
+    optional string referenced_column = 7;  // deprecated
     optional uint32 index_length = 8;   // ColumnPB.index_length
     optional uint32 precision = 9 [default = 27];   // ColumnPB.precision
     optional uint32 frac = 10 [default = 9];    // ColumnPB.frac
@@ -38,6 +38,8 @@ message ColumnMessage {
     optional bool is_root_column = 14 [default=false]; // not used
     // is bloom filter column
     optional bool is_bf_column = 15 [default=false];    // ColumnPB.is_bf_column
+    // is bitmap index column
+    optional bool has_bitmap_index = 16 [default=false]; // ColumnPB.has_bitmap_index
 }
 
 enum CompressKind {
@@ -46,3 +48,13 @@ enum CompressKind {
     COMPRESS_LZ4 = 2;
 }
 
+message PCounter {
+    required string item = 1;
+    required uint64 count = 2;
+}
+
+message PTopNCounter {
+    required uint32 top_num = 1;
+    required uint32 space_expand_rate = 2;
+    repeated PCounter counter = 3;
+}

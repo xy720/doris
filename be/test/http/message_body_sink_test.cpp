@@ -17,22 +17,23 @@
 
 #include "runtime/message_body_sink.h"
 
-#include <gtest/gtest.h>
-
-#include <stdio.h>
-#include <sys/types.h>
-#include <sys/stat.h>
 #include <fcntl.h>
+#include <gtest/gtest-message.h>
+#include <gtest/gtest-test-part.h>
+#include <string.h>
+#include <unistd.h>
+
+#include "gtest/gtest_pred_impl.h"
 
 namespace doris {
 
 class MessageBodySinkTest : public testing::Test {
 public:
-    MessageBodySinkTest() { }
-    virtual ~MessageBodySinkTest() { }
+    MessageBodySinkTest() {}
+    virtual ~MessageBodySinkTest() {}
 
-    void SetUp() override {
-    }
+    void SetUp() override {}
+
 private:
 };
 
@@ -40,24 +41,20 @@ TEST_F(MessageBodySinkTest, file_sink) {
     char data[] = "hello world";
 
     MessageBodyFileSink sink("./body_sink_test_file_sink");
-    ASSERT_TRUE(sink.open().ok());
-    ASSERT_TRUE(sink.append(data, sizeof(data)).ok());
-    ASSERT_TRUE(sink.finish().ok());
+    EXPECT_TRUE(sink.open().ok());
+    EXPECT_TRUE(sink.append(data, sizeof(data)).ok());
+    EXPECT_TRUE(sink.finish().ok());
 
     {
         char buf[256];
         memset(buf, 0, 256);
         int fd = open("././body_sink_test_file_sink", O_RDONLY);
-        read(fd, buf, 256);
+        auto readed_size = read(fd, buf, 256);
+        EXPECT_NE(readed_size, -1);
         close(fd);
-        ASSERT_STREQ("hello world", buf);
+        EXPECT_STREQ("hello world", buf);
         unlink("././body_sink_test_file_sink");
     }
 }
 
-}
-
-int main(int argc, char* argv[]) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}
+} // namespace doris

@@ -15,40 +15,43 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_SRC_OLAP_CUMULATIVE_COMPACTION_H
-#define DORIS_BE_SRC_OLAP_CUMULATIVE_COMPACTION_H
+#pragma once
+
+#include <butil/macros.h>
 
 #include <string>
+#include <vector>
 
+#include "common/status.h"
+#include "io/io_common.h"
 #include "olap/compaction.h"
+#include "olap/olap_common.h"
+#include "olap/rowset/rowset.h"
+#include "olap/tablet.h"
 
 namespace doris {
 
 class CumulativeCompaction : public Compaction {
 public:
-    CumulativeCompaction(TabletSharedPtr tablet);
+    CumulativeCompaction(const TabletSharedPtr& tablet);
     ~CumulativeCompaction() override;
 
-    OLAPStatus compact() override;
+    Status prepare_compact() override;
+    Status execute_compact_impl() override;
+
+    std::vector<RowsetSharedPtr> get_input_rowsets() { return _input_rowsets; }
 
 protected:
-    OLAPStatus pick_rowsets_to_compact() override;
+    Status pick_rowsets_to_compact() override;
 
-    std::string compaction_name() const override {
-        return "cumulative compaction";
-    }
+    std::string compaction_name() const override { return "cumulative compaction"; }
 
-    ReaderType compaction_type() const override {
-        return ReaderType::READER_CUMULATIVE_COMPACTION;
-    }
-
+    ReaderType compaction_type() const override { return ReaderType::READER_CUMULATIVE_COMPACTION; }
 
 private:
-    int64_t _cumulative_rowset_size_threshold;
+    Version _last_delete_version {-1, -1};
 
     DISALLOW_COPY_AND_ASSIGN(CumulativeCompaction);
 };
 
-}  // namespace doris
-
-#endif // DORIS_BE_SRC_OLAP_CUMULATIVE_COMPACTION_H
+} // namespace doris

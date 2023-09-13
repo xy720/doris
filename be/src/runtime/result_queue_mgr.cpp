@@ -17,23 +17,37 @@
 
 #include "runtime/result_queue_mgr.h"
 
+#include <gen_cpp/Types_types.h>
+
+#include <utility>
+
 #include "common/config.h"
-#include "common/logging.h"
 #include "common/status.h"
-#include "gen_cpp/DorisExternalService_types.h"
-#include "gen_cpp/Types_types.h"
-#include "runtime/exec_env.h"
-#include "util/arrow/row_batch.h"
+#include "runtime/record_batch_queue.h"
+#include "util/doris_metrics.h"
+#include "util/hash_util.hpp"
+#include "util/metrics.h"
 
 namespace doris {
 
-ResultQueueMgr::ResultQueueMgr() : _max_sink_batch_count(config::max_memory_sink_batch_count) {
-}
-ResultQueueMgr::~ResultQueueMgr() {
+DEFINE_GAUGE_METRIC_PROTOTYPE_2ARG(result_block_queue_count, MetricUnit::NOUNIT);
+
+ResultQueueMgr::ResultQueueMgr() {
+    // Each BlockingQueue has a limited size (default 20, by config::max_memory_sink_batch_count),
+    // it's not needed to count the actual size of all BlockingQueue.
+    REGISTER_HOOK_METRIC(result_block_queue_count, [this]() {
+        // std::lock_guard<std::mutex> l(_lock);
+        return _fragment_queue_map.size();
+    });
 }
 
-Status ResultQueueMgr::fetch_result(const TUniqueId& fragment_instance_id, std::shared_ptr<arrow::RecordBatch>* result, bool *eos) {
-    shared_block_queue_t queue;
+ResultQueueMgr::~ResultQueueMgr() {
+    DEREGISTER_HOOK_METRIC(result_block_queue_count);
+}
+
+Status ResultQueueMgr::fetch_result(const TUniqueId& fragment_instance_id,
+                                    std::shared_ptr<arrow::RecordBatch>* result, bool* eos) {
+    BlockQueueSharedPtr queue;
     {
         std::lock_guard<std::mutex> l(_lock);
         auto iter = _fragment_queue_map.find(fragment_instance_id);
@@ -43,15 +57,15 @@ Status ResultQueueMgr::fetch_result(const TUniqueId& fragment_instance_id, std::
             return Status::InternalError("fragment_instance_id does not exists");
         }
     }
-    bool sucess = queue->blocking_get(result);
-    if (sucess) {
+    // check queue status before get result
+    RETURN_IF_ERROR(queue->status());
+    bool success = queue->blocking_get(result);
+    if (success) {
         // sentinel nullptr indicates scan end
         if (*result == nullptr) {
             *eos = true;
-            // put sentinel for consistency, avoid repeated invoking fetch result when hava no rowbatch
-            if (queue != nullptr) {
-                queue->blocking_put(nullptr);
-            }
+            // put sentinel for consistency, avoid repeated invoking fetch result when have no rowbatch
+            queue->blocking_put(nullptr);
         } else {
             *eos = false;
         }
@@ -61,14 +75,15 @@ Status ResultQueueMgr::fetch_result(const TUniqueId& fragment_instance_id, std::
     return Status::OK();
 }
 
-void ResultQueueMgr::create_queue(const TUniqueId& fragment_instance_id, shared_block_queue_t* queue) {
+void ResultQueueMgr::create_queue(const TUniqueId& fragment_instance_id,
+                                  BlockQueueSharedPtr* queue) {
     std::lock_guard<std::mutex> l(_lock);
     auto iter = _fragment_queue_map.find(fragment_instance_id);
     if (iter != _fragment_queue_map.end()) {
         *queue = iter->second;
     } else {
         // the blocking queue size = 20 (default), in this way, one queue have 20 * 1024 rows at most
-        shared_block_queue_t tmp(new BlockingQueue<std::shared_ptr<arrow::RecordBatch>>(_max_sink_batch_count));
+        BlockQueueSharedPtr tmp(new RecordBatchQueue(config::max_memory_sink_batch_count));
         _fragment_queue_map.insert(std::make_pair(fragment_instance_id, tmp));
         *queue = tmp;
     }
@@ -78,10 +93,25 @@ Status ResultQueueMgr::cancel(const TUniqueId& fragment_instance_id) {
     std::lock_guard<std::mutex> l(_lock);
     auto iter = _fragment_queue_map.find(fragment_instance_id);
     if (iter != _fragment_queue_map.end()) {
+        // first remove RecordBatch from queue
+        // avoid MemoryScratchSink block on send or close operation
+        iter->second->shutdown();
         // remove this queue from map
         _fragment_queue_map.erase(fragment_instance_id);
     }
     return Status::OK();
 }
 
+void ResultQueueMgr::update_queue_status(const TUniqueId& fragment_instance_id,
+                                         const Status& status) {
+    if (status.ok()) {
+        return;
+    }
+    std::lock_guard<std::mutex> l(_lock);
+    auto iter = _fragment_queue_map.find(fragment_instance_id);
+    if (iter != _fragment_queue_map.end()) {
+        iter->second->update_status(status);
+    }
 }
+
+} // namespace doris

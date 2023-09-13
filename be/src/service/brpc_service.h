@@ -18,6 +18,7 @@
 #pragma once
 
 #include <memory>
+
 #include "common/status.h"
 
 namespace brpc {
@@ -34,7 +35,7 @@ public:
     BRpcService(ExecEnv* exec_env);
     ~BRpcService();
 
-    Status start(int port);
+    Status start(int port, int num_threads);
     void join();
 
 private:
@@ -42,4 +43,4 @@ private:
     std::unique_ptr<brpc::Server> _server;
 };
 
-}
+} // namespace doris

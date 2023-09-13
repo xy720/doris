@@ -17,12 +17,14 @@
 
 #include "runtime/message_body_sink.h"
 
-#include <sys/types.h>
-#include <sys/stat.h>
+// IWYU pragma: no_include <bthread/errno.h>
+#include <errno.h> // IWYU pragma: keep
 #include <fcntl.h>
-#include <algorithm>
+#include <glog/logging.h>
+#include <string.h>
+#include <unistd.h>
 
-#include "util/runtime_profile.h"
+#include <ostream>
 
 namespace doris {
 
@@ -33,11 +35,11 @@ MessageBodyFileSink::~MessageBodyFileSink() {
 }
 
 Status MessageBodyFileSink::open() {
-    _fd = ::open(_path.data(), O_RDWR|O_CREAT|O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
+    _fd = ::open(_path.data(), O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
     if (_fd < 0) {
         char errmsg[64];
         LOG(WARNING) << "fail to open file, file=" << _path
-            << ", errmsg=" << strerror_r(errno, errmsg, 64);
+                     << ", errmsg=" << strerror_r(errno, errmsg, 64);
         return Status::InternalError("fail to open file");
     }
     return Status::OK();
@@ -49,8 +51,7 @@ Status MessageBodyFileSink::append(const char* data, size_t size) {
         return Status::OK();
     }
     char errmsg[64];
-    LOG(WARNING) << "fail to write, file=" << _path
-        << ", error=" << strerror_r(errno, errmsg, 64);
+    LOG(WARNING) << "fail to write, file=" << _path << ", error=" << strerror_r(errno, errmsg, 64);
     return Status::InternalError("fail to write file");
 }
 
@@ -59,7 +60,7 @@ Status MessageBodyFileSink::finish() {
         std::stringstream ss;
         char errmsg[64];
         LOG(WARNING) << "fail to write, file=" << _path
-            << ", error=" << strerror_r(errno, errmsg, 64);
+                     << ", error=" << strerror_r(errno, errmsg, 64);
         _fd = -1;
         return Status::InternalError("fail to close file");
     }
@@ -67,8 +68,8 @@ Status MessageBodyFileSink::finish() {
     return Status::OK();
 }
 
-void MessageBodyFileSink::cancel() {
+void MessageBodyFileSink::cancel(const std::string& reason) {
     unlink(_path.data());
 }
 
-}
+} // namespace doris

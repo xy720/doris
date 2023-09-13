@@ -17,43 +17,46 @@
 
 #include "olap/task/engine_alter_tablet_task.h"
 
+#include <fmt/format.h>
+#include <gen_cpp/AgentService_types.h>
+#include <glog/logging.h>
+
+#include <ostream>
+#include <string>
+
+#include "common/config.h"
+#include "common/exception.h"
 #include "olap/schema_change.h"
+#include "runtime/memory/mem_tracker_limiter.h"
+#include "runtime/thread_context.h"
+#include "util/doris_metrics.h"
 
 namespace doris {
 
-using std::to_string;
+EngineAlterTabletTask::EngineAlterTabletTask(const TAlterTabletReqV2& request)
+        : _alter_tablet_req(request) {
+    _mem_tracker = std::make_shared<MemTrackerLimiter>(
+            MemTrackerLimiter::Type::SCHEMA_CHANGE,
+            fmt::format("EngineAlterTabletTask#baseTabletId={}:newTabletId={}",
+                        std::to_string(_alter_tablet_req.base_tablet_id),
+                        std::to_string(_alter_tablet_req.new_tablet_id)),
+            config::memory_limitation_per_thread_for_schema_change_bytes);
+}
 
-EngineAlterTabletTask::EngineAlterTabletTask(const TAlterTabletReqV2& request,
-        int64_t signature, const TTaskType::type task_type, vector<string>* error_msgs,
-        const string& process_name):
-        _alter_tablet_req(request),
-        _signature(signature),
-        _task_type(task_type),
-        _error_msgs(error_msgs),
-        _process_name(process_name) { }
-
-OLAPStatus EngineAlterTabletTask::execute() {
-    DorisMetrics::create_rollup_requests_total.increment(1);
-
-    SchemaChangeHandler handler;
-    OLAPStatus res = handler.process_alter_tablet_v2(_alter_tablet_req);
-
-    if (res != OLAP_SUCCESS) {
-        LOG(WARNING) << "failed to do alter task. res=" << res
-                     << " base_tablet_id=" << _alter_tablet_req.base_tablet_id
-                     << ", base_schema_hash=" << _alter_tablet_req.base_schema_hash
-                     << ", new_tablet_id=" << _alter_tablet_req.new_tablet_id
-                     << ", new_schema_hash=" << _alter_tablet_req.new_schema_hash;
-        DorisMetrics::create_rollup_requests_failed.increment(1);
+Status EngineAlterTabletTask::execute() {
+    SCOPED_ATTACH_TASK(_mem_tracker);
+    DorisMetrics::instance()->create_rollup_requests_total->increment(1);
+    Status res = Status::OK();
+    try {
+        res = SchemaChangeHandler::process_alter_tablet_v2(_alter_tablet_req);
+    } catch (const Exception& e) {
+        res = e.to_status();
+    }
+    if (!res.ok()) {
+        DorisMetrics::instance()->create_rollup_requests_failed->increment(1);
         return res;
     }
-
-    LOG(INFO) << "success to create new alter tablet. res=" << res
-              << " base_tablet_id=" << _alter_tablet_req.base_tablet_id
-              << ", base_schema_hash" << _alter_tablet_req.base_schema_hash
-              << ", new_tablet_id=" << _alter_tablet_req.new_tablet_id
-              << ", new_schema_hash=" << _alter_tablet_req.new_schema_hash;
     return res;
 } // execute
 
-} // doris
+} // namespace doris

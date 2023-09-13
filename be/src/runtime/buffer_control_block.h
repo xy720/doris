@@ -15,22 +15,31 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_RUNTIME_BUFFER_CONTROL_BLOCK_H
-#define DORIS_BE_RUNTIME_BUFFER_CONTROL_BLOCK_H
+#pragma once
 
-#include <list>
+#include <gen_cpp/PaloInternalService_types.h>
+#include <gen_cpp/Types_types.h>
+#include <stdint.h>
+
+#include <atomic>
+#include <condition_variable>
 #include <deque>
-#include <boost/thread/mutex.hpp>
-#include <boost/thread/condition_variable.hpp>
+#include <list>
+#include <memory>
+#include <mutex>
+
 #include "common/status.h"
-#include "gen_cpp/Types_types.h"
 #include "runtime/query_statistics.h"
 
 namespace google {
 namespace protobuf {
 class Closure;
 }
-}
+} // namespace google
+
+namespace arrow {
+class RecordBatch;
+} // namespace arrow
 
 namespace brpc {
 class Controller;
@@ -38,7 +47,6 @@ class Controller;
 
 namespace doris {
 
-class TFetchDataResult;
 class PFetchDataResult;
 
 struct GetResultBatchCtx {
@@ -46,73 +54,112 @@ struct GetResultBatchCtx {
     PFetchDataResult* result = nullptr;
     google::protobuf::Closure* done = nullptr;
 
-    GetResultBatchCtx(brpc::Controller* cntl_,
-                      PFetchDataResult* result_,
+    GetResultBatchCtx(brpc::Controller* cntl_, PFetchDataResult* result_,
                       google::protobuf::Closure* done_)
-        : cntl(cntl_), result(result_), done(done_) {
-    }
+            : cntl(cntl_), result(result_), done(done_) {}
 
     void on_failure(const Status& status);
     void on_close(int64_t packet_seq, QueryStatistics* statistics = nullptr);
-    void on_data(TFetchDataResult* t_result, int64_t packet_seq, bool eos = false);
+    void on_data(const std::unique_ptr<TFetchDataResult>& t_result, int64_t packet_seq,
+                 bool eos = false);
 };
 
-// buffer used for result customer and productor
+// buffer used for result customer and producer
 class BufferControlBlock {
 public:
     BufferControlBlock(const TUniqueId& id, int buffer_size);
-    ~BufferControlBlock();
+    virtual ~BufferControlBlock();
 
     Status init();
-    Status add_batch(TFetchDataResult* result);
-
-    // get result from batch, use timeout?
-    Status get_batch(TFetchDataResult* result);
+    // Only one fragment is written, so can_sink returns true, then the sink must be executed
+    virtual bool can_sink();
+    Status add_batch(std::unique_ptr<TFetchDataResult>& result);
+    Status add_arrow_batch(std::shared_ptr<arrow::RecordBatch>& result);
 
     void get_batch(GetResultBatchCtx* ctx);
+    Status get_arrow_batch(std::shared_ptr<arrow::RecordBatch>* result);
 
     // close buffer block, set _status to exec_status and set _is_close to true;
-    // called because data has been read or error happend.
+    // called because data has been read or error happened.
     Status close(Status exec_status);
     // this is called by RPC, called from coordinator
     Status cancel();
 
-    const TUniqueId& fragment_id() const {
-        return _fragment_id;
-    }
+    [[nodiscard]] const TUniqueId& fragment_id() const { return _fragment_id; }
 
     void set_query_statistics(std::shared_ptr<QueryStatistics> statistics) {
         _query_statistics = statistics;
     }
-private:
-    typedef std::list<TFetchDataResult*> ResultQueue;
+
+    void update_num_written_rows(int64_t num_rows) {
+        // _query_statistics may be null when the result sink init failed
+        // or some other failure.
+        // and the number of written rows is only needed when all things go well.
+        if (_query_statistics != nullptr) {
+            _query_statistics->set_returned_rows(num_rows);
+        }
+    }
+
+    void update_max_peak_memory_bytes() {
+        if (_query_statistics != nullptr) {
+            int64_t max_peak_memory_bytes = _query_statistics->calculate_max_peak_memory_bytes();
+            _query_statistics->set_max_peak_memory_bytes(max_peak_memory_bytes);
+        }
+    }
+
+protected:
+    virtual bool _get_batch_queue_empty() {
+        return _fe_result_batch_queue.empty() && _arrow_flight_batch_queue.empty();
+    }
+    virtual void _update_batch_queue_empty() {}
+
+    using FeResultQueue = std::list<std::unique_ptr<TFetchDataResult>>;
+    using ArrowFlightResultQueue = std::list<std::shared_ptr<arrow::RecordBatch>>;
 
     // result's query id
     TUniqueId _fragment_id;
     bool _is_close;
-    bool _is_cancelled;
+    std::atomic_bool _is_cancelled;
     Status _status;
-    int _buffer_rows;
-    int _buffer_limit;
+    std::atomic_int _buffer_rows;
+    const int _buffer_limit;
     int64_t _packet_num;
 
     // blocking queue for batch
-    ResultQueue _batch_queue;
+    FeResultQueue _fe_result_batch_queue;
+    ArrowFlightResultQueue _arrow_flight_batch_queue;
+
     // protects all subsequent data in this block
-    boost::mutex _lock;
+    std::mutex _lock;
     // signal arrival of new batch or the eos/cancelled condition
-    boost::condition_variable _data_arriaval;
+    std::condition_variable _data_arrival;
     // signal removal of data by stream consumer
-    boost::condition_variable _data_removal;
-   
+    std::condition_variable _data_removal;
+
     std::deque<GetResultBatchCtx*> _waiting_rpc;
 
-    // It is shared with PlanFragmentExecutor and will be called in two different 
-    // threads. But their calls are all at different time, there is no problem of 
-    // multithreaded access.
+    // It is shared with PlanFragmentExecutor and will be called in two different
+    // threads. But their calls are all at different time, there is no problem of
+    // multithreading access.
     std::shared_ptr<QueryStatistics> _query_statistics;
 };
 
-}
+class PipBufferControlBlock : public BufferControlBlock {
+public:
+    PipBufferControlBlock(const TUniqueId& id, int buffer_size)
+            : BufferControlBlock(id, buffer_size) {}
 
-#endif
+    bool can_sink() override {
+        return _get_batch_queue_empty() || _buffer_rows < _buffer_limit || _is_cancelled;
+    }
+
+private:
+    bool _get_batch_queue_empty() override { return _batch_queue_empty; }
+    void _update_batch_queue_empty() override {
+        _batch_queue_empty = _fe_result_batch_queue.empty() && _arrow_flight_batch_queue.empty();
+    }
+
+    std::atomic_bool _batch_queue_empty = false;
+};
+
+} // namespace doris

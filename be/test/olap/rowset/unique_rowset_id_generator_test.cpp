@@ -17,92 +17,119 @@
 
 #include "olap/rowset/unique_rowset_id_generator.h"
 
-#include <gtest/gtest.h>
-#include <iostream>
+#include <gtest/gtest-message.h>
+#include <gtest/gtest-test-part.h>
+
+#include <memory>
+#include <string>
+
+#include "common/status.h"
+#include "gtest/gtest_pred_impl.h"
+#include "testutil/test_util.h"
+#include "util/runtime_profile.h"
+#include "util/threadpool.h"
 
 namespace doris {
-class UniqueRowsetIdGeneratorTest : public testing::Test {
-public:
-    UniqueRowsetIdGeneratorTest() { }
-    virtual ~UniqueRowsetIdGeneratorTest() {
-    }
-};
+class UniqueRowsetIdGeneratorTest : public testing::Test {};
 
 TEST_F(UniqueRowsetIdGeneratorTest, RowsetIdFormatTest) {
-    int64_t max_id = 1;
-    max_id = max_id << 56;
     {
+        int64_t hi = 1; // version
+        hi <<= 56;
         RowsetId rowset_id;
         rowset_id.init(123);
-        ASSERT_TRUE(rowset_id.version == 1);
-        ASSERT_TRUE(rowset_id.hi == (123 + max_id));
-        ASSERT_TRUE(rowset_id.mi == 0);
-        ASSERT_TRUE(rowset_id.lo == 0);
-        ASSERT_STREQ("123", rowset_id.to_string().c_str());
+        EXPECT_EQ(rowset_id.version, 1);
+        EXPECT_EQ(rowset_id.hi, 123 + hi);
+        EXPECT_EQ(rowset_id.mi, 0);
+        EXPECT_EQ(rowset_id.lo, 0);
+        EXPECT_EQ(std::string("123"), rowset_id.to_string());
     }
     {
+        int64_t hi = 1; // version
+        hi <<= 56;
         RowsetId rowset_id;
         rowset_id.init("123");
-        ASSERT_TRUE(rowset_id.version == 1);
-        ASSERT_TRUE(rowset_id.hi == (123 + max_id));
-        ASSERT_TRUE(rowset_id.mi == 0);
-        ASSERT_TRUE(rowset_id.lo == 0);
-        ASSERT_STREQ("123", rowset_id.to_string().c_str());
+        EXPECT_EQ(rowset_id.version, 1);
+        EXPECT_EQ(rowset_id.hi, 123 + hi);
+        EXPECT_EQ(rowset_id.mi, 0);
+        EXPECT_EQ(rowset_id.lo, 0);
+        EXPECT_EQ(std::string("123"), rowset_id.to_string());
     }
-    
+
     {
+        int64_t hi = 2; // version
+        hi <<= 56;
+        const std::string rowset_id_v2("0200000000000003c04f58d989cab2f2efd45faa20449189");
         RowsetId rowset_id;
-        rowset_id.init("0200000000000003c04f58d989cab2f2efd45faa20449189");
-        ASSERT_TRUE(rowset_id.version == 2);
-        ASSERT_TRUE(rowset_id.hi == (3 + max_id));
-        ASSERT_STREQ("0200000000000003c04f58d989cab2f2efd45faa20449189", rowset_id.to_string().c_str());
+        rowset_id.init(rowset_id_v2);
+        EXPECT_EQ(rowset_id.version, 2);
+        EXPECT_EQ(rowset_id.hi, 3 + hi);
+        EXPECT_EQ(std::string(rowset_id_v2), rowset_id.to_string());
     }
 }
-
 
 TEST_F(UniqueRowsetIdGeneratorTest, GenerateIdTest) {
     UniqueId backend_uid = UniqueId::gen_uid();
-    UniqueId backend_uid2 = UniqueId::gen_uid();
-    ASSERT_TRUE(backend_uid != backend_uid2);
     UniqueRowsetIdGenerator id_generator(backend_uid);
-    UniqueRowsetIdGenerator id_generator2(backend_uid2);
+    int64_t hi = 2; // version
+    hi <<= 56;
+
+    RowsetId rowset_id = id_generator.next_id(); // hi == 1
+    EXPECT_EQ(rowset_id.hi, hi + 1);
+    EXPECT_EQ(rowset_id.version, 2);
+    rowset_id = id_generator.next_id(); // hi == 2
+    EXPECT_EQ(rowset_id.hi, hi + 2);
+    EXPECT_EQ(rowset_id.version, 2);
+    EXPECT_EQ(backend_uid.lo, rowset_id.lo);
+    EXPECT_EQ(backend_uid.hi, rowset_id.mi);
+    EXPECT_NE(rowset_id.hi, 0);
+    bool in_use = id_generator.id_in_use(rowset_id);
+    EXPECT_TRUE(in_use);
+    id_generator.release_id(rowset_id);
+    in_use = id_generator.id_in_use(rowset_id);
+    EXPECT_FALSE(in_use);
+
+    int64_t high = rowset_id.hi + 1;
+    rowset_id = id_generator.next_id(); // hi == 3
+    EXPECT_EQ(rowset_id.hi, high);
+    in_use = id_generator.id_in_use(rowset_id);
+    EXPECT_TRUE(in_use);
+
+    std::string rowset_mid_str = rowset_id.to_string().substr(16, 16);
+    std::string backend_mid_str = backend_uid.to_string().substr(0, 16);
+    EXPECT_EQ(rowset_mid_str, backend_mid_str);
+}
+
+TEST_F(UniqueRowsetIdGeneratorTest, GenerateIdBenchmark) {
+    const int kNumThreads = 8;
+    const int kIdPerThread = LOOP_LESS_OR_MORE(1000, 1000000);
+
+    UniqueId backend_uid = UniqueId::gen_uid();
+    UniqueRowsetIdGenerator id_generator(backend_uid);
+    std::unique_ptr<ThreadPool> pool;
+    Status s = ThreadPoolBuilder("GenerateIdBenchmark")
+                       .set_min_threads(kNumThreads)
+                       .set_max_threads(kNumThreads)
+                       .build(&pool);
+    EXPECT_TRUE(s.ok()) << s.to_string();
+
+    int64_t cost_ns = 0;
     {
-        RowsetId rowset_id1 = id_generator.next_id();
-        RowsetId rowset_id2 = id_generator2.next_id();
-        ASSERT_TRUE(rowset_id1.hi != rowset_id2.hi);
+        SCOPED_RAW_TIMER(&cost_ns);
+        for (int i = 0; i < kNumThreads; i++) {
+            EXPECT_TRUE(pool->submit_func([&id_generator, kIdPerThread]() {
+                                for (int i = 0; i < kIdPerThread; ++i) {
+                                    id_generator.next_id();
+                                }
+                            }).ok());
+        }
+        pool->wait();
     }
-    {
-        int64_t max_id = 2;
-        max_id = max_id << 56;
-        RowsetId rowset_id = id_generator.next_id();
-        ASSERT_TRUE(rowset_id.hi == (1 + max_id));
-        ASSERT_TRUE(rowset_id.version == 2);
-        ASSERT_TRUE(backend_uid.lo == rowset_id.lo);
-        ASSERT_TRUE(backend_uid.hi == rowset_id.mi);
-        ASSERT_TRUE(rowset_id.hi != 0);
-        bool in_use = id_generator.id_in_use(rowset_id);
-        ASSERT_TRUE(in_use == true);
-        id_generator.release_id(rowset_id);
-        in_use = id_generator.id_in_use(rowset_id);
-        ASSERT_TRUE(in_use == false);
 
-        int64_t high = rowset_id.hi + 1;
-        rowset_id = id_generator.next_id();
-        ASSERT_TRUE(rowset_id.hi == high);
-        in_use = id_generator.id_in_use(rowset_id);
-        ASSERT_TRUE(in_use == true);
-
-        std::string rowset_mid_str = rowset_id.to_string().substr(16,16);
-        std::string backend_mid_str = backend_uid.to_string().substr(0, 16);
-        ASSERT_STREQ(rowset_mid_str.c_str(), backend_mid_str.c_str());
-    }
+    int64_t hi = 2; // version
+    hi <<= 56;
+    RowsetId last_id = id_generator.next_id();
+    EXPECT_EQ(last_id.hi, hi + kNumThreads * kIdPerThread + 1);
 }
 
-}
-
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    doris::CpuInfo::init();
-    return RUN_ALL_TESTS();
-}
-
+} // namespace doris

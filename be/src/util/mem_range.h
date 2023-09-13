@@ -14,9 +14,11 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/be/src/util/mem-range.h
+// and modified by Doris
 
-#ifndef DORIS_BE_SRC_UTIL_MEM_RANGE_H
-#define DORIS_BE_SRC_UTIL_MEM_RANGE_H
+#pragma once
 
 #include <cstdint>
 
@@ -27,21 +29,19 @@ namespace doris {
 /// Represents a range of memory. This is a convenient alternative to passing around
 /// a separate pointer and length.
 class MemRange {
- public:
-  MemRange(uint8_t* data, int64_t len) : data_(data), len_(len) {
-    DCHECK_GE(len, 0);
-    DCHECK(len == 0 || data != nullptr);
-  }
+public:
+    MemRange(uint8_t* data, int64_t len) : data_(data), len_(len) {
+        DCHECK_GE(len, 0);
+        DCHECK(len == 0 || data != nullptr);
+    }
 
-  uint8_t* data() const { return data_; }
-  int64_t len() const { return len_; }
+    uint8_t* data() const { return data_; }
+    int64_t len() const { return len_; }
 
-  static MemRange null() { return MemRange(nullptr, 0); }
+    static MemRange null() { return MemRange(nullptr, 0); }
 
- private:
-  uint8_t* data_;
-  int64_t len_;
+private:
+    uint8_t* data_;
+    int64_t len_;
 };
-}
-
-#endif
+} // namespace doris

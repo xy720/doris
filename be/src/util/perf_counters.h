@@ -14,15 +14,18 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/be/src/util/perf-counters.h
+// and modified by Doris
 
-#ifndef DORIS_BE_SRC_COMMON_UTIL_PERF_COUNTERS_H
-#define DORIS_BE_SRC_COMMON_UTIL_PERF_COUNTERS_H
+#pragma once
+
+#include <gen_cpp/Metrics_types.h>
+#include <stdint.h>
 
 #include <iostream>
 #include <string>
 #include <vector>
-
-#include "util/debug_util.h"
 
 // This is a utility class that aggregates counters from the kernel.  These counters
 // come from different sources.
@@ -39,6 +42,8 @@
 //  <do your work>
 //  counters.snapshot("After Work");
 //  counters.PrettyPrint(cout);
+//
+// TODO: Expect PerfCounters to be refactored to ProcessState.
 
 namespace doris {
 
@@ -85,15 +90,34 @@ public:
     const std::vector<int64_t>* counters(int snapshot) const;
 
     // Returns readable names for the added counters
-    const std::vector<std::string>* counter_names() const {
-        return &_counter_names;
-    }
+    const std::vector<std::string>* counter_names() const { return &_counter_names; }
 
     // Prints out the names and results for all snapshots to 'out'
     void pretty_print(std::ostream* out) const;
 
     PerfCounters();
     ~PerfCounters();
+
+    // Refactor
+
+    struct ProcStatus {
+        int64_t vm_size = 0;
+        int64_t vm_peak = 0;
+        int64_t vm_rss = 0;
+    };
+
+    static int parse_int(const std::string& state_key);
+    static int64_t parse_int64(const std::string& state_key);
+    static std::string parse_string(const std::string& state_key);
+    // Original data's unit is B or KB.
+    static int64_t parse_bytes(const std::string& state_key);
+
+    // Flush cached process status info from `/proc/self/status`.
+    static void refresh_proc_status();
+    static void get_proc_status(ProcStatus* out);
+    // Return the process actual physical memory in bytes.
+    static inline int64_t get_vm_rss() { return _vm_rss; }
+    static inline std::string get_vm_rss_str() { return _vm_rss_str; }
 
 private:
     // Copy constructor and assignment not allowed
@@ -133,12 +157,13 @@ private:
     std::vector<CounterData> _counters;
     std::vector<std::string> _counter_names;
     std::vector<std::string> _snapshot_names;
-    std::vector<std::vector<int64_t> > _snapshots;
+    std::vector<std::vector<int64_t>> _snapshots;
     // System perf counters can be grouped together.  The OS will update all grouped counters
     // at the same time.  This is useful to better correlate counter values.
     int _group_fd;
+
+    static int64_t _vm_rss;
+    static std::string _vm_rss_str;
 };
 
-}
-
-#endif
+} // namespace doris

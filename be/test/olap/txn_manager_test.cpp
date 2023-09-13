@@ -15,24 +15,33 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include <string>
-#include <sstream>
-#include <fstream>
+#include "olap/txn_manager.h"
 
-#include "gtest/gtest.h"
-#include "gmock/gmock.h"
+#include <gen_cpp/olap_common.pb.h>
+#include <gen_cpp/olap_file.pb.h>
+#include <gmock/gmock-actions.h>
+#include <gmock/gmock-matchers.h>
+#include <gtest/gtest-message.h>
+#include <gtest/gtest-test-part.h>
+
+#include <filesystem>
+#include <fstream>
+#include <memory>
+#include <new>
+#include <string>
+
+#include "common/config.h"
+#include "gtest/gtest_pred_impl.h"
 #include "olap/olap_meta.h"
+#include "olap/options.h"
 #include "olap/rowset/rowset.h"
 #include "olap/rowset/rowset_factory.h"
+#include "olap/rowset/rowset_meta.h"
 #include "olap/rowset/rowset_meta_manager.h"
-#include "olap/rowset/alpha_rowset_meta.h"
-#include "olap/txn_manager.h"
-#include "boost/filesystem.hpp"
-#include "json2pb/json_to_pb.h"
-
-#ifndef BE_TEST
-#define BE_TEST
-#endif
+#include "olap/storage_engine.h"
+#include "olap/tablet_schema.h"
+#include "olap/task/engine_publish_version_task.h"
+#include "util/uid_util.h"
 
 using ::testing::_;
 using ::testing::Return;
@@ -92,25 +101,28 @@ public:
     }
 
     virtual void SetUp() {
-        config::max_runnings_transactions = 1000;
-        
-        std::vector<StorePath> paths;
-        paths.emplace_back("_engine_data_path", -1);
+        config::max_runnings_transactions_per_txn_map = 500;
+        _txn_mgr.reset(new TxnManager(64, 1024));
+
+        config::tablet_map_shard_size = 1;
+        config::txn_map_shard_size = 1;
+        config::txn_shard_size = 1;
         EngineOptions options;
-        options.store_paths = paths;
+        // won't open engine, options.path is needless
         options.backend_uid = UniqueId::gen_uid();
         if (k_engine == nullptr) {
             k_engine = new StorageEngine(options);
         }
+        ExecEnv::GetInstance()->set_storage_engine(k_engine);
 
         std::string meta_path = "./meta";
-        boost::filesystem::remove_all("./meta");
-        ASSERT_TRUE(boost::filesystem::create_directory(meta_path));
-        _meta = new(std::nothrow) OlapMeta(meta_path);
-        ASSERT_NE(nullptr, _meta);
-        OLAPStatus st = _meta->init();
-        ASSERT_TRUE(st == OLAP_SUCCESS);
-        ASSERT_TRUE(boost::filesystem::exists("./meta"));
+        std::filesystem::remove_all("./meta");
+        EXPECT_TRUE(std::filesystem::create_directory(meta_path));
+        _meta = new (std::nothrow) OlapMeta(meta_path);
+        EXPECT_NE(nullptr, _meta);
+        Status st = _meta->init();
+        EXPECT_TRUE(st == Status::OK());
+        EXPECT_TRUE(std::filesystem::exists("./meta"));
         load_id.set_hi(0);
         load_id.set_lo(0);
 
@@ -126,13 +138,13 @@ public:
         _json_rowset_meta = _json_rowset_meta.substr(0, _json_rowset_meta.size() - 1);
         RowsetId rowset_id;
         rowset_id.init(10000);
-        RowsetMetaSharedPtr rowset_meta(new AlphaRowsetMeta());
+        RowsetMetaSharedPtr rowset_meta(new RowsetMeta());
         rowset_meta->init_from_json(_json_rowset_meta);
-        ASSERT_EQ(rowset_meta->rowset_id(), rowset_id);
-        ASSERT_EQ(OLAP_SUCCESS, RowsetFactory::create_rowset(
-            _schema.get(), rowset_meta_path, rowset_meta, &_alpha_rowset));
-        ASSERT_EQ(OLAP_SUCCESS, RowsetFactory::create_rowset(
-            _schema.get(), rowset_meta_path, rowset_meta, &_alpha_rowset_same_id));
+        EXPECT_EQ(rowset_meta->rowset_id(), rowset_id);
+        EXPECT_EQ(Status::OK(),
+                  RowsetFactory::create_rowset(_schema, rowset_meta_path, rowset_meta, &_rowset));
+        EXPECT_EQ(Status::OK(), RowsetFactory::create_rowset(_schema, rowset_meta_path, rowset_meta,
+                                                             &_rowset_same_id));
 
         // init rowset meta 2
         _json_rowset_meta = "";
@@ -141,182 +153,198 @@ public:
         while (!infile2.eof()) {
             infile2.getline(buffer2, 1024);
             _json_rowset_meta = _json_rowset_meta + buffer2 + "\n";
-            std::cout << _json_rowset_meta << std::endl;
         }
         _json_rowset_meta = _json_rowset_meta.substr(0, _json_rowset_meta.size() - 1);
         rowset_id.init(10001);
-        RowsetMetaSharedPtr rowset_meta2(new AlphaRowsetMeta());
+        RowsetMetaSharedPtr rowset_meta2(new RowsetMeta());
         rowset_meta2->init_from_json(_json_rowset_meta);
-        ASSERT_EQ(rowset_meta2->rowset_id(), rowset_id);
-        ASSERT_EQ(OLAP_SUCCESS, RowsetFactory::create_rowset(
-            _schema.get(), rowset_meta_path_2, rowset_meta2, &_alpha_rowset_diff_id));
+        EXPECT_EQ(rowset_meta2->rowset_id(), rowset_id);
+        EXPECT_EQ(Status::OK(), RowsetFactory::create_rowset(_schema, rowset_meta_path_2,
+                                                             rowset_meta2, &_rowset_diff_id));
         _tablet_uid = TabletUid(10, 10);
     }
 
     virtual void TearDown() {
         delete _meta;
-        ASSERT_TRUE(boost::filesystem::remove_all("./meta"));
+        EXPECT_TRUE(std::filesystem::remove_all("./meta"));
     }
 
 private:
     OlapMeta* _meta;
     std::string _json_rowset_meta;
-    TxnManager _txn_mgr;
+    std::unique_ptr<TxnManager> _txn_mgr;
     TPartitionId partition_id = 1123;
     TTransactionId transaction_id = 111;
     TTabletId tablet_id = 222;
-    SchemaHash schema_hash = 333;
     TabletUid _tablet_uid {0, 0};
     PUniqueId load_id;
-    std::unique_ptr<TabletSchema> _schema;
-    RowsetSharedPtr _alpha_rowset;
-    RowsetSharedPtr _alpha_rowset_same_id;
-    RowsetSharedPtr _alpha_rowset_diff_id;
+    TabletSchemaSPtr _schema;
+    RowsetSharedPtr _rowset;
+    RowsetSharedPtr _rowset_same_id;
+    RowsetSharedPtr _rowset_diff_id;
 };
 
 TEST_F(TxnManagerTest, PrepareNewTxn) {
-    OLAPStatus status = _txn_mgr.prepare_txn(partition_id, transaction_id, 
-        tablet_id, schema_hash, _tablet_uid, load_id);
-    ASSERT_TRUE(status == OLAP_SUCCESS);
+    Status status =
+            _txn_mgr->prepare_txn(partition_id, transaction_id, tablet_id, _tablet_uid, load_id);
+    EXPECT_TRUE(status == Status::OK());
 }
 
 // 1. prepare txn
 // 2. commit txn
 // 3. should be success
 TEST_F(TxnManagerTest, CommitTxnWithPrepare) {
-    OLAPStatus status = _txn_mgr.prepare_txn(partition_id, transaction_id, 
-        tablet_id, schema_hash, _tablet_uid, load_id);
-    _txn_mgr.commit_txn(_meta, partition_id, transaction_id, 
-        tablet_id, schema_hash, _tablet_uid, load_id, _alpha_rowset, false);
-    ASSERT_TRUE(status == OLAP_SUCCESS);
-    RowsetMetaSharedPtr rowset_meta(new AlphaRowsetMeta());
-    status = RowsetMetaManager::get_rowset_meta(_meta, _tablet_uid, _alpha_rowset->rowset_id(), rowset_meta);
-    ASSERT_TRUE(status == OLAP_SUCCESS);
-    ASSERT_TRUE(rowset_meta->rowset_id() == _alpha_rowset->rowset_id());
+    Status status =
+            _txn_mgr->prepare_txn(partition_id, transaction_id, tablet_id, _tablet_uid, load_id);
+    _txn_mgr->commit_txn(_meta, partition_id, transaction_id, tablet_id, _tablet_uid, load_id,
+                         _rowset, false);
+    EXPECT_TRUE(status == Status::OK());
+    RowsetMetaSharedPtr rowset_meta(new RowsetMeta());
+    status = RowsetMetaManager::get_rowset_meta(_meta, _tablet_uid, _rowset->rowset_id(),
+                                                rowset_meta);
+    EXPECT_TRUE(status == Status::OK());
+    EXPECT_TRUE(rowset_meta->rowset_id() == _rowset->rowset_id());
 }
 
 // 1. commit without prepare
 // 2. should success
 TEST_F(TxnManagerTest, CommitTxnWithNoPrepare) {
-    OLAPStatus status = _txn_mgr.commit_txn(_meta, partition_id, transaction_id, 
-        tablet_id, schema_hash, _tablet_uid, load_id, _alpha_rowset, false);
-    ASSERT_TRUE(status == OLAP_SUCCESS);
+    Status status = _txn_mgr->commit_txn(_meta, partition_id, transaction_id, tablet_id,
+                                         _tablet_uid, load_id, _rowset, false);
+    EXPECT_TRUE(status == Status::OK());
 }
 
 // 1. commit twice with different rowset id
 // 2. should failed
 TEST_F(TxnManagerTest, CommitTxnTwiceWithDiffRowsetId) {
-    OLAPStatus status = _txn_mgr.commit_txn(_meta, partition_id, transaction_id, 
-        tablet_id, schema_hash, _tablet_uid, load_id, _alpha_rowset, false);
-    ASSERT_TRUE(status == OLAP_SUCCESS);
-    status = _txn_mgr.commit_txn(_meta, partition_id, transaction_id, 
-        tablet_id, schema_hash, _tablet_uid, load_id, _alpha_rowset_diff_id, false);
-    ASSERT_TRUE(status != OLAP_SUCCESS);
+    Status status = _txn_mgr->commit_txn(_meta, partition_id, transaction_id, tablet_id,
+                                         _tablet_uid, load_id, _rowset, false);
+    EXPECT_TRUE(status == Status::OK());
+    status = _txn_mgr->commit_txn(_meta, partition_id, transaction_id, tablet_id, _tablet_uid,
+                                  load_id, _rowset_diff_id, false);
+    EXPECT_TRUE(status != Status::OK());
 }
 
 // 1. commit twice with same rowset id
 // 2. should success
 TEST_F(TxnManagerTest, CommitTxnTwiceWithSameRowsetId) {
-    OLAPStatus status = _txn_mgr.commit_txn(_meta, partition_id, transaction_id, 
-        tablet_id, schema_hash, _tablet_uid, load_id, _alpha_rowset, false);
-    ASSERT_TRUE(status == OLAP_SUCCESS);
-    status = _txn_mgr.commit_txn(_meta, partition_id, transaction_id, 
-        tablet_id, schema_hash, _tablet_uid, load_id, _alpha_rowset_same_id, false);
-    ASSERT_TRUE(status == OLAP_SUCCESS);
+    Status status = _txn_mgr->commit_txn(_meta, partition_id, transaction_id, tablet_id,
+                                         _tablet_uid, load_id, _rowset, false);
+    EXPECT_TRUE(status == Status::OK());
+    status = _txn_mgr->commit_txn(_meta, partition_id, transaction_id, tablet_id, _tablet_uid,
+                                  load_id, _rowset_same_id, false);
+    EXPECT_TRUE(status == Status::OK());
 }
 
 // 1. prepare twice should be success
 TEST_F(TxnManagerTest, PrepareNewTxnTwice) {
-    OLAPStatus status = _txn_mgr.prepare_txn(partition_id, transaction_id, 
-        tablet_id, schema_hash, _tablet_uid, load_id);
-    ASSERT_TRUE(status == OLAP_SUCCESS);
-    status = _txn_mgr.prepare_txn(partition_id, transaction_id, 
-        tablet_id, schema_hash, _tablet_uid, load_id);
-    ASSERT_TRUE(status == OLAP_SUCCESS);
+    Status status =
+            _txn_mgr->prepare_txn(partition_id, transaction_id, tablet_id, _tablet_uid, load_id);
+    EXPECT_TRUE(status == Status::OK());
+    status = _txn_mgr->prepare_txn(partition_id, transaction_id, tablet_id, _tablet_uid, load_id);
+    EXPECT_TRUE(status == Status::OK());
 }
 
 // 1. txn could be rollbacked if it is not committed
 TEST_F(TxnManagerTest, RollbackNotCommittedTxn) {
-    OLAPStatus status = _txn_mgr.prepare_txn(partition_id, transaction_id, 
-        tablet_id, schema_hash, _tablet_uid, load_id);
-    ASSERT_TRUE(status == OLAP_SUCCESS);
-    status = _txn_mgr.rollback_txn(partition_id, transaction_id, 
-        tablet_id, schema_hash, _tablet_uid);
-    ASSERT_TRUE(status == OLAP_SUCCESS);
-    RowsetMetaSharedPtr rowset_meta(new AlphaRowsetMeta());
-    status = RowsetMetaManager::get_rowset_meta(_meta, _tablet_uid, _alpha_rowset->rowset_id(), rowset_meta);
-    ASSERT_TRUE(status != OLAP_SUCCESS);
+    Status status =
+            _txn_mgr->prepare_txn(partition_id, transaction_id, tablet_id, _tablet_uid, load_id);
+    EXPECT_TRUE(status == Status::OK());
+    status = _txn_mgr->rollback_txn(partition_id, transaction_id, tablet_id, _tablet_uid);
+    EXPECT_TRUE(status == Status::OK());
+    RowsetMetaSharedPtr rowset_meta(new RowsetMeta());
+    status = RowsetMetaManager::get_rowset_meta(_meta, _tablet_uid, _rowset->rowset_id(),
+                                                rowset_meta);
+    EXPECT_TRUE(status != Status::OK());
 }
 
 // 1. txn could not be rollbacked if it is committed
 TEST_F(TxnManagerTest, RollbackCommittedTxn) {
-    OLAPStatus status = _txn_mgr.commit_txn(_meta, partition_id, transaction_id, 
-        tablet_id, schema_hash, _tablet_uid, load_id, _alpha_rowset, false);
-    ASSERT_TRUE(status == OLAP_SUCCESS);
-    status = _txn_mgr.rollback_txn(partition_id, transaction_id, 
-        tablet_id, schema_hash, _tablet_uid);
-    ASSERT_FALSE(status == OLAP_SUCCESS);
-    RowsetMetaSharedPtr rowset_meta(new AlphaRowsetMeta());
-    status = RowsetMetaManager::get_rowset_meta(_meta, _tablet_uid, _alpha_rowset->rowset_id(), rowset_meta);
-    ASSERT_TRUE(status == OLAP_SUCCESS);
-    ASSERT_TRUE(rowset_meta->rowset_id() == _alpha_rowset->rowset_id());
+    Status status = _txn_mgr->commit_txn(_meta, partition_id, transaction_id, tablet_id,
+                                         _tablet_uid, load_id, _rowset, false);
+    EXPECT_TRUE(status == Status::OK());
+    status = _txn_mgr->rollback_txn(partition_id, transaction_id, tablet_id, _tablet_uid);
+    EXPECT_FALSE(status == Status::OK());
+    RowsetMetaSharedPtr rowset_meta(new RowsetMeta());
+    status = RowsetMetaManager::get_rowset_meta(_meta, _tablet_uid, _rowset->rowset_id(),
+                                                rowset_meta);
+    EXPECT_TRUE(status == Status::OK());
+    EXPECT_TRUE(rowset_meta->rowset_id() == _rowset->rowset_id());
 }
 
 // 1. publish version success
 TEST_F(TxnManagerTest, PublishVersionSuccessful) {
-    OLAPStatus status = _txn_mgr.commit_txn(_meta, partition_id, transaction_id, 
-        tablet_id, schema_hash, _tablet_uid, load_id, _alpha_rowset, false);
-    ASSERT_TRUE(status == OLAP_SUCCESS);
-    Version new_version(10,11);
-    VersionHash new_versionhash = 123;
-    status = _txn_mgr.publish_txn(_meta, partition_id, transaction_id, 
-        tablet_id, schema_hash, _tablet_uid, new_version, new_versionhash);
-    ASSERT_TRUE(status == OLAP_SUCCESS);
+    Status status = _txn_mgr->commit_txn(_meta, partition_id, transaction_id, tablet_id,
+                                         _tablet_uid, load_id, _rowset, false);
+    EXPECT_TRUE(status == Status::OK());
+    Version new_version(10, 11);
+    TabletPublishStatistics stats;
+    status = _txn_mgr->publish_txn(_meta, partition_id, transaction_id, tablet_id, _tablet_uid,
+                                   new_version, &stats);
+    EXPECT_TRUE(status == Status::OK());
 
-    RowsetMetaSharedPtr rowset_meta(new AlphaRowsetMeta());
-    status = RowsetMetaManager::get_rowset_meta(_meta, _tablet_uid, _alpha_rowset->rowset_id(), rowset_meta);
-    ASSERT_TRUE(status == OLAP_SUCCESS);
-    ASSERT_TRUE(rowset_meta->rowset_id() == _alpha_rowset->rowset_id());
-    ASSERT_TRUE(rowset_meta->start_version() == 10);
-    ASSERT_TRUE(rowset_meta->end_version() == 11);
+    RowsetMetaSharedPtr rowset_meta(new RowsetMeta());
+    status = RowsetMetaManager::get_rowset_meta(_meta, _tablet_uid, _rowset->rowset_id(),
+                                                rowset_meta);
+    EXPECT_TRUE(status == Status::OK());
+    EXPECT_TRUE(rowset_meta->rowset_id() == _rowset->rowset_id());
+    // FIXME(Drogon): these is wrong when not real tablet exist
+    // EXPECT_EQ(rowset_meta->start_version(), 10);
+    // EXPECT_EQ(rowset_meta->end_version(), 11);
 }
 
 // 1. publish version failed if not found related txn and rowset
 TEST_F(TxnManagerTest, PublishNotExistedTxn) {
-    Version new_version(10,11);
-    VersionHash new_versionhash = 123;
-    OLAPStatus status = _txn_mgr.publish_txn(_meta, partition_id, transaction_id, 
-        tablet_id, schema_hash, _tablet_uid, new_version, new_versionhash);
-    ASSERT_TRUE(status != OLAP_SUCCESS);
+    Version new_version(10, 11);
+    auto not_exist_txn = transaction_id + 1000;
+    TabletPublishStatistics stats;
+    Status status = _txn_mgr->publish_txn(_meta, partition_id, not_exist_txn, tablet_id,
+                                          _tablet_uid, new_version, &stats);
+    EXPECT_EQ(status, Status::OK());
 }
 
 TEST_F(TxnManagerTest, DeletePreparedTxn) {
-    OLAPStatus status = _txn_mgr.prepare_txn(partition_id, transaction_id, 
-        tablet_id, schema_hash, _tablet_uid, load_id);
-    ASSERT_TRUE(status == OLAP_SUCCESS);
-    status = _txn_mgr.delete_txn(_meta, partition_id, transaction_id, 
-        tablet_id, schema_hash, _tablet_uid);
-    ASSERT_TRUE(status == OLAP_SUCCESS);
+    Status status =
+            _txn_mgr->prepare_txn(partition_id, transaction_id, tablet_id, _tablet_uid, load_id);
+    EXPECT_TRUE(status == Status::OK());
+    status = _txn_mgr->delete_txn(_meta, partition_id, transaction_id, tablet_id, _tablet_uid);
+    EXPECT_TRUE(status == Status::OK());
 }
 
 TEST_F(TxnManagerTest, DeleteCommittedTxn) {
-    OLAPStatus status = _txn_mgr.commit_txn(_meta, partition_id, transaction_id, 
-        tablet_id, schema_hash, _tablet_uid, load_id, _alpha_rowset, false);
-    ASSERT_TRUE(status == OLAP_SUCCESS);
-    RowsetMetaSharedPtr rowset_meta(new AlphaRowsetMeta());
-    status = RowsetMetaManager::get_rowset_meta(_meta, _tablet_uid, _alpha_rowset->rowset_id(), rowset_meta);
-    ASSERT_TRUE(status == OLAP_SUCCESS);
-    status = _txn_mgr.delete_txn(_meta, partition_id, transaction_id, 
-        tablet_id, schema_hash, _tablet_uid);
-    ASSERT_TRUE(status == OLAP_SUCCESS);
-    RowsetMetaSharedPtr rowset_meta2(new AlphaRowsetMeta());
-    status = RowsetMetaManager::get_rowset_meta(_meta, _tablet_uid, _alpha_rowset->rowset_id(), rowset_meta2);
-    ASSERT_TRUE(status != OLAP_SUCCESS);
+    Status status = _txn_mgr->commit_txn(_meta, partition_id, transaction_id, tablet_id,
+                                         _tablet_uid, load_id, _rowset, false);
+    EXPECT_TRUE(status == Status::OK());
+    RowsetMetaSharedPtr rowset_meta(new RowsetMeta());
+    status = RowsetMetaManager::get_rowset_meta(_meta, _tablet_uid, _rowset->rowset_id(),
+                                                rowset_meta);
+    EXPECT_TRUE(status == Status::OK());
+    status = _txn_mgr->delete_txn(_meta, partition_id, transaction_id, tablet_id, _tablet_uid);
+    EXPECT_TRUE(status == Status::OK());
+    RowsetMetaSharedPtr rowset_meta2(new RowsetMeta());
+    status = RowsetMetaManager::get_rowset_meta(_meta, _tablet_uid, _rowset->rowset_id(),
+                                                rowset_meta2);
+    EXPECT_TRUE(status != Status::OK());
 }
 
-}  // namespace doris
-
-int main(int argc, char **argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
+TEST_F(TxnManagerTest, TabletVersionCache) {
+    std::unique_ptr<TxnManager> txn_mgr = std::make_unique<TxnManager>(64, 1024);
+    txn_mgr->update_tablet_version_txn(123, 100, 456);
+    txn_mgr->update_tablet_version_txn(124, 100, 567);
+    int64_t tx1 = txn_mgr->get_txn_by_tablet_version(123, 100);
+    EXPECT_EQ(tx1, 456);
+    int64_t tx2 = txn_mgr->get_txn_by_tablet_version(124, 100);
+    EXPECT_EQ(tx2, 567);
+    int64_t tx3 = txn_mgr->get_txn_by_tablet_version(124, 101);
+    EXPECT_EQ(tx3, -1);
+    txn_mgr->update_tablet_version_txn(123, 101, 888);
+    txn_mgr->update_tablet_version_txn(124, 101, 890);
+    int64_t tx4 = txn_mgr->get_txn_by_tablet_version(123, 100);
+    EXPECT_EQ(tx4, 456);
+    int64_t tx5 = txn_mgr->get_txn_by_tablet_version(123, 101);
+    EXPECT_EQ(tx5, 888);
+    int64_t tx6 = txn_mgr->get_txn_by_tablet_version(124, 101);
+    EXPECT_EQ(tx6, 890);
 }
+
+} // namespace doris

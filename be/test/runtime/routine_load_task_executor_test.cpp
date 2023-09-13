@@ -17,17 +17,23 @@
 
 #include "runtime/routine_load/routine_load_task_executor.h"
 
-#include "runtime/exec_env.h"
-#include "runtime/stream_load/load_stream_mgr.h"
-#include "runtime/stream_load/stream_load_executor.h"
-#include "util/cpu_info.h"
-#include "util/logging.h"
+#include <gen_cpp/Types_types.h>
+#include <gtest/gtest-message.h>
+#include <gtest/gtest-test-part.h>
+#include <librdkafka/rdkafkacpp.h>
+#include <unistd.h>
 
-#include <gtest/gtest.h>
+#include <map>
 
+#include "common/config.h"
+#include "common/status.h"
 #include "gen_cpp/BackendService_types.h"
 #include "gen_cpp/FrontendService_types.h"
 #include "gen_cpp/HeartbeatService_types.h"
+#include "gtest/gtest_pred_impl.h"
+#include "runtime/exec_env.h"
+#include "runtime/stream_load/new_load_stream_mgr.h"
+#include "runtime/stream_load/stream_load_executor.h"
 
 namespace doris {
 
@@ -40,8 +46,8 @@ extern TStreamLoadPutResult k_stream_load_put_result;
 
 class RoutineLoadTaskExecutorTest : public testing::Test {
 public:
-    RoutineLoadTaskExecutorTest() { }
-    virtual ~RoutineLoadTaskExecutorTest() { }
+    RoutineLoadTaskExecutorTest() = default;
+    ~RoutineLoadTaskExecutorTest() override = default;
 
     void SetUp() override {
         k_stream_load_begin_result = TLoadTxnBeginResult();
@@ -49,21 +55,16 @@ public:
         k_stream_load_rollback_result = TLoadTxnRollbackResult();
         k_stream_load_put_result = TStreamLoadPutResult();
 
-        _env._master_info = new TMasterInfo();
-        _env._load_stream_mgr = new LoadStreamMgr();
-        _env._stream_load_executor = new StreamLoadExecutor(&_env);
+        _env.set_master_info(new TMasterInfo());
+        _env.set_new_load_stream_mgr(NewLoadStreamMgr::create_unique());
+        _env.set_stream_load_executor(StreamLoadExecutor::create_unique(&_env));
+
+        config::routine_load_thread_pool_size = 5;
+        config::max_consumer_num_per_group = 3;
     }
 
-    void TearDown() override {
-        delete _env._master_info;
-        _env._master_info = nullptr;
-        delete _env._load_stream_mgr;
-        _env._load_stream_mgr = nullptr;
-        delete _env._stream_load_executor;
-        _env._stream_load_executor = nullptr;
-    }
+    void TearDown() override { delete _env.master_info(); }
 
-private:
     ExecEnv _env;
 };
 
@@ -80,11 +81,11 @@ TEST_F(RoutineLoadTaskExecutorTest, exec_task) {
     task.__set_max_interval_s(5);
     task.__set_max_batch_rows(10);
     task.__set_max_batch_size(2048);
-    
+
     TKafkaLoadInfo k_info;
     k_info.brokers = "127.0.0.1:9092";
     k_info.topic = "test";
-    
+
     std::map<int32_t, int64_t> part_off;
     part_off[0] = 13L;
     k_info.__set_partition_begin_offset(part_off);
@@ -92,44 +93,30 @@ TEST_F(RoutineLoadTaskExecutorTest, exec_task) {
     task.__set_kafka_load_info(k_info);
 
     RoutineLoadTaskExecutor executor(&_env);
-
     // submit task
     Status st;
     st = executor.submit_task(task);
-    ASSERT_TRUE(st.ok());
+    EXPECT_TRUE(st.ok());
 
-    sleep(2);
+    usleep(200);
     k_info.brokers = "127.0.0.1:9092";
     task.__set_kafka_load_info(k_info);
     st = executor.submit_task(task);
-    ASSERT_TRUE(st.ok());
+    EXPECT_TRUE(st.ok());
 
-    sleep(2);
+    usleep(200);
     k_info.brokers = "192.0.0.2:9092";
     task.__set_kafka_load_info(k_info);
     st = executor.submit_task(task);
-    ASSERT_TRUE(st.ok());
+    EXPECT_TRUE(st.ok());
 
-    sleep(2);
+    usleep(200);
     k_info.brokers = "192.0.0.2:9092";
     task.__set_kafka_load_info(k_info);
     st = executor.submit_task(task);
-    ASSERT_TRUE(st.ok());
+    EXPECT_TRUE(st.ok());
 
-    sleep(2);
+    executor.stop();
 }
 
-} // end namespace
-
-int main(int argc, char* argv[]) {
-    std::string conffile = std::string(getenv("DORIS_HOME")) + "/conf/be.conf";
-    if (!doris::config::init(conffile.c_str(), false)) {
-        fprintf(stderr, "error read config file. \n");
-        return -1;
-    }
-    doris::init_glog("be-test");
-    doris::CpuInfo::init();
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}
-
+} // namespace doris

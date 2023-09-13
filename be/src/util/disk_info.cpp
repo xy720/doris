@@ -17,17 +17,26 @@
 
 #include "util/disk_info.h"
 
-#include <iostream>
-#include <fstream>
-#include <sstream>
-#include <unistd.h>
-#include <sys/vfs.h>
-#include <sys/types.h>
+// IWYU pragma: no_include <bthread/errno.h>
+#include <errno.h> // IWYU pragma: keep
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
+#include <sys/types.h>
 
-#include <boost/algorithm/string.hpp>
-#include <boost/algorithm/string/join.hpp>
+#include <algorithm>
+#include <boost/algorithm/string/classification.hpp>
+#include <boost/algorithm/string/detail/classification.hpp>
+#include <boost/algorithm/string/trim.hpp>
+#include <fstream>
+#include <iterator>
+#include <memory>
+#include <utility>
+
+#include "gutil/strings/split.h"
+#include "io/fs/local_file_system.h"
 
 namespace doris {
 
@@ -52,8 +61,7 @@ void DiskInfo::get_device_names() {
         getline(partitions, line);
         boost::trim(line);
 
-        std::vector<std::string> fields;
-        boost::split(fields, line, boost::is_any_of(" "), boost::token_compress_on);
+        std::vector<std::string> fields = strings::Split(line, " ", strings::SkipWhitespace());
 
         if (fields.size() != 4) {
             continue;
@@ -157,12 +165,23 @@ std::string DiskInfo::debug_string() {
 
 Status DiskInfo::get_disk_devices(const std::vector<std::string>& paths,
                                   std::set<std::string>* devices) {
+    std::vector<std::string> real_paths;
+    for (auto& path : paths) {
+        std::string p;
+        Status st = io::global_local_filesystem()->canonicalize(path, &p);
+        if (!st.ok()) {
+            LOG(WARNING) << "skip disk monitoring of path. " << st;
+            continue;
+        }
+        real_paths.emplace_back(std::move(p));
+    }
+
     FILE* fp = fopen("/proc/mounts", "r");
     if (fp == nullptr) {
         std::stringstream ss;
         char buf[64];
         ss << "open /proc/mounts failed, errno:" << errno
-            << ", message:" << strerror_r(errno, buf, 64);
+           << ", message:" << strerror_r(errno, buf, 64);
         LOG(WARNING) << ss.str();
         return Status::InternalError(ss.str());
     }
@@ -170,11 +189,11 @@ Status DiskInfo::get_disk_devices(const std::vector<std::string>& paths,
     Status status;
     char* line_ptr = 0;
     size_t line_buf_size = 0;
-    for (auto& path : paths) {
+    for (auto& path : real_paths) {
         size_t max_mount_size = 0;
         std::string match_dev;
         rewind(fp);
-        while (getline(&line_ptr, &line_buf_size, fp) > 0)  {
+        while (getline(&line_ptr, &line_buf_size, fp) > 0) {
             char dev_path[4096];
             char mount_path[4096];
             int num = sscanf(line_ptr, "%4095s %4095s", dev_path, mount_path);
@@ -182,8 +201,7 @@ Status DiskInfo::get_disk_devices(const std::vector<std::string>& paths,
                 continue;
             }
             size_t mount_size = strlen(mount_path);
-            if (mount_size < max_mount_size ||
-                path.size() < mount_size ||
+            if (mount_size < max_mount_size || path.size() < mount_size ||
                 strncmp(path.c_str(), mount_path, mount_size) != 0) {
                 continue;
             }
@@ -198,7 +216,7 @@ Status DiskInfo::get_disk_devices(const std::vector<std::string>& paths,
             std::stringstream ss;
             char buf[64];
             ss << "open /proc/mounts failed, errno:" << errno
-                << ", message:" << strerror_r(errno, buf, 64);
+               << ", message:" << strerror_r(errno, buf, 64);
             LOG(WARNING) << ss.str();
             status = Status::InternalError(ss.str());
             break;
@@ -214,4 +232,4 @@ Status DiskInfo::get_disk_devices(const std::vector<std::string>& paths,
     return status;
 }
 
-}
+} // namespace doris

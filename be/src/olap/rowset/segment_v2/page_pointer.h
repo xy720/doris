@@ -17,10 +17,13 @@
 
 #pragma once
 
-#include <cstdint>
+#include <gen_cpp/segment_v2.pb.h>
 
-#include "gen_cpp/segment_v2.pb.h"
+#include <cstdint>
+#include <string>
+
 #include "util/coding.h"
+#include "util/faststring.h"
 
 namespace doris {
 namespace segment_v2 {
@@ -29,9 +32,9 @@ struct PagePointer {
     uint64_t offset;
     uint32_t size;
 
-    PagePointer() : offset(0), size(0) { }
-    PagePointer(uint64_t offset_, uint32_t size_) : offset(offset_), size(size_) { }
-    PagePointer(const PagePointerPB& from) : offset(from.offset()), size(from.size()) { }
+    PagePointer() : offset(0), size(0) {}
+    PagePointer(uint64_t offset_, uint32_t size_) : offset(offset_), size(size_) {}
+    PagePointer(const PagePointerPB& from) : offset(from.offset()), size(from.size()) {}
 
     void reset() {
         offset = 0;
@@ -50,14 +53,25 @@ struct PagePointer {
         }
         return decode_varint32_ptr(data, limit, &size);
     }
-    void encode_to(std::string* dst) const {
-        put_varint64_varint32(dst, offset, size);
+
+    bool decode_from(Slice* input) {
+        bool result = get_varint64(input, &offset);
+        if (!result) {
+            return false;
+        }
+        return get_varint32(input, &size);
     }
+
+    void encode_to(faststring* dst) const { put_varint64_varint32(dst, offset, size); }
+
+    void encode_to(std::string* dst) const { put_varint64_varint32(dst, offset, size); }
 
     bool operator==(const PagePointer& other) const {
         return offset == other.offset && size == other.size;
     }
+
+    bool operator!=(const PagePointer& other) const { return !(*this == other); }
 };
 
-}
-}
+} // namespace segment_v2
+} // namespace doris

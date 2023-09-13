@@ -15,58 +15,90 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_SRC_OLAP_ROWSET_ROWSET_WRITER_CONTEXT_H
-#define DORIS_BE_SRC_OLAP_ROWSET_ROWSET_WRITER_CONTEXT_H
+#pragma once
 
-#include "gen_cpp/olap_file.pb.h"
-#include "olap/data_dir.h"
+#include <gen_cpp/olap_file.pb.h>
+
+#include "io/fs/file_system.h"
+#include "olap/olap_define.h"
+#include "olap/tablet.h"
 #include "olap/tablet_schema.h"
 
 namespace doris {
 
 class RowsetWriterContextBuilder;
 using RowsetWriterContextBuilderSharedPtr = std::shared_ptr<RowsetWriterContextBuilder>;
+class DataDir;
+class Tablet;
+class FileWriterCreator;
+class SegmentCollector;
+namespace vectorized::schema_util {
+class LocalSchemaChangeRecorder;
+}
 
 struct RowsetWriterContext {
-    RowsetWriterContext() :
-        tablet_id(0),
-        tablet_schema_hash(0),
-        partition_id(0),
-        rowset_type(ALPHA_ROWSET),
-        rowset_path_prefix(""),
-        tablet_schema(nullptr),
-        rowset_state(PREPARED),
-        version(Version(0, 0)),
-        version_hash(0),
-        txn_id(0),
-        tablet_uid(0, 0) {
+    RowsetWriterContext()
+            : tablet_id(0),
+              tablet_schema_hash(0),
+              index_id(0),
+              partition_id(0),
+              rowset_type(BETA_ROWSET),
+              rowset_state(PREPARED),
+              version(Version(0, 0)),
+              txn_id(0),
+              tablet_uid(0, 0),
+              segments_overlap(OVERLAP_UNKNOWN) {
         load_id.set_hi(0);
         load_id.set_lo(0);
     }
+
     RowsetId rowset_id;
     int64_t tablet_id;
     int64_t tablet_schema_hash;
+    int64_t index_id;
     int64_t partition_id;
     RowsetTypePB rowset_type;
-    std::string rowset_path_prefix;
-    const TabletSchema* tablet_schema;
+    io::FileSystemSPtr fs;
+    std::string rowset_dir;
+    TabletSchemaSPtr tablet_schema;
     // PREPARED/COMMITTED for pending rowset
     // VISIBLE for non-pending rowset
     RowsetStatePB rowset_state;
     // properties for non-pending rowset
     Version version;
-    VersionHash version_hash;
 
     // properties for pending rowset
     int64_t txn_id;
     PUniqueId load_id;
     TabletUid tablet_uid;
+    // indicate whether the data among segments is overlapping.
+    // default is OVERLAP_UNKNOWN.
+    SegmentsOverlapPB segments_overlap;
     // segment file use uint32 to represent row number, therefore the maximum is UINT32_MAX.
     // the default is set to INT32_MAX to avoid overflow issue when casting from uint32_t to int.
     // test cases can change this value to control flush timing
     uint32_t max_rows_per_segment = INT32_MAX;
+    // not owned, point to the data dir of this rowset
+    // for checking disk capacity when write data to disk.
+    // ATTN: not support for RowsetConvertor.
+    // (because it hard to refactor, and RowsetConvertor will be deprecated in future)
+    DataDir* data_dir = nullptr;
+
+    int64_t newest_write_timestamp;
+    bool enable_unique_key_merge_on_write = false;
+    std::set<int32_t> skip_inverted_index;
+    DataWriteType write_type = DataWriteType::TYPE_DEFAULT;
+    std::shared_ptr<Tablet> tablet = nullptr;
+    // for tracing local schema change record
+    std::shared_ptr<vectorized::schema_util::LocalSchemaChangeRecorder> schema_change_recorder =
+            nullptr;
+
+    std::shared_ptr<MowContext> mow_context;
+    std::shared_ptr<FileWriterCreator> file_writer_creator;
+    std::shared_ptr<SegmentCollector> segment_collector;
+
+    // segcompaction for this RowsetWriter, disable it for some transient writers
+    bool enable_segcompaction = true;
 };
 
 } // namespace doris
-
-#endif // DORIS_BE_SRC_OLAP_ROWSET_ROWSET_WRITER_CONTEXT_H

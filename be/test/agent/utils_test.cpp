@@ -15,12 +15,17 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include <algorithm>
-#include "gtest/gtest.h"
-#include "gmock/gmock.h"
 #include "agent/utils.h"
+
+#include <gmock/gmock-actions.h>
+#include <gmock/gmock-matchers.h>
+#include <gtest/gtest-message.h>
+#include <gtest/gtest-test-part.h>
+
+#include <algorithm>
+
+#include "gtest/gtest_pred_impl.h"
 #include "service/backend_options.h"
-#include "util/logging.h"
 
 using ::testing::_;
 using ::testing::Return;
@@ -30,22 +35,14 @@ using std::string;
 namespace doris {
 
 TEST(AgentUtilsTest, Test) {
-    const char* host_name = BackendOptions::get_localhost().c_str();
-    int cnt = std::count(host_name, host_name + 17, '.');
-    EXPECT_EQ(3, cnt);
-}
-
-}  // namespace doris
-
-int main(int argc, char **argv) {
-    std::string conffile = std::string(getenv("DORIS_HOME")) + "/conf/be.conf";
-    if (!doris::config::init(conffile.c_str(), false)) {
-        fprintf(stderr, "error read config file. \n");
-        return -1;
+    std::string host_name = BackendOptions::get_localhost();
+    if (!BackendOptions::is_bind_ipv6()) {
+        int cnt = std::count(host_name.begin(), host_name.end(), '.');
+        EXPECT_EQ(3, cnt);
+    } else {
+        int cnt = std::count(host_name.begin(), host_name.end(), ':');
+        EXPECT_GT(cnt, 0);
     }
-    
-    doris::init_glog("be-test");
-    doris::BackendOptions::init();
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
 }
+
+} // namespace doris

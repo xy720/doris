@@ -15,8 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_UTIL_REST_MONITOR_IFACE_H
-#define DORIS_BE_UTIL_REST_MONITOR_IFACE_H
+#pragma once
 
 #include <sstream>
 
@@ -25,12 +24,10 @@ namespace doris {
 // This is a interface used to monitor internal module running state.
 class RestMonitorIface {
 public:
-    virtual ~RestMonitorIface() { }
+    virtual ~RestMonitorIface() {}
 
     // this is called when client want to know it's content
     virtual void debug(std::stringstream& ss) = 0;
 };
 
-}
-
-#endif
+} // namespace doris

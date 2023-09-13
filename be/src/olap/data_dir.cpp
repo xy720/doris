@@ -17,252 +17,173 @@
 
 #include "olap/data_dir.h"
 
-#include <ctype.h>
-#include <mntent.h>
-#include <mntent.h>
+#include <fmt/core.h>
+#include <fmt/format.h>
+#include <gen_cpp/Types_types.h>
+#include <gen_cpp/olap_file.pb.h>
 #include <stdio.h>
-#include <sys/file.h>
-#include <sys/statfs.h>
-#include <sys/statfs.h>
-#include <utime.h>
 
-#include <fstream>
+#include <atomic>
+// IWYU pragma: no_include <bits/chrono.h>
+#include <chrono> // IWYU pragma: keep
+#include <cstddef>
+#include <filesystem>
+#include <memory>
+#include <new>
+#include <roaring/roaring.hh>
 #include <set>
 #include <sstream>
+#include <string>
+#include <thread>
+#include <utility>
 
-#include <boost/algorithm/string/classification.hpp>
-#include <boost/algorithm/string/predicate.hpp>
-#include <boost/algorithm/string/split.hpp>
-#include <boost/algorithm/string/trim.hpp>
-#include <boost/filesystem.hpp>
-#include <boost/interprocess/sync/file_lock.hpp>
-
-#include "env/env.h"
-#include "olap/file_helper.h"
+#include "common/config.h"
+#include "common/logging.h"
+#include "gutil/strings/substitute.h"
+#include "io/fs/file_writer.h"
+#include "io/fs/local_file_system.h"
+#include "io/fs/path.h"
+#include "io/fs/remote_file_system.h"
+#include "olap/delete_handler.h"
+#include "olap/olap_common.h"
 #include "olap/olap_define.h"
-#include "olap/olap_snapshot_converter.h"
+#include "olap/olap_meta.h"
+#include "olap/rowset/beta_rowset.h"
+#include "olap/rowset/rowset.h"
+#include "olap/rowset/rowset_id_generator.h"
+#include "olap/rowset/rowset_meta.h"
+#include "olap/rowset/rowset_meta_manager.h"
+#include "olap/storage_engine.h"
+#include "olap/storage_policy.h"
+#include "olap/tablet.h"
+#include "olap/tablet_manager.h"
+#include "olap/tablet_meta_manager.h"
+#include "olap/txn_manager.h"
 #include "olap/utils.h" // for check_dir_existed
 #include "service/backend_options.h"
-#include "util/file_utils.h"
+#include "util/doris_metrics.h"
 #include "util/string_util.h"
-#include "olap/tablet_meta_manager.h"
-#include "olap/rowset/rowset_meta_manager.h"
-#include "olap/rowset/alpha_rowset_meta.h"
-#include "olap/rowset/rowset_factory.h"
+#include "util/uid_util.h"
+
+using strings::Substitute;
 
 namespace doris {
+using namespace ErrorCode;
 
-static const char* const kMtabPath = "/etc/mtab";
-static const char* const kTestFilePath = "/.testfile";
+DEFINE_GAUGE_METRIC_PROTOTYPE_2ARG(disks_total_capacity, MetricUnit::BYTES);
+DEFINE_GAUGE_METRIC_PROTOTYPE_2ARG(disks_avail_capacity, MetricUnit::BYTES);
+DEFINE_GAUGE_METRIC_PROTOTYPE_2ARG(disks_local_used_capacity, MetricUnit::BYTES);
+DEFINE_GAUGE_METRIC_PROTOTYPE_2ARG(disks_remote_used_capacity, MetricUnit::BYTES);
+DEFINE_GAUGE_METRIC_PROTOTYPE_2ARG(disks_trash_used_capacity, MetricUnit::BYTES);
+DEFINE_GAUGE_METRIC_PROTOTYPE_2ARG(disks_state, MetricUnit::BYTES);
+DEFINE_GAUGE_METRIC_PROTOTYPE_2ARG(disks_compaction_score, MetricUnit::NOUNIT);
+DEFINE_GAUGE_METRIC_PROTOTYPE_2ARG(disks_compaction_num, MetricUnit::NOUNIT);
+
+static const char* const kTestFilePath = ".testfile";
 
 DataDir::DataDir(const std::string& path, int64_t capacity_bytes,
-        TabletManager* tablet_manager, TxnManager* txn_manager)
+                 TStorageMedium::type storage_medium, TabletManager* tablet_manager,
+                 TxnManager* txn_manager)
         : _path(path),
-        _capacity_bytes(capacity_bytes),
-        _available_bytes(0),
-        _disk_capacity_bytes(0),
-        _is_used(false),
-        _tablet_manager(tablet_manager),
-        _txn_manager(txn_manager),
-        _cluster_id(-1),
-        _to_be_deleted(false),
-        _current_shard(0),
-        _test_file_read_buf(nullptr),
-        _test_file_write_buf(nullptr),
-        _meta(nullptr) {
+          _fs(io::LocalFileSystem::create(path)),
+          _available_bytes(0),
+          _disk_capacity_bytes(0),
+          _trash_used_bytes(0),
+          _storage_medium(storage_medium),
+          _is_used(false),
+          _tablet_manager(tablet_manager),
+          _txn_manager(txn_manager),
+          _cluster_id(-1),
+          _cluster_id_incomplete(false),
+          _to_be_deleted(false),
+          _current_shard(0),
+          _meta(nullptr) {
+    _data_dir_metric_entity = DorisMetrics::instance()->metric_registry()->register_entity(
+            std::string("data_dir.") + path, {{"path", path}});
+    INT_GAUGE_METRIC_REGISTER(_data_dir_metric_entity, disks_total_capacity);
+    INT_GAUGE_METRIC_REGISTER(_data_dir_metric_entity, disks_avail_capacity);
+    INT_GAUGE_METRIC_REGISTER(_data_dir_metric_entity, disks_local_used_capacity);
+    INT_GAUGE_METRIC_REGISTER(_data_dir_metric_entity, disks_remote_used_capacity);
+    INT_GAUGE_METRIC_REGISTER(_data_dir_metric_entity, disks_trash_used_capacity);
+    INT_GAUGE_METRIC_REGISTER(_data_dir_metric_entity, disks_state);
+    INT_GAUGE_METRIC_REGISTER(_data_dir_metric_entity, disks_compaction_score);
+    INT_GAUGE_METRIC_REGISTER(_data_dir_metric_entity, disks_compaction_num);
 }
 
 DataDir::~DataDir() {
-    free(_test_file_read_buf);
-    free(_test_file_write_buf);
+    DorisMetrics::instance()->metric_registry()->deregister_entity(_data_dir_metric_entity);
     delete _id_generator;
     delete _meta;
 }
 
 Status DataDir::init() {
-    _rand_seed = static_cast<uint32_t>(time(NULL));
-    if (posix_memalign((void**)&_test_file_write_buf,
-                       DIRECT_IO_ALIGNMENT,
-                       TEST_FILE_BUF_SIZE) != 0) {
-        LOG(WARNING) << "fail to allocate memory. size=" <<  TEST_FILE_BUF_SIZE;
-        return Status::InternalError("No memory");
-    }
-    if (posix_memalign((void**)&_test_file_read_buf,
-                       DIRECT_IO_ALIGNMENT,
-                       TEST_FILE_BUF_SIZE) != 0) {
-        LOG(WARNING) << "fail to allocate memory. size=" <<  TEST_FILE_BUF_SIZE;
-        return Status::InternalError("No memory");
-    }
-    if (!FileUtils::check_exist(_path)) {
-        LOG(WARNING) << "opendir failed, path=" << _path;
-        return Status::InternalError("opendir failed");
-    }
-    std::string align_tag_path = _path + ALIGN_TAG_PREFIX;
-    if (access(align_tag_path.c_str(), F_OK) == 0) {
-        LOG(WARNING) << "align tag was found, path=" << _path;
-        return Status::InternalError("invalid root path: ");
+    bool exists = false;
+    RETURN_IF_ERROR(io::global_local_filesystem()->exists(_path, &exists));
+    if (!exists) {
+        RETURN_NOT_OK_STATUS_WITH_WARN(Status::IOError("opendir failed, path={}", _path),
+                                       "check file exist failed");
     }
 
-    RETURN_IF_ERROR(update_capacity());
-    RETURN_IF_ERROR(_init_cluster_id());
-    RETURN_IF_ERROR(_init_extension_and_capacity());
-    RETURN_IF_ERROR(_init_file_system());
-    RETURN_IF_ERROR(_init_meta());
+    update_trash_capacity();
+    RETURN_NOT_OK_STATUS_WITH_WARN(update_capacity(), "update_capacity failed");
+    RETURN_NOT_OK_STATUS_WITH_WARN(_init_cluster_id(), "_init_cluster_id failed");
+    RETURN_NOT_OK_STATUS_WITH_WARN(_init_capacity_and_create_shards(),
+                                   "_init_capacity_and_create_shards failed");
+    RETURN_NOT_OK_STATUS_WITH_WARN(_init_meta(), "_init_meta failed");
 
     _is_used = true;
     return Status::OK();
 }
 
+void DataDir::stop_bg_worker() {
+    _stop_bg_worker = true;
+    std::unique_lock<std::mutex> lck(_check_path_mutex);
+    _check_path_cv.notify_one();
+}
+
 Status DataDir::_init_cluster_id() {
-    std::string cluster_id_path = _path + CLUSTER_ID_PREFIX;
-    if (access(cluster_id_path.c_str(), F_OK) != 0) {
-        int fd = open(cluster_id_path.c_str(), O_RDWR | O_CREAT, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
-        if (fd < 0 || close(fd) < 0) {
-            char errmsg[64];
-            LOG(WARNING) << "fail to create file. [path='" << cluster_id_path
-                << "' err='" << strerror_r(errno, errmsg, 64) << "']";
-            return Status::InternalError("invalid store path: create cluster id failed");
-        }
-    }
-
-    // obtain lock of all cluster id paths
-    FILE* fp = NULL;
-    fp = fopen(cluster_id_path.c_str(), "r+b");
-    if (fp == NULL) {
-        LOG(WARNING) << "fail to open cluster id path. path=" << cluster_id_path;
-        return Status::InternalError("invalid store path: open cluster id failed");
-    }
-
-    int lock_res = flock(fp->_fileno, LOCK_EX | LOCK_NB);
-    if (lock_res < 0) {
-        LOG(WARNING) << "fail to lock file descriptor. path=" << cluster_id_path;
-        fclose(fp);
-        fp = NULL;
-        return Status::InternalError("invalid store path: flock cluster id failed");
-    }
-
-    // obtain cluster id of all root paths
-    auto st = _read_cluster_id(cluster_id_path, &_cluster_id);
-    fclose(fp);
-    return st;
-}
-
-Status DataDir::_read_cluster_id(const std::string& path, int32_t* cluster_id) {
-    int32_t tmp_cluster_id = -1;
-
-    std::fstream fs(path.c_str(), std::fstream::in);
-    if (!fs.is_open()) {
-        LOG(WARNING) << "fail to open cluster id path. [path='" << path << "']";
-        return Status::InternalError("open file failed");
-    }
-
-    fs >> tmp_cluster_id;
-    fs.close();
-
-    if (tmp_cluster_id == -1 && (fs.rdstate() & std::fstream::eofbit) != 0) {
-        *cluster_id = -1;
-    } else if (tmp_cluster_id >= 0 && (fs.rdstate() & std::fstream::eofbit) != 0) {
-        *cluster_id = tmp_cluster_id;
-    } else {
-        OLAP_LOG_WARNING("fail to read cluster id from file. "
-                         "[id=%d eofbit=%d failbit=%d badbit=%d]",
-                         tmp_cluster_id,
-                         fs.rdstate() & std::fstream::eofbit,
-                         fs.rdstate() & std::fstream::failbit,
-                         fs.rdstate() & std::fstream::badbit);
-        return Status::InternalError("cluster id file corrupt");
+    auto cluster_id_path = fmt::format("{}/{}", _path, CLUSTER_ID_PREFIX);
+    RETURN_IF_ERROR(read_cluster_id(cluster_id_path, &_cluster_id));
+    if (_cluster_id == -1) {
+        _cluster_id_incomplete = true;
     }
     return Status::OK();
 }
 
-Status DataDir::_init_extension_and_capacity() {
-    boost::filesystem::path boost_path = _path;
-    std::string extension = boost::filesystem::canonical(boost_path).extension().string();
-    if (extension != "") {
-        if (boost::iequals(extension, ".ssd")) {
-            _storage_medium = TStorageMedium::SSD;
-        } else if (boost::iequals(extension, ".hdd")) {
-            _storage_medium = TStorageMedium::HDD;
+Status DataDir::read_cluster_id(const std::string& cluster_id_path, int32_t* cluster_id) {
+    bool exists = false;
+    RETURN_IF_ERROR(io::global_local_filesystem()->exists(cluster_id_path, &exists));
+    if (exists) {
+        std::string content;
+        RETURN_IF_ERROR(
+                io::global_local_filesystem()->read_file_to_string(cluster_id_path, &content));
+        if (content.size() > 0) {
+            *cluster_id = std::stoi(content);
         } else {
-            LOG(WARNING) << "store path has wrong extension. path=" << _path;
-            return Status::InternalError("invalid sotre path: invalid extension");
+            *cluster_id = -1;
         }
     } else {
-        _storage_medium = TStorageMedium::HDD;
+        *cluster_id = -1;
     }
-
-    int64_t disk_capacity = boost::filesystem::space(boost_path).capacity;
-    if (_capacity_bytes == -1) {
-        _capacity_bytes = disk_capacity;
-    } else if (_capacity_bytes > disk_capacity) {
-        LOG(WARNING) << "root path capacity should not larger than disk capacity. "
-            << "path=" << _path
-            << ", capacity_bytes=" << _capacity_bytes
-            << ", disk_capacity=" << disk_capacity;
-        return Status::InternalError("invalid store path: invalid capacity");
-    }
-
-    std::string data_path = _path + DATA_PREFIX;
-    if (!FileUtils::check_exist(data_path) && !FileUtils::create_dir(data_path).ok()) {
-        LOG(WARNING) << "failed to create data root path. path=" << data_path;
-        return Status::InternalError("invalid store path: failed to create data directory");
-    }
-
     return Status::OK();
 }
 
-Status DataDir::_init_file_system() {
-    struct stat s;
-    if (stat(_path.c_str(), &s) != 0) {
-        char errmsg[64];
-        LOG(WARNING) << "stat failed, path=" << _path
-            << ", errno=" << errno << ", errmsg=" << strerror_r(errno, errmsg, 64);
-        return Status::InternalError("invalid store path: stat failed");
+Status DataDir::_init_capacity_and_create_shards() {
+    RETURN_IF_ERROR(io::global_local_filesystem()->get_space_info(_path, &_disk_capacity_bytes,
+                                                                  &_available_bytes));
+    auto data_path = fmt::format("{}/{}", _path, DATA_PREFIX);
+    bool exists = false;
+    RETURN_IF_ERROR(io::global_local_filesystem()->exists(data_path, &exists));
+    if (!exists) {
+        RETURN_IF_ERROR(io::global_local_filesystem()->create_directory(data_path));
     }
-
-    dev_t mount_device;
-    if ((s.st_mode & S_IFMT) == S_IFBLK) {
-        mount_device = s.st_rdev;
-    } else {
-        mount_device = s.st_dev;
-    }
-
-    FILE* mount_tablet = nullptr;
-    if ((mount_tablet = setmntent(kMtabPath, "r")) == NULL) {
-        char errmsg[64];
-        LOG(WARNING) << "setmntent failed, path=" << kMtabPath
-            << ", errno=" << errno << ", errmsg=" << strerror_r(errno, errmsg, 64);
-        return Status::InternalError("invalid store path: setmntent failed");
-    }
-
-    bool is_find = false;
-    struct mntent* mount_entry = NULL;
-    while ((mount_entry = getmntent(mount_tablet)) != NULL) {
-        if (strcmp(_path.c_str(), mount_entry->mnt_dir) == 0
-                || strcmp(_path.c_str(), mount_entry->mnt_fsname) == 0) {
-            is_find = true;
-            break;
-        }
-
-        if (stat(mount_entry->mnt_fsname, &s) == 0 && s.st_rdev == mount_device) {
-            is_find = true;
-            break;
-        }
-
-        if (stat(mount_entry->mnt_dir, &s) == 0 && s.st_dev == mount_device) {
-            is_find = true;
-            break;
+    for (int i = 0; i < MAX_SHARD_NUM; ++i) {
+        auto shard_path = fmt::format("{}/{}", data_path, i);
+        RETURN_IF_ERROR(io::global_local_filesystem()->exists(shard_path, &exists));
+        if (!exists) {
+            RETURN_IF_ERROR(io::global_local_filesystem()->create_directory(shard_path));
         }
     }
-
-    endmntent(mount_tablet);
-
-    if (!is_find) {
-        LOG(WARNING) << "fail to find file system, path=" << _path;
-        return Status::InternalError("invalid store path: find file system failed");
-    }
-
-    _file_system = mount_entry->mnt_fsname;
 
     return Status::OK();
 }
@@ -273,212 +194,125 @@ Status DataDir::_init_meta() {
     LOG(INFO) << "path: " << _path << ", hash: " << _path_hash;
 
     // init meta
-    _meta = new(std::nothrow) OlapMeta(_path);
+    _meta = new (std::nothrow) OlapMeta(_path);
     if (_meta == nullptr) {
-        LOG(WARNING) << "new olap meta failed";
-        return Status::InternalError("new olap meta failed");
+        RETURN_NOT_OK_STATUS_WITH_WARN(
+                Status::MemoryAllocFailed("allocate memory for OlapMeta failed"),
+                "new OlapMeta failed");
     }
-    OLAPStatus res = _meta->init();
-    if (res != OLAP_SUCCESS) {
-        LOG(WARNING) << "init meta failed";
-        return Status::InternalError("init meta failed");
+    Status res = _meta->init();
+    if (!res.ok()) {
+        RETURN_NOT_OK_STATUS_WITH_WARN(Status::IOError("open rocksdb failed, path={}", _path),
+                                       "init OlapMeta failed");
     }
     return Status::OK();
 }
 
 Status DataDir::set_cluster_id(int32_t cluster_id) {
-    if (_cluster_id != -1) {
-        if (_cluster_id == cluster_id) {
-            return Status::OK();
-        }
+    if (_cluster_id != -1 && _cluster_id != cluster_id) {
         LOG(ERROR) << "going to set cluster id to already assigned store, cluster_id="
-            << _cluster_id << ", new_cluster_id=" << cluster_id;
+                   << _cluster_id << ", new_cluster_id=" << cluster_id;
         return Status::InternalError("going to set cluster id to already assigned store");
     }
-    return _write_cluster_id_to_path(_cluster_id_path(), cluster_id);
+    if (!_cluster_id_incomplete) {
+        return Status::OK();
+    }
+    auto cluster_id_path = fmt::format("{}/{}", _path, CLUSTER_ID_PREFIX);
+    return _write_cluster_id_to_path(cluster_id_path, cluster_id);
 }
 
 Status DataDir::_write_cluster_id_to_path(const std::string& path, int32_t cluster_id) {
-    std::fstream fs(path.c_str(), std::fstream::out);
-    if (!fs.is_open()) {
-        LOG(WARNING) << "fail to open cluster id path. path=" << path;
-        return Status::InternalError("IO Error");
+    std::stringstream cluster_id_ss;
+    cluster_id_ss << cluster_id;
+    bool exists = false;
+    RETURN_IF_ERROR(io::global_local_filesystem()->exists(path, &exists));
+    if (!exists) {
+        io::FileWriterPtr file_writer;
+        RETURN_IF_ERROR(io::global_local_filesystem()->create_file(path, &file_writer));
+        RETURN_IF_ERROR(file_writer->append(cluster_id_ss.str()));
+        RETURN_IF_ERROR(file_writer->close());
     }
-    fs << cluster_id;
-    fs.close();
     return Status::OK();
 }
 
 void DataDir::health_check() {
     // check disk
     if (_is_used) {
-        OLAPStatus res = OLAP_SUCCESS;
-        if ((res = _read_and_write_test_file()) != OLAP_SUCCESS) {
-            LOG(WARNING) << "store read/write test file occur IO Error. path=" << _path;
-            if (is_io_error(res)) {
-                _is_used = false;
-            }
+        Status res = _read_and_write_test_file();
+        if (!res) {
+            LOG(WARNING) << "store read/write test file occur IO Error. path=" << _path
+                         << ", err: " << res;
+            _is_used = !res.is<IO_ERROR>();
         }
     }
+    disks_state->set_value(_is_used ? 1 : 0);
 }
 
-OLAPStatus DataDir::_read_and_write_test_file() {
-    std::string test_file = _path + kTestFilePath;
-
-    if (access(test_file.c_str(), F_OK) == 0) {
-        if (remove(test_file.c_str()) != 0) {
-            char errmsg[64];
-            LOG(WARNING) << "fail to delete test file. "
-                << "path=" << test_file
-                << ", errno=" << errno << ", err=" << strerror_r(errno, errmsg, 64);
-            return OLAP_ERR_IO_ERROR;
-        }
-    } else {
-        if (errno != ENOENT) {
-            char errmsg[64];
-            LOG(WARNING) << "fail to access test file. "
-                << "path=" << test_file
-                << ", errno=" << errno << ", err=" << strerror_r(errno, errmsg, 64);
-            return OLAP_ERR_IO_ERROR;
-        }
-    }
-
-    OLAPStatus res = OLAP_SUCCESS;
-    FileHandler file_handler;
-    if ((res = file_handler.open_with_mode(test_file.c_str(),
-                                           O_RDWR | O_CREAT | O_DIRECT,
-                                           S_IRUSR | S_IWUSR)) != OLAP_SUCCESS) {
-        LOG(WARNING) << "fail to create test file. path=" << test_file;
-        return res;
-    }
-
-    for (size_t i = 0; i < TEST_FILE_BUF_SIZE; ++i) {
-        int32_t tmp_value = rand_r(&_rand_seed);
-        _test_file_write_buf[i] = static_cast<char>(tmp_value);
-    }
-
-    if ((res = file_handler.pwrite(_test_file_write_buf, TEST_FILE_BUF_SIZE, SEEK_SET)) != OLAP_SUCCESS) {
-        LOG(WARNING) << "fail to write test file. [file_name=" << test_file << "]";
-        return res;
-    }
-
-    if ((res = file_handler.pread(_test_file_read_buf, TEST_FILE_BUF_SIZE, SEEK_SET)) != OLAP_SUCCESS) {
-        LOG(WARNING) << "fail to read test file. [file_name=" << test_file << "]";
-        return res;
-    }
-
-    if (memcmp(_test_file_write_buf, _test_file_read_buf, TEST_FILE_BUF_SIZE) != 0) {
-        OLAP_LOG_WARNING("the test file write_buf and read_buf not equal.");
-        return OLAP_ERR_TEST_FILE_ERROR;
-    }
-
-    if ((res = file_handler.close()) != OLAP_SUCCESS) {
-        LOG(WARNING) << "fail to close test file. [file_name=" << test_file << "]";
-        return res;
-    }
-
-    if (remove(test_file.c_str()) != 0) {
-        char errmsg[64];
-        VLOG(3) << "fail to delete test file. [err='" << strerror_r(errno, errmsg, 64)
-                << "' path='" << test_file << "']";
-        return OLAP_ERR_IO_ERROR;
-    }
-
-    return res;
+Status DataDir::_read_and_write_test_file() {
+    auto test_file = fmt::format("{}/{}", _path, kTestFilePath);
+    return read_write_test_file(test_file);
 }
 
-OLAPStatus DataDir::get_shard(uint64_t* shard) {
-    std::lock_guard<std::mutex> l(_mutex);
-
-    std::stringstream shard_path_stream;
-    uint32_t next_shard = _current_shard;
-    _current_shard = (_current_shard + 1) % MAX_SHARD_NUM;
-    shard_path_stream << _path << DATA_PREFIX << "/" << next_shard;
-    std::string shard_path = shard_path_stream.str();
-    if (!FileUtils::check_exist(shard_path)) {
-        RETURN_WITH_WARN_IF_ERROR(FileUtils::create_dir(shard_path), OLAP_ERR_CANNOT_CREATE_DIR,
-                                  "fail to create path. path=" + shard_path);
+Status DataDir::get_shard(uint64_t* shard) {
+    uint32_t next_shard = 0;
+    {
+        std::lock_guard<std::mutex> l(_mutex);
+        next_shard = _current_shard;
+        _current_shard = (_current_shard + 1) % MAX_SHARD_NUM;
     }
-
     *shard = next_shard;
-    return OLAP_SUCCESS;
+    return Status::OK();
 }
 
-OLAPStatus DataDir::register_tablet(Tablet* tablet) {
-    std::lock_guard<std::mutex> l(_mutex);
+void DataDir::register_tablet(Tablet* tablet) {
+    TabletInfo tablet_info(tablet->tablet_id(), tablet->tablet_uid());
 
-    TabletInfo tablet_info(tablet->tablet_id(), tablet->schema_hash(), tablet->tablet_uid());
-    _tablet_set.insert(tablet_info);
-    return OLAP_SUCCESS;
+    std::lock_guard<std::mutex> l(_mutex);
+    _tablet_set.emplace(std::move(tablet_info));
 }
 
-OLAPStatus DataDir::deregister_tablet(Tablet* tablet) {
-    std::lock_guard<std::mutex> l(_mutex);
+void DataDir::deregister_tablet(Tablet* tablet) {
+    TabletInfo tablet_info(tablet->tablet_id(), tablet->tablet_uid());
 
-    TabletInfo tablet_info(tablet->tablet_id(), tablet->schema_hash(), tablet->tablet_uid());
+    std::lock_guard<std::mutex> l(_mutex);
     _tablet_set.erase(tablet_info);
-    return OLAP_SUCCESS;
 }
 
 void DataDir::clear_tablets(std::vector<TabletInfo>* tablet_infos) {
-     for (auto& tablet : _tablet_set) {
-        tablet_infos->push_back(tablet);
-    }
+    std::lock_guard<std::mutex> l(_mutex);
+
+    tablet_infos->insert(tablet_infos->end(), _tablet_set.begin(), _tablet_set.end());
     _tablet_set.clear();
 }
 
-std::string DataDir::get_absolute_shard_path(const std::string& shard_string) {
-    return _path + DATA_PREFIX + "/" + shard_string;
+std::string DataDir::get_absolute_shard_path(int64_t shard_id) {
+    return fmt::format("{}/{}/{}", _path, DATA_PREFIX, shard_id);
 }
 
-std::string DataDir::get_absolute_tablet_path(TabletMeta* tablet_meta, bool with_schema_hash) {
-    if (with_schema_hash) {
-        return _path + DATA_PREFIX + "/" + std::to_string(tablet_meta->shard_id())
-            + "/" + std::to_string(tablet_meta->tablet_id()) + "/" + std::to_string(tablet_meta->schema_hash());
-
-    } else {
-        return _path + DATA_PREFIX + "/" + std::to_string(tablet_meta->shard_id())
-            + "/" + std::to_string(tablet_meta->tablet_id());
-    }
-}
-
-std::string DataDir::get_absolute_tablet_path(TabletMetaPB* tablet_meta, bool with_schema_hash) {
-    if (with_schema_hash) {
-        return _path + DATA_PREFIX + "/" + std::to_string(tablet_meta->shard_id())
-            + "/" + std::to_string(tablet_meta->tablet_id())
-            + "/" + std::to_string(tablet_meta->schema_hash());
-
-    } else {
-        return _path + DATA_PREFIX + "/" + std::to_string(tablet_meta->shard_id())
-            + "/" + std::to_string(tablet_meta->tablet_id());
-    }
-}
-
-std::string DataDir::get_absolute_tablet_path(OLAPHeaderMessage& olap_header_msg, bool with_schema_hash) {
-    if (with_schema_hash) {
-        return _path + DATA_PREFIX + "/" + std::to_string(olap_header_msg.shard())
-            + "/" + std::to_string(olap_header_msg.tablet_id()) + "/" + std::to_string(olap_header_msg.schema_hash());
-
-    } else {
-        return _path + DATA_PREFIX + "/" + std::to_string(olap_header_msg.shard())
-            + "/" + std::to_string(olap_header_msg.tablet_id());
-    }
+std::string DataDir::get_absolute_tablet_path(int64_t shard_id, int64_t tablet_id,
+                                              int32_t schema_hash) {
+    return fmt::format("{}/{}/{}", get_absolute_shard_path(shard_id), tablet_id, schema_hash);
 }
 
 void DataDir::find_tablet_in_trash(int64_t tablet_id, std::vector<std::string>* paths) {
     // path: /root_path/trash/time_label/tablet_id/schema_hash
-    std::string trash_path = _path + TRASH_PREFIX;
-    std::vector<std::string> sub_dirs;
-    FileUtils::list_files(Env::Default(), trash_path, &sub_dirs);
+    auto trash_path = fmt::format("{}/{}", _path, TRASH_PREFIX);
+    bool exists = true;
+    std::vector<io::FileInfo> sub_dirs;
+    Status st = io::global_local_filesystem()->list(trash_path, false, &sub_dirs, &exists);
+    if (!st) {
+        return;
+    }
+
     for (auto& sub_dir : sub_dirs) {
         // sub dir is time_label
-        std::string sub_path = trash_path + "/" + sub_dir;
-        if (!FileUtils::is_dir(sub_path)) {
+        if (sub_dir.is_file) {
             continue;
         }
-        std::string tablet_path = sub_path + "/" + std::to_string(tablet_id);
-        bool exist = FileUtils::check_exist(tablet_path);
-        if (exist) {
+        auto sub_path = fmt::format("{}/{}", trash_path, sub_dir.file_name);
+        auto tablet_path = fmt::format("{}/{}", sub_path, tablet_id);
+        st = io::global_local_filesystem()->exists(tablet_path, &exists);
+        if (st && exists) {
             paths->emplace_back(std::move(tablet_path));
         }
     }
@@ -486,225 +320,105 @@ void DataDir::find_tablet_in_trash(int64_t tablet_id, std::vector<std::string>* 
 
 std::string DataDir::get_root_path_from_schema_hash_path_in_trash(
         const std::string& schema_hash_dir_in_trash) {
-    boost::filesystem::path schema_hash_path_in_trash(schema_hash_dir_in_trash);
-    return schema_hash_path_in_trash.parent_path().parent_path().parent_path().parent_path().string();
+    return io::Path(schema_hash_dir_in_trash)
+            .parent_path()
+            .parent_path()
+            .parent_path()
+            .parent_path()
+            .string();
 }
 
-OLAPStatus DataDir::_clean_unfinished_converting_data() {
-    auto clean_unifinished_tablet_meta_func = [this](int64_t tablet_id,
-        int32_t schema_hash, const std::string& value) -> bool {
-        TabletMetaManager::remove(this, tablet_id, schema_hash, HEADER_PREFIX);
-        LOG(INFO) << "successfully clean temp tablet meta for tablet="
-                  << tablet_id << "." << schema_hash
-                  << "from data dir: " << _path;
-        return true;
-    };
-    OLAPStatus clean_unfinished_meta_status = TabletMetaManager::traverse_headers(_meta,
-        clean_unifinished_tablet_meta_func, HEADER_PREFIX);
-    if (clean_unfinished_meta_status != OLAP_SUCCESS) {
-        // If failed to clean meta just skip the error, there will be useless metas in rocksdb column family
-        LOG(WARNING) << "there is failure when clean temp tablet meta from data dir=" << _path;
-    } else {
-        LOG(INFO) << "successfully clean temp tablet meta from data dir=" << _path;
-    }
-    auto clean_unifinished_rowset_meta_func = [this](TabletUid tablet_uid, RowsetId rowset_id, const std::string& value) -> bool {
-        RowsetMetaManager::remove(_meta, tablet_uid, rowset_id);
-        LOG(INFO) << "successfully clean temp rowset meta for rowset_id="
-                  << rowset_id << " from data dir=" << _path;
-        return true;
-    };
-    OLAPStatus clean_unfinished_rowset_meta_status = RowsetMetaManager::traverse_rowset_metas(_meta,
-        clean_unifinished_rowset_meta_func);
-    if (clean_unfinished_rowset_meta_status != OLAP_SUCCESS) {
-        // If failed to clean meta just skip the error, there will be useless metas in rocksdb column family
-        LOG(FATAL) << "fail to clean temp rowset meta from data dir=" << _path;
-    } else {
-        LOG(INFO) << "success to clean temp rowset meta from data dir=" << _path;
-    }
-    return OLAP_SUCCESS;
-}
-
-// convert old tablet and its files to new tablet meta and rowset format
-// if any error occurred during converting, stop it and break.
-OLAPStatus DataDir::_convert_old_tablet() {
-    auto convert_tablet_func = [this](int64_t tablet_id,
-        int32_t schema_hash, const std::string& value) -> bool {
-        OlapSnapshotConverter converter;
-        // convert olap header and files
-        OLAPHeaderMessage olap_header_msg;
-        TabletMetaPB tablet_meta_pb;
-        vector<RowsetMetaPB> pending_rowsets;
-        bool parsed = olap_header_msg.ParseFromString(value);
-        if (!parsed) {
-            LOG(FATAL) << "convert olap header to tablet meta failed when load olap header tablet="
-                       << tablet_id << "." << schema_hash;
-            return false;
-        }
-        string old_data_path_prefix = get_absolute_tablet_path(olap_header_msg, true);
-        OLAPStatus status = converter.to_new_snapshot(olap_header_msg, old_data_path_prefix,
-            old_data_path_prefix, &tablet_meta_pb, &pending_rowsets, true);
-        if (status != OLAP_SUCCESS) {
-            LOG(FATAL) << "convert olap header to tablet meta failed when convert header and files tablet="
-                         << tablet_id << "." << schema_hash;
-            return false;
-        }
-
-        // write pending rowset to olap meta
-        for (auto& rowset_pb : pending_rowsets) {
-            RowsetId rowset_id;
-            rowset_id.init(rowset_pb.rowset_id_v2());
-            status = RowsetMetaManager::save(_meta, rowset_pb.tablet_uid(), rowset_id, rowset_pb);
-            if (status != OLAP_SUCCESS) {
-                LOG(FATAL) << "convert olap header to tablet meta failed when save rowset meta tablet="
-                             << tablet_id << "." << schema_hash;
-                return false;
-            }
-        }
-
-        // write converted tablet meta to olap meta
-        string meta_binary;
-        tablet_meta_pb.SerializeToString(&meta_binary);
-        status = TabletMetaManager::save(this, tablet_meta_pb.tablet_id(), tablet_meta_pb.schema_hash(), meta_binary);
-        if (status != OLAP_SUCCESS) {
-            LOG(FATAL) << "convert olap header to tablet meta failed when save tablet meta tablet="
-                         << tablet_id << "." << schema_hash;
-            return false;
+Status DataDir::_check_incompatible_old_format_tablet() {
+    auto check_incompatible_old_func = [](int64_t tablet_id, int32_t schema_hash,
+                                          const std::string& value) -> bool {
+        // if strict check incompatible old format, then log fatal
+        if (config::storage_strict_check_incompatible_old_format) {
+            LOG(FATAL)
+                    << "There are incompatible old format metas, current version does not support "
+                    << "and it may lead to data missing!!! "
+                    << "tablet_id = " << tablet_id << " schema_hash = " << schema_hash;
         } else {
-            LOG(INFO) << "convert olap header to tablet meta successfully and save tablet meta to meta tablet="
-                      << tablet_id << "." << schema_hash;
+            LOG(WARNING)
+                    << "There are incompatible old format metas, current version does not support "
+                    << "and it may lead to data missing!!! "
+                    << "tablet_id = " << tablet_id << " schema_hash = " << schema_hash;
         }
-        return true;
+        return false;
     };
-    OLAPStatus convert_tablet_status = TabletMetaManager::traverse_headers(_meta,
-        convert_tablet_func, OLD_HEADER_PREFIX);
-    if (convert_tablet_status != OLAP_SUCCESS) {
-        LOG(FATAL) << "there is failure when convert old tablet, data dir:" << _path;
-        return convert_tablet_status;
+
+    // seek old header prefix. when check_incompatible_old_func is called, it has old format in olap_meta
+    Status check_incompatible_old_status = TabletMetaManager::traverse_headers(
+            _meta, check_incompatible_old_func, OLD_HEADER_PREFIX);
+    if (!check_incompatible_old_status) {
+        LOG(WARNING) << "check incompatible old format meta fails, it may lead to data missing!!! "
+                     << _path;
     } else {
-        LOG(INFO) << "successfully convert old tablet, data dir: " << _path;
+        LOG(INFO) << "successfully check incompatible old format meta " << _path;
     }
-    return OLAP_SUCCESS;
-}
-
-OLAPStatus DataDir::remove_old_meta_and_files() {
-    // clean old meta(olap header message)
-    auto clean_old_meta_files_func = [this](int64_t tablet_id,
-        int32_t schema_hash, const std::string& value) -> bool {
-        // convert olap header and files
-        OLAPHeaderMessage olap_header_msg;
-        TabletMetaPB tablet_meta_pb;
-        vector<RowsetMetaPB> pending_rowsets;
-        bool parsed = olap_header_msg.ParseFromString(value);
-        if (!parsed) {
-            LOG(FATAL) << "convert olap header to tablet meta failed when load olap header tablet="
-                       << tablet_id << "." << schema_hash;
-            return true;
-        }
-        OlapSnapshotConverter converter;
-        OLAPStatus status = converter.to_tablet_meta_pb(olap_header_msg, &tablet_meta_pb, &pending_rowsets);
-        if (status != OLAP_SUCCESS) {
-            LOG(FATAL) << "convert olap header to tablet meta failed when convert header and files tablet="
-                       << tablet_id << "." << schema_hash;
-            return true;
-        }
-
-        TabletSchema tablet_schema;
-        tablet_schema.init_from_pb(tablet_meta_pb.schema());
-        string data_path_prefix = get_absolute_tablet_path(&tablet_meta_pb, true);
-
-        // convert visible pdelta file to rowsets and remove old files
-        for (auto& visible_rowset : tablet_meta_pb.rs_metas()) {
-            RowsetMetaSharedPtr rowset_meta(new AlphaRowsetMeta());
-            rowset_meta->init_from_pb(visible_rowset);
-
-            RowsetSharedPtr rowset;
-            auto s = RowsetFactory::create_rowset(&tablet_schema, data_path_prefix, rowset_meta, &rowset);
-            if (s != OLAP_SUCCESS) {
-                LOG(INFO) << "errors while init rowset. tablet_path=" << data_path_prefix;
-                return true;
-            }
-            std::vector<std::string> old_files;
-            if (rowset->remove_old_files(&old_files) != OLAP_SUCCESS) {
-                LOG(INFO) << "errors while remove_old_files. tablet_path=" << data_path_prefix;
-                return true;
-            }
-        }
-
-        // remove incremental dir and pending dir
-        std::string pending_delta_path = data_path_prefix + PENDING_DELTA_PREFIX;
-        if (FileUtils::check_exist(pending_delta_path)) {
-            LOG(INFO) << "remove pending delta path:" << pending_delta_path;
-
-            RETURN_WITH_WARN_IF_ERROR(FileUtils::remove_all(pending_delta_path), true,
-                                      "errors while remove pending delta path. tablet_path=" +
-                                      data_path_prefix);
-        }
-
-        std::string incremental_delta_path = data_path_prefix + INCREMENTAL_DELTA_PREFIX;
-        if (FileUtils::check_exist(incremental_delta_path)) {
-            LOG(INFO) << "remove incremental delta path:" << incremental_delta_path;
-
-            RETURN_WITH_WARN_IF_ERROR(FileUtils::remove_all(incremental_delta_path), true,
-                                      "errors while remove incremental delta path. tablet_path=" +
-                                      data_path_prefix);
-        }
-
-        TabletMetaManager::remove(this, tablet_id, schema_hash, OLD_HEADER_PREFIX);
-        LOG(INFO) << "successfully clean old tablet meta(olap header) for tablet="
-                  << tablet_id << "." << schema_hash
-                  << " tablet_path=" << data_path_prefix;
-
-        return true;
-    };
-    OLAPStatus clean_old_meta_files_status = TabletMetaManager::traverse_headers(_meta,
-        clean_old_meta_files_func, OLD_HEADER_PREFIX);
-    if (clean_old_meta_files_status != OLAP_SUCCESS) {
-        // If failed to clean meta just skip the error, there will be useless metas in rocksdb column family
-        LOG(WARNING) << "there is failure when clean old tablet meta(olap header) from data dir:" << _path;
-    } else {
-        LOG(INFO) << "successfully clean old tablet meta(olap header) from data dir: " << _path;
-    }
-    return OLAP_SUCCESS;
-}
-
-bool DataDir::convert_old_data_success() {
-    return _convert_old_data_success;
-}
-
-OLAPStatus DataDir::set_convert_finished() {
-    OLAPStatus res = _meta->set_tablet_convert_finished();
-    if (res != OLAP_SUCCESS) {
-        LOG(FATAL) << "save convert flag failed after convert old tablet. dir=" << _path;
-        return res;
-    }
-    return OLAP_SUCCESS;
+    return check_incompatible_old_status;
 }
 
 // TODO(ygl): deal with rowsets and tablets when load failed
-OLAPStatus DataDir::load() {
+Status DataDir::load() {
     LOG(INFO) << "start to load tablets from " << _path;
+
     // load rowset meta from meta env and create rowset
     // COMMITTED: add to txn manager
     // VISIBLE: add to tablet
     // if one rowset load failed, then the total data dir will not be loaded
+
+    // necessarily check incompatible old format. when there are old metas, it may load to data missing
+    _check_incompatible_old_format_tablet();
+
     std::vector<RowsetMetaSharedPtr> dir_rowset_metas;
     LOG(INFO) << "begin loading rowset from meta";
-    auto load_rowset_func = [this, &dir_rowset_metas](TabletUid tablet_uid, RowsetId rowset_id,
-        const std::string& meta_str) -> bool {
-
-        RowsetMetaSharedPtr rowset_meta(new AlphaRowsetMeta());
+    auto load_rowset_func = [&dir_rowset_metas, &local_fs = fs(), this](
+                                    TabletUid tablet_uid, RowsetId rowset_id,
+                                    const std::string& meta_str) -> bool {
+        RowsetMetaSharedPtr rowset_meta(new RowsetMeta());
         bool parsed = rowset_meta->init(meta_str);
         if (!parsed) {
             LOG(WARNING) << "parse rowset meta string failed for rowset_id:" << rowset_id;
             // return false will break meta iterator, return true to skip this error
             return true;
         }
+        if (rowset_meta->is_local()) {
+            rowset_meta->set_fs(local_fs);
+        }
+        if (rowset_meta->has_delete_predicate()) {
+            // copy the delete sub pred v1 to check then
+            auto orig_delete_sub_pred = rowset_meta->delete_predicate().sub_predicates();
+            auto* delete_pred = rowset_meta->mutable_delete_pred_pb();
+
+            if ((!delete_pred->sub_predicates().empty() &&
+                 delete_pred->sub_predicates_v2().empty()) ||
+                (!delete_pred->in_predicates().empty() &&
+                 delete_pred->in_predicates()[0].has_column_unique_id())) {
+                // convert pred and write only when delete sub pred v2 is not set or there is in list pred to be set column uid
+                DeleteHandler::convert_to_sub_pred_v2(delete_pred, rowset_meta->tablet_schema());
+                LOG(INFO) << fmt::format(
+                        "convert rowset with old delete pred: rowset_id={}, tablet_id={}",
+                        rowset_id.to_string(), tablet_uid.to_string());
+                CHECK_EQ(orig_delete_sub_pred.size(), delete_pred->sub_predicates().size())
+                        << "inconsistent sub predicate v1 after conversion";
+                for (size_t i = 0; i < orig_delete_sub_pred.size(); ++i) {
+                    CHECK_STREQ(orig_delete_sub_pred.Get(i).c_str(),
+                                delete_pred->sub_predicates().Get(i).c_str())
+                            << "inconsistent sub predicate v1 after conversion";
+                }
+                std::string result;
+                rowset_meta->serialize(&result);
+                std::string key =
+                        ROWSET_PREFIX + tablet_uid.to_string() + "_" + rowset_id.to_string();
+                _meta->put(META_COLUMN_FAMILY_INDEX, key, result);
+            }
+        }
         dir_rowset_metas.push_back(rowset_meta);
         return true;
     };
-    OLAPStatus load_rowset_status = RowsetMetaManager::traverse_rowset_metas(_meta, load_rowset_func);
+    Status load_rowset_status = RowsetMetaManager::traverse_rowset_metas(_meta, load_rowset_func);
 
-    if (load_rowset_status != OLAP_SUCCESS) {
+    if (!load_rowset_status) {
         LOG(WARNING) << "errors when load rowset meta from meta env, skip this data dir:" << _path;
     } else {
         LOG(INFO) << "load rowset from meta finished, data dir: " << _path;
@@ -714,77 +428,138 @@ OLAPStatus DataDir::load() {
     // create tablet from tablet meta and add it to tablet mgr
     LOG(INFO) << "begin loading tablet from meta";
     std::set<int64_t> tablet_ids;
-    auto load_tablet_func = [this, &tablet_ids](int64_t tablet_id,
-        int32_t schema_hash, const std::string& value) -> bool {
-        OLAPStatus status = _tablet_manager->load_tablet_from_meta(
-                                this, tablet_id, schema_hash, value, false, false);
-        if (status != OLAP_SUCCESS) {
+    std::set<int64_t> failed_tablet_ids;
+    auto load_tablet_func = [this, &tablet_ids, &failed_tablet_ids](
+                                    int64_t tablet_id, int32_t schema_hash,
+                                    const std::string& value) -> bool {
+        Status status = _tablet_manager->load_tablet_from_meta(this, tablet_id, schema_hash, value,
+                                                               false, false, false, false);
+        if (!status.ok() && !status.is<TABLE_ALREADY_DELETED_ERROR>() &&
+            !status.is<ENGINE_INSERT_OLD_TABLET>()) {
+            // load_tablet_from_meta() may return Status::Error<TABLE_ALREADY_DELETED_ERROR>()
+            // which means the tablet status is DELETED
+            // This may happen when the tablet was just deleted before the BE restarted,
+            // but it has not been cleared from rocksdb. At this time, restarting the BE
+            // will read the tablet in the DELETE state from rocksdb. These tablets have been
+            // added to the garbage collection queue and will be automatically deleted afterwards.
+            // Therefore, we believe that this situation is not a failure.
+
+            // Besides, load_tablet_from_meta() may return Status::Error<ENGINE_INSERT_OLD_TABLET>()
+            // when BE is restarting and the older tablet have been added to the
+            // garbage collection queue but not deleted yet.
+            // In this case, since the data_dirs are parallel loaded, a later loaded tablet
+            // may be older than previously loaded one, which should not be acknowledged as a
+            // failure.
             LOG(WARNING) << "load tablet from header failed. status:" << status
-                << ", tablet=" << tablet_id << "." << schema_hash;
+                         << ", tablet=" << tablet_id << "." << schema_hash;
+            failed_tablet_ids.insert(tablet_id);
         } else {
             tablet_ids.insert(tablet_id);
         }
         return true;
     };
-    OLAPStatus load_tablet_status = TabletMetaManager::traverse_headers(_meta, load_tablet_func);
-    if (load_tablet_status != OLAP_SUCCESS) {
-        LOG(WARNING) << "there is failure when loading tablet headers, path:" << _path;
+    Status load_tablet_status = TabletMetaManager::traverse_headers(_meta, load_tablet_func);
+    if (failed_tablet_ids.size() != 0) {
+        LOG(WARNING) << "load tablets from header failed"
+                     << ", loaded tablet: " << tablet_ids.size()
+                     << ", error tablet: " << failed_tablet_ids.size() << ", path: " << _path;
+        if (!config::ignore_load_tablet_failure) {
+            LOG(FATAL) << "load tablets encounter failure. stop BE process. path: " << _path;
+        }
+    }
+    if (!load_tablet_status) {
+        LOG(WARNING) << "there is failure when loading tablet headers"
+                     << ", loaded tablet: " << tablet_ids.size()
+                     << ", error tablet: " << failed_tablet_ids.size() << ", path: " << _path;
     } else {
-        LOG(INFO) << "load rowset from meta finished, data dir: " << _path;
+        LOG(INFO) << "load tablet from meta finished"
+                  << ", loaded tablet: " << tablet_ids.size()
+                  << ", error tablet: " << failed_tablet_ids.size() << ", path: " << _path;
     }
 
-    // tranverse rowset
+    for (int64_t tablet_id : tablet_ids) {
+        TabletSharedPtr tablet = _tablet_manager->get_tablet(tablet_id);
+        if (tablet && tablet->set_tablet_schema_into_rowset_meta()) {
+            TabletMetaManager::save(this, tablet->tablet_id(), tablet->schema_hash(),
+                                    tablet->tablet_meta());
+        }
+    }
+
+    auto load_pending_publish_info_func = [](int64_t tablet_id, int64_t publish_version,
+                                             const string& info) {
+        PendingPublishInfoPB pending_publish_info_pb;
+        bool parsed = pending_publish_info_pb.ParseFromString(info);
+        if (!parsed) {
+            LOG(WARNING) << "parse pending publish info failed, tablt_id: " << tablet_id
+                         << " publish_version: " << publish_version;
+        }
+        StorageEngine::instance()->add_async_publish_task(
+                pending_publish_info_pb.partition_id(), tablet_id, publish_version,
+                pending_publish_info_pb.transaction_id(), true);
+        return true;
+    };
+    TabletMetaManager::traverse_pending_publish(_meta, load_pending_publish_info_func);
+
+    // traverse rowset
     // 1. add committed rowset to txn map
     // 2. add visible rowset to tablet
     // ignore any errors when load tablet or rowset, because fe will repair them after report
+    int64_t invalid_rowset_counter = 0;
     for (auto rowset_meta : dir_rowset_metas) {
-        TabletSharedPtr tablet = _tablet_manager->get_tablet(
-                                    rowset_meta->tablet_id(), rowset_meta->tablet_schema_hash());
+        TabletSharedPtr tablet = _tablet_manager->get_tablet(rowset_meta->tablet_id());
         // tablet maybe dropped, but not drop related rowset meta
         if (tablet == nullptr) {
-            LOG(WARNING) << "could not find tablet id: " << rowset_meta->tablet_id()
-                         << ", schema hash: " << rowset_meta->tablet_schema_hash()
-                         << ", for rowset: " << rowset_meta->rowset_id()
-                         << ", skip this rowset";
+            VLOG_NOTICE << "could not find tablet id: " << rowset_meta->tablet_id()
+                        << ", schema hash: " << rowset_meta->tablet_schema_hash()
+                        << ", for rowset: " << rowset_meta->rowset_id() << ", skip this rowset";
+            ++invalid_rowset_counter;
             continue;
         }
+
         RowsetSharedPtr rowset;
-        OLAPStatus create_status = RowsetFactory::create_rowset(&tablet->tablet_schema(),
-                                                              tablet->tablet_path(),
-                                                              rowset_meta, &rowset);
-        if (create_status != OLAP_SUCCESS) {
+        Status create_status = tablet->create_rowset(rowset_meta, &rowset);
+        if (!create_status) {
             LOG(WARNING) << "could not create rowset from rowsetmeta: "
                          << " rowset_id: " << rowset_meta->rowset_id()
                          << " rowset_type: " << rowset_meta->rowset_type()
                          << " rowset_state: " << rowset_meta->rowset_state();
             continue;
         }
-        if (rowset_meta->rowset_state() == RowsetStatePB::COMMITTED
-            && rowset_meta->tablet_uid() == tablet->tablet_uid()) {
-            OLAPStatus commit_txn_status = _txn_manager->commit_txn(
-                _meta,
-                rowset_meta->partition_id(), rowset_meta->txn_id(),
-                rowset_meta->tablet_id(), rowset_meta->tablet_schema_hash(),
-                rowset_meta->tablet_uid(), rowset_meta->load_id(), rowset, true);
-            if (commit_txn_status != OLAP_SUCCESS && commit_txn_status != OLAP_ERR_PUSH_TRANSACTION_ALREADY_EXIST) {
+        if (rowset_meta->rowset_state() == RowsetStatePB::COMMITTED &&
+            rowset_meta->tablet_uid() == tablet->tablet_uid()) {
+            if (!rowset_meta->tablet_schema()) {
+                rowset_meta->set_tablet_schema(tablet->tablet_schema());
+                RowsetMetaManager::save(_meta, rowset_meta->tablet_uid(), rowset_meta->rowset_id(),
+                                        rowset_meta->get_rowset_pb());
+            }
+            Status commit_txn_status = _txn_manager->commit_txn(
+                    _meta, rowset_meta->partition_id(), rowset_meta->txn_id(),
+                    rowset_meta->tablet_id(), rowset_meta->tablet_uid(), rowset_meta->load_id(),
+                    rowset, true);
+            if (!commit_txn_status && !commit_txn_status.is<PUSH_TRANSACTION_ALREADY_EXIST>()) {
                 LOG(WARNING) << "failed to add committed rowset: " << rowset_meta->rowset_id()
                              << " to tablet: " << rowset_meta->tablet_id()
                              << " for txn: " << rowset_meta->txn_id();
             } else {
                 LOG(INFO) << "successfully to add committed rowset: " << rowset_meta->rowset_id()
-                             << " to tablet: " << rowset_meta->tablet_id()
-                             << " schema hash: " << rowset_meta->tablet_schema_hash()
-                             << " for txn: " << rowset_meta->txn_id();
+                          << " to tablet: " << rowset_meta->tablet_id()
+                          << " schema hash: " << rowset_meta->tablet_schema_hash()
+                          << " for txn: " << rowset_meta->txn_id();
             }
-        } else if (rowset_meta->rowset_state() == RowsetStatePB::VISIBLE
-            && rowset_meta->tablet_uid() == tablet->tablet_uid()) {
-            OLAPStatus publish_status = tablet->add_rowset(rowset, false);
-            if (publish_status != OLAP_SUCCESS && publish_status != OLAP_ERR_PUSH_VERSION_ALREADY_EXIST) {
-                LOG(WARNING) << "add visible rowset to tablet failed rowset_id:" << rowset->rowset_id()
-                            << " tablet id: " << rowset_meta->tablet_id()
-                            << " txn id:" << rowset_meta->txn_id()
-                            << " start_version: " << rowset_meta->version().first
-                            << " end_version: " << rowset_meta->version().second;
+        } else if (rowset_meta->rowset_state() == RowsetStatePB::VISIBLE &&
+                   rowset_meta->tablet_uid() == tablet->tablet_uid()) {
+            if (!rowset_meta->tablet_schema()) {
+                rowset_meta->set_tablet_schema(tablet->tablet_schema());
+                RowsetMetaManager::save(_meta, rowset_meta->tablet_uid(), rowset_meta->rowset_id(),
+                                        rowset_meta->get_rowset_pb());
+            }
+            Status publish_status = tablet->add_rowset(rowset);
+            if (!publish_status && !publish_status.is<PUSH_VERSION_ALREADY_EXIST>()) {
+                LOG(WARNING) << "add visible rowset to tablet failed rowset_id:"
+                             << rowset->rowset_id() << " tablet id: " << rowset_meta->tablet_id()
+                             << " txn id:" << rowset_meta->txn_id()
+                             << " start_version: " << rowset_meta->version().first
+                             << " end_version: " << rowset_meta->version().second;
             }
         } else {
             LOG(WARNING) << "find invalid rowset: " << rowset_meta->rowset_id()
@@ -793,104 +568,139 @@ OLAPStatus DataDir::load() {
                          << " schema hash: " << rowset_meta->tablet_schema_hash()
                          << " txn: " << rowset_meta->txn_id()
                          << " current valid tablet uid: " << tablet->tablet_uid();
+            ++invalid_rowset_counter;
         }
     }
-    return OLAP_SUCCESS;
+
+    auto load_delete_bitmap_func = [this](int64_t tablet_id, int64_t version, const string& val) {
+        TabletSharedPtr tablet = _tablet_manager->get_tablet(tablet_id);
+        if (!tablet) {
+            return true;
+        }
+        const std::vector<RowsetMetaSharedPtr>& all_rowsets = tablet->tablet_meta()->all_rs_metas();
+        RowsetIdUnorderedSet rowset_ids;
+        for (auto& rowset_meta : all_rowsets) {
+            rowset_ids.insert(rowset_meta->rowset_id());
+        }
+
+        DeleteBitmapPB delete_bitmap_pb;
+        delete_bitmap_pb.ParseFromString(val);
+        int rst_ids_size = delete_bitmap_pb.rowset_ids_size();
+        int seg_ids_size = delete_bitmap_pb.segment_ids_size();
+        int seg_maps_size = delete_bitmap_pb.segment_delete_bitmaps_size();
+        CHECK(rst_ids_size == seg_ids_size && seg_ids_size == seg_maps_size);
+
+        for (size_t i = 0; i < rst_ids_size; ++i) {
+            RowsetId rst_id;
+            rst_id.init(delete_bitmap_pb.rowset_ids(i));
+            // only process the rowset in _rs_metas
+            if (rowset_ids.find(rst_id) == rowset_ids.end()) {
+                continue;
+            }
+            auto seg_id = delete_bitmap_pb.segment_ids(i);
+            auto iter = tablet->tablet_meta()->delete_bitmap().delete_bitmap.find(
+                    {rst_id, seg_id, version});
+            // This version of delete bitmap already exists
+            if (iter != tablet->tablet_meta()->delete_bitmap().delete_bitmap.end()) {
+                continue;
+            }
+            auto bitmap = delete_bitmap_pb.segment_delete_bitmaps(i).data();
+            tablet->tablet_meta()->delete_bitmap().delete_bitmap[{rst_id, seg_id, version}] =
+                    roaring::Roaring::read(bitmap);
+        }
+        return true;
+    };
+    TabletMetaManager::traverse_delete_bitmap(_meta, load_delete_bitmap_func);
+
+    // At startup, we only count these invalid rowset, but do not actually delete it.
+    // The actual delete operation is in StorageEngine::_clean_unused_rowset_metas,
+    // which is cleaned up uniformly by the background cleanup thread.
+    LOG(INFO) << "finish to load tablets from " << _path
+              << ", total rowset meta: " << dir_rowset_metas.size()
+              << ", invalid rowset num: " << invalid_rowset_counter;
+
+    return Status::OK();
 }
 
 void DataDir::add_pending_ids(const std::string& id) {
-    WriteLock wr_lock(&_pending_path_mutex);
+    std::lock_guard<std::shared_mutex> wr_lock(_pending_path_mutex);
     _pending_path_ids.insert(id);
 }
 
 void DataDir::remove_pending_ids(const std::string& id) {
-    WriteLock wr_lock(&_pending_path_mutex);
+    std::lock_guard<std::shared_mutex> wr_lock(_pending_path_mutex);
     _pending_path_ids.erase(id);
 }
 
-// path consumer
-void DataDir::perform_path_gc() {
-    // init the set of valid path
-    // validate the path in data dir
+// gc unused tablet schemahash dir
+void DataDir::perform_path_gc_by_tablet() {
     std::unique_lock<std::mutex> lck(_check_path_mutex);
-    cv.wait(lck, [this]{return _all_check_paths.size() > 0;});
-    LOG(INFO) << "start to path gc.";
+    _check_path_cv.wait(
+            lck, [this] { return _stop_bg_worker || !_all_tablet_schemahash_paths.empty(); });
+    if (_stop_bg_worker) {
+        return;
+    }
+    LOG(INFO) << "start to path gc by tablet schemahash.";
     int counter = 0;
-    for (auto& path : _all_check_paths) {
+    for (const auto& path : _all_tablet_schemahash_paths) {
         ++counter;
         if (config::path_gc_check_step > 0 && counter % config::path_gc_check_step == 0) {
-            usleep(config::path_gc_check_step_interval_ms * 1000);
+            std::this_thread::sleep_for(
+                    std::chrono::milliseconds(config::path_gc_check_step_interval_ms));
         }
         TTabletId tablet_id = -1;
         TSchemaHash schema_hash = -1;
-        bool is_valid = _tablet_manager->get_tablet_id_and_schema_hash_from_path(path,
-                &tablet_id, &schema_hash);
+        bool is_valid = _tablet_manager->get_tablet_id_and_schema_hash_from_path(path, &tablet_id,
+                                                                                 &schema_hash);
         if (!is_valid) {
             LOG(WARNING) << "unknown path:" << path;
             continue;
         }
-        if (tablet_id > 0 && schema_hash > 0) {
-            // tablet schema hash path or rowset file path
-            // gc thread should get tablet include deleted tablet
-            // or it will delete rowset file before tablet is garbage collected
-            TabletSharedPtr tablet = _tablet_manager->get_tablet(tablet_id, schema_hash, true);
-            if (tablet == nullptr) {
-                std::string tablet_path_id = TABLET_ID_PREFIX + std::to_string(tablet_id);
-                bool exist_in_pending = _check_pending_ids(tablet_path_id);
-                if (!exist_in_pending) {
-                    _process_garbage_path(path);
-                }
-            } else {
-                bool valid = tablet->check_path(path);
-                // TODO(ygl): should change a method to do gc
-                if (!valid) {
-                    RowsetId rowset_id;
-                    bool is_rowset_file = _tablet_manager->get_rowset_id_from_path(path, &rowset_id);
-                    if (is_rowset_file) {
-                        std::string rowset_path_id = ROWSET_ID_PREFIX + rowset_id.to_string();
-                        bool exist_in_pending = _check_pending_ids(rowset_path_id);
-                        if (!exist_in_pending) {
-                            _process_garbage_path(path);
-                        }
-                    }
-                }
-            }
-        } else if (tablet_id > 0 && schema_hash <= 0) {
-            // tablet id path
-            if (!FileUtils::is_dir(path)) {
-                LOG(WARNING) << "unknown path:" << path;
-                continue;
-            }
-            bool exist = _tablet_manager->check_tablet_id_exist(tablet_id);
-            if (!exist) {
-                std::string tablet_path_id = TABLET_ID_PREFIX + std::to_string(tablet_id);
-                bool exist_in_pending = _check_pending_ids(tablet_path_id);
-                if (!exist_in_pending) {
-                    _process_garbage_path(path);
-                }
-            }
+        // should not happen, because already check it is a valid tablet schema hash path in previous step
+        // so that log fatal here
+        if (tablet_id < 1 || schema_hash < 1) {
+            LOG(WARNING) << "invalid tablet id " << tablet_id << " or schema hash " << schema_hash
+                         << ", path=" << path;
+            continue;
         }
+        TabletSharedPtr tablet = _tablet_manager->get_tablet(tablet_id);
+        if (tablet != nullptr) {
+            // could find the tablet, then skip check it
+            continue;
+        }
+        std::string data_dir_path =
+                io::Path(path).parent_path().parent_path().parent_path().parent_path();
+        DataDir* data_dir = StorageEngine::instance()->get_store(data_dir_path);
+        if (data_dir == nullptr) {
+            LOG(WARNING) << "could not find data dir for tablet path " << path;
+            continue;
+        }
+        _tablet_manager->try_delete_unused_tablet_path(data_dir, tablet_id, schema_hash, path);
     }
-    _all_check_paths.clear();
-    LOG(INFO) << "finished one time path gc.";
+    _all_tablet_schemahash_paths.clear();
+    LOG(INFO) << "finished one time path gc by tablet.";
 }
 
 void DataDir::perform_path_gc_by_rowsetid() {
     // init the set of valid path
     // validate the path in data dir
     std::unique_lock<std::mutex> lck(_check_path_mutex);
-    cv.wait(lck, [this]{return _all_check_paths.size() > 0;});
+    _check_path_cv.wait(lck, [this] { return _stop_bg_worker || !_all_check_paths.empty(); });
+    if (_stop_bg_worker) {
+        return;
+    }
     LOG(INFO) << "start to path gc by rowsetid.";
     int counter = 0;
-    for (auto& path : _all_check_paths) {
+    for (const auto& path : _all_check_paths) {
         ++counter;
         if (config::path_gc_check_step > 0 && counter % config::path_gc_check_step == 0) {
-            usleep(config::path_gc_check_step_interval_ms * 1000);
+            std::this_thread::sleep_for(
+                    std::chrono::milliseconds(config::path_gc_check_step_interval_ms));
         }
         TTabletId tablet_id = -1;
         TSchemaHash schema_hash = -1;
-        bool is_valid = _tablet_manager->get_tablet_id_and_schema_hash_from_path(path,
-                &tablet_id, &schema_hash);
+        bool is_valid = _tablet_manager->get_tablet_id_and_schema_hash_from_path(path, &tablet_id,
+                                                                                 &schema_hash);
         if (!is_valid) {
             LOG(WARNING) << "unknown path:" << path;
             continue;
@@ -900,12 +710,12 @@ void DataDir::perform_path_gc_by_rowsetid() {
             // gc thread should get tablet include deleted tablet
             // or it will delete rowset file before tablet is garbage collected
             RowsetId rowset_id;
-            bool is_rowset_file = _tablet_manager->get_rowset_id_from_path(path, &rowset_id);
+            bool is_rowset_file = TabletManager::get_rowset_id_from_path(path, &rowset_id);
             if (is_rowset_file) {
-                TabletSharedPtr tablet = _tablet_manager->get_tablet(tablet_id, schema_hash);
+                TabletSharedPtr tablet = _tablet_manager->get_tablet(tablet_id);
                 if (tablet != nullptr) {
-                    if (!tablet->check_rowset_id(rowset_id)
-                        && !StorageEngine::instance()->check_rowset_id_in_unused_rowsets(rowset_id)) {
+                    if (!tablet->check_rowset_id(rowset_id) &&
+                        !StorageEngine::instance()->check_rowset_id_in_unused_rowsets(rowset_id)) {
                         _process_garbage_path(path);
                     }
                 }
@@ -917,118 +727,294 @@ void DataDir::perform_path_gc_by_rowsetid() {
 }
 
 // path producer
-void DataDir::perform_path_scan() {
-    {
-        std::unique_lock<std::mutex> lck(_check_path_mutex);
-        if (_all_check_paths.size() > 0) {
-            LOG(INFO) << "_all_check_paths is not empty when path scan.";
-            return;
-        }
-        LOG(INFO) << "start to scan data dir path:" << _path;
-        std::set<std::string> shards;
-        std::string data_path = _path + DATA_PREFIX;
+Status DataDir::perform_path_scan() {
+    std::unique_lock<std::mutex> lck(_check_path_mutex);
+    if (!_all_check_paths.empty()) {
+        LOG(INFO) << "_all_check_paths is not empty when path scan.";
+        return Status::OK();
+    }
+    LOG(INFO) << "start to scan data dir path:" << _path;
+    auto data_path = fmt::format("{}/{}", _path, DATA_PREFIX);
+    std::vector<io::FileInfo> shards;
+    bool exists = true;
+    RETURN_IF_ERROR(io::global_local_filesystem()->list(data_path, false, &shards, &exists));
 
-        Status ret = FileUtils::list_dirs_files(data_path, &shards, nullptr, Env::Default());
-        if (!ret.ok()) {
-            LOG(WARNING) << "fail to walk dir. path=[" + data_path 
-                          << "] error[" << ret.to_string() << "]";
-            return ;
+    Status ret;
+    for (const auto& shard : shards) {
+        if (shard.is_file) {
+            continue;
         }
-        
-        for (const auto& shard : shards) {
-            std::string shard_path = data_path + "/" + shard;
-            std::set<std::string> tablet_ids;
-            ret = FileUtils::list_dirs_files(shard_path, &tablet_ids, nullptr, Env::Default());
-            if (!ret.ok()) {
-                LOG(WARNING) << "fail to walk dir. [path=" << shard_path 
-                             << "] error[" << ret.to_string() << "]";
+        auto shard_path = fmt::format("{}/{}", data_path, shard.file_name);
+        std::vector<io::FileInfo> tablet_ids;
+        ret = io::global_local_filesystem()->list(shard_path, false, &tablet_ids, &exists);
+        if (!ret.ok()) {
+            LOG(WARNING) << "fail to walk dir. [path=" << shard_path << "] error["
+                         << ret.to_string() << "]";
+            continue;
+        }
+        for (const auto& tablet_id : tablet_ids) {
+            if (_stop_bg_worker) {
+                break;
+            }
+            if (tablet_id.is_file) {
                 continue;
             }
-            for (const auto& tablet_id : tablet_ids) {
-                std::string tablet_id_path = shard_path + "/" + tablet_id;
-                _all_check_paths.insert(tablet_id_path);
-                std::set<std::string> schema_hashes;
-                ret = FileUtils::list_dirs_files(tablet_id_path, &schema_hashes, nullptr,
-                                           Env::Default());
-                if (!ret.ok()) {
-                    LOG(WARNING) << "fail to walk dir. [path=" << tablet_id_path << "]"
-                                 << " error[" << ret.to_string() << "]";
+
+            auto tablet_id_path = fmt::format("{}/{}", shard_path, tablet_id.file_name);
+            std::vector<io::FileInfo> schema_hashes;
+            ret = io::global_local_filesystem()->list(tablet_id_path, false, &schema_hashes,
+                                                      &exists);
+            if (!ret.ok()) {
+                LOG(WARNING) << "fail to walk dir. [path=" << tablet_id_path << "]"
+                             << " error[" << ret.to_string() << "]";
+                continue;
+            }
+
+            for (const auto& schema_hash : schema_hashes) {
+                if (schema_hash.is_file) {
                     continue;
                 }
-                for (const auto& schema_hash : schema_hashes) {
-                    std::string tablet_schema_hash_path = tablet_id_path + "/" + schema_hash;
-                    _all_check_paths.insert(tablet_schema_hash_path);
-                    std::set<std::string> rowset_files;
-                    
-                    ret = FileUtils::list_dirs_files(tablet_schema_hash_path, nullptr, &rowset_files,
-                                                     Env::Default()); 
-                    if (!ret.ok()) {
-                        LOG(WARNING) << "fail to walk dir. [path=" << tablet_schema_hash_path 
-                                     << "] error[" << ret.to_string() << "]";
+                int32_t interval_ms = config::path_scan_step_interval_ms;
+                if (_stop_bg_worker) {
+                    break;
+                }
+                if (interval_ms > 0) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
+                }
+                auto tablet_schema_hash_path =
+                        fmt::format("{}/{}", tablet_id_path, schema_hash.file_name);
+                _all_tablet_schemahash_paths.insert(tablet_schema_hash_path);
+
+                std::vector<io::FileInfo> rowset_files;
+                ret = io::global_local_filesystem()->list(tablet_schema_hash_path, true,
+                                                          &rowset_files, &exists);
+                if (!ret.ok()) {
+                    LOG(WARNING) << "fail to walk dir. [path=" << tablet_schema_hash_path
+                                 << "] error[" << ret.to_string() << "]";
+                    continue;
+                }
+                for (const auto& rowset_file : rowset_files) {
+                    if (!rowset_file.is_file) {
                         continue;
                     }
-                    for (const auto& rowset_file : rowset_files) {
-                        std::string rowset_file_path = tablet_schema_hash_path + "/" + rowset_file;
-                        _all_check_paths.insert(rowset_file_path);
-                    }
+                    auto rowset_file_path =
+                            fmt::format("{}/{}", tablet_schema_hash_path, rowset_file.file_name);
+                    _all_check_paths.insert(rowset_file_path);
                 }
             }
         }
-        LOG(INFO) << "scan data dir path:" << _path << " finished. path size:" << _all_check_paths.size();
     }
-    cv.notify_one();
+    LOG(INFO) << "scan data dir path: " << _path << " finished. path size: "
+              << _all_check_paths.size() + _all_tablet_schemahash_paths.size();
+    _check_path_cv.notify_one();
+    return Status::OK();
 }
 
+// This function is called for rowset_id path, only local rowset_id_path can be garbage.
+// remote path is uploaded, moved or deleted by tablet_id,
+// if local path has no remote path params, remote path doesn't exist.
 void DataDir::_process_garbage_path(const std::string& path) {
-    if (FileUtils::check_exist(path)) {
-        LOG(INFO) << "collect garbage dir path: " << path;
-        WARN_IF_ERROR(FileUtils::remove_all(path), "remove garbage dir failed. path: " + path);
+    bool exists = false;
+    Status st = io::global_local_filesystem()->exists(path, &exists);
+    if (!st) {
+        return;
+    }
+    if (exists) {
+        LOG(INFO) << "collect garbage path: " << path;
+        WARN_IF_ERROR(io::global_local_filesystem()->delete_directory_or_file(path),
+                      "remove garbage failed");
     }
 }
 
 bool DataDir::_check_pending_ids(const std::string& id) {
-    ReadLock rd_lock(&_pending_path_mutex);
+    std::shared_lock rd_lock(_pending_path_mutex);
     return _pending_path_ids.find(id) != _pending_path_ids.end();
 }
 
-void DataDir::_remove_check_paths_no_lock(const std::set<std::string>& paths) {
-    for (const auto& path : paths) {
-        auto path_iter = _all_check_paths.find(path);
-        if (path_iter != _all_check_paths.end()) {
-            _all_check_paths.erase(path_iter);
-        }
-    }
-}
-
 Status DataDir::update_capacity() {
-    try {
-        boost::filesystem::path path_name(_path);
-        boost::filesystem::space_info path_info = boost::filesystem::space(path_name);
-        _available_bytes = path_info.available;
-        if (_disk_capacity_bytes == 0) {
-            // disk capacity only need to be set once
-            _disk_capacity_bytes = path_info.capacity;
-        }
-    } catch (boost::filesystem::filesystem_error& e) {
-        LOG(WARNING) << "get space info failed. path: " << _path << " erro:" << e.what();
-        return Status::InternalError("get path available capacity failed");
-    }
+    RETURN_IF_ERROR(io::global_local_filesystem()->get_space_info(_path, &_disk_capacity_bytes,
+                                                                  &_available_bytes));
+    disks_total_capacity->set_value(_disk_capacity_bytes);
+    disks_avail_capacity->set_value(_available_bytes);
     LOG(INFO) << "path: " << _path << " total capacity: " << _disk_capacity_bytes
-            << ", available capacity: " << _available_bytes;
+              << ", available capacity: " << _available_bytes;
 
     return Status::OK();
 }
 
-bool DataDir::reach_capacity_limit(int64_t incoming_data_size) {
-    double used_pct = (_disk_capacity_bytes - _available_bytes + incoming_data_size) / (double) _disk_capacity_bytes;
-    int64_t left_bytes = _disk_capacity_bytes - _available_bytes - incoming_data_size;
+void DataDir::update_trash_capacity() {
+    auto trash_path = fmt::format("{}/{}", _path, TRASH_PREFIX);
+    _trash_used_bytes = StorageEngine::instance()->get_file_or_directory_size(trash_path);
+    disks_trash_used_capacity->set_value(_trash_used_bytes);
+    LOG(INFO) << "path: " << _path << " trash capacity: " << _trash_used_bytes;
+}
 
-    if (used_pct >= config::storage_flood_stage_usage_percent / 100.0
-        && left_bytes <= config::storage_flood_stage_left_capacity_bytes) {
-        LOG(WARNING) << "reach capacity limit. used pct: " << used_pct << ", left bytes: " << left_bytes
-                << ", path: " << _path;
+void DataDir::update_local_data_size(int64_t size) {
+    disks_local_used_capacity->set_value(size);
+}
+
+void DataDir::update_remote_data_size(int64_t size) {
+    disks_remote_used_capacity->set_value(size);
+}
+
+size_t DataDir::tablet_size() const {
+    std::lock_guard<std::mutex> l(_mutex);
+    return _tablet_set.size();
+}
+
+bool DataDir::reach_capacity_limit(int64_t incoming_data_size) {
+    double used_pct = (_disk_capacity_bytes - _available_bytes + incoming_data_size) /
+                      (double)_disk_capacity_bytes;
+    int64_t left_bytes = _available_bytes - incoming_data_size;
+    if (used_pct >= config::storage_flood_stage_usage_percent / 100.0 &&
+        left_bytes <= config::storage_flood_stage_left_capacity_bytes) {
+        LOG(WARNING) << "reach capacity limit. used pct: " << used_pct
+                     << ", left bytes: " << left_bytes << ", path: " << _path;
         return true;
     }
     return false;
 }
+
+void DataDir::disks_compaction_score_increment(int64_t delta) {
+    disks_compaction_score->increment(delta);
+}
+
+void DataDir::disks_compaction_num_increment(int64_t delta) {
+    disks_compaction_num->increment(delta);
+}
+
+Status DataDir::move_to_trash(const std::string& tablet_path) {
+    Status res = Status::OK();
+
+    // 1. get timestamp string
+    string time_str;
+    if ((res = gen_timestamp_string(&time_str)) != Status::OK()) {
+        LOG(WARNING) << "failed to generate time_string when move file to trash.err code=" << res;
+        return res;
+    }
+
+    // 2. generate new file path
+    // a global counter to avoid file name duplication.
+    static std::atomic<uint64_t> delete_counter(0);
+    auto trash_root_path =
+            fmt::format("{}/{}/{}.{}", _path, TRASH_PREFIX, time_str, delete_counter++);
+    auto fs_tablet_path = io::Path(tablet_path);
+    auto trash_tablet_path = trash_root_path /
+                             fs_tablet_path.parent_path().filename() /* tablet_id */ /
+                             fs_tablet_path.filename() /* schema_hash */;
+
+    // 3. create target dir, or the rename() function will fail.
+    auto trash_tablet_parent = trash_tablet_path.parent_path();
+    // create dir if not exists
+    bool exists = true;
+    RETURN_IF_ERROR(io::global_local_filesystem()->exists(trash_tablet_parent, &exists));
+    if (!exists) {
+        RETURN_IF_ERROR(io::global_local_filesystem()->create_directory(trash_tablet_parent));
+    }
+
+    // 4. move tablet to trash
+    VLOG_NOTICE << "move file to trash. " << tablet_path << " -> " << trash_tablet_path;
+    if (rename(tablet_path.c_str(), trash_tablet_path.c_str()) < 0) {
+        return Status::Error<OS_ERROR>("move file to trash failed. file={}, target={}, err={}",
+                                       tablet_path, trash_tablet_path.native(), Errno::str());
+    }
+
+    // 5. check parent dir of source file, delete it when empty
+    std::string source_parent_dir = fs_tablet_path.parent_path(); // tablet_id level
+    std::vector<io::FileInfo> sub_files;
+    RETURN_IF_ERROR(
+            io::global_local_filesystem()->list(source_parent_dir, false, &sub_files, &exists));
+    if (sub_files.empty()) {
+        LOG(INFO) << "remove empty dir " << source_parent_dir;
+        // no need to exam return status
+        io::global_local_filesystem()->delete_directory(source_parent_dir);
+    }
+
+    return Status::OK();
+}
+
+void DataDir::perform_remote_rowset_gc() {
+    std::vector<std::pair<std::string, std::string>> gc_kvs;
+    auto traverse_remote_rowset_func = [&gc_kvs](const std::string& key,
+                                                 const std::string& value) -> bool {
+        gc_kvs.emplace_back(key, value);
+        return true;
+    };
+    _meta->iterate(META_COLUMN_FAMILY_INDEX, REMOTE_ROWSET_GC_PREFIX, traverse_remote_rowset_func);
+    std::vector<std::string> deleted_keys;
+    for (auto& [key, val] : gc_kvs) {
+        auto rowset_id = key.substr(REMOTE_ROWSET_GC_PREFIX.size());
+        RemoteRowsetGcPB gc_pb;
+        if (!gc_pb.ParseFromString(val)) {
+            LOG(WARNING) << "malformed RemoteRowsetGcPB. rowset_id=" << rowset_id;
+            deleted_keys.push_back(std::move(key));
+            continue;
+        }
+        auto fs = get_filesystem(gc_pb.resource_id());
+        if (!fs) {
+            LOG(WARNING) << "Cannot get file system: " << gc_pb.resource_id();
+            continue;
+        }
+        DCHECK(fs->type() != io::FileSystemType::LOCAL);
+        std::vector<io::Path> seg_paths;
+        seg_paths.reserve(gc_pb.num_segments());
+        for (int i = 0; i < gc_pb.num_segments(); ++i) {
+            seg_paths.push_back(BetaRowset::remote_segment_path(gc_pb.tablet_id(), rowset_id, i));
+        }
+        LOG(INFO) << "delete remote rowset. root_path=" << fs->root_path()
+                  << ", rowset_id=" << rowset_id;
+        auto st = std::static_pointer_cast<io::RemoteFileSystem>(fs)->batch_delete(seg_paths);
+        if (st.ok()) {
+            deleted_keys.push_back(std::move(key));
+        } else {
+            LOG(WARNING) << "failed to delete remote rowset. err=" << st;
+        }
+    }
+    for (const auto& key : deleted_keys) {
+        _meta->remove(META_COLUMN_FAMILY_INDEX, key);
+    }
+}
+
+void DataDir::perform_remote_tablet_gc() {
+    std::vector<std::pair<std::string, std::string>> tablet_gc_kvs;
+    auto traverse_remote_tablet_func = [&tablet_gc_kvs](const std::string& key,
+                                                        const std::string& value) -> bool {
+        tablet_gc_kvs.emplace_back(key, value);
+        return true;
+    };
+    _meta->iterate(META_COLUMN_FAMILY_INDEX, REMOTE_TABLET_GC_PREFIX, traverse_remote_tablet_func);
+    std::vector<std::string> deleted_keys;
+    for (auto& [key, val] : tablet_gc_kvs) {
+        auto tablet_id = key.substr(REMOTE_TABLET_GC_PREFIX.size());
+        RemoteTabletGcPB gc_pb;
+        if (!gc_pb.ParseFromString(val)) {
+            LOG(WARNING) << "malformed RemoteTabletGcPB. tablet_id=" << tablet_id;
+            deleted_keys.push_back(std::move(key));
+            continue;
+        }
+        bool success = true;
+        for (auto& resource_id : gc_pb.resource_ids()) {
+            auto fs = get_filesystem(resource_id);
+            if (!fs) {
+                LOG(WARNING) << "could not get file system. resource_id=" << resource_id;
+                success = false;
+                continue;
+            }
+            LOG(INFO) << "delete remote rowsets of tablet. root_path=" << fs->root_path()
+                      << ", tablet_id=" << tablet_id;
+            auto st = fs->delete_directory(DATA_PREFIX + '/' + tablet_id);
+            if (!st.ok()) {
+                LOG(WARNING) << "failed to delete all remote rowset in tablet. err=" << st;
+                success = false;
+            }
+        }
+        if (success) {
+            deleted_keys.push_back(std::move(key));
+        }
+    }
+    for (const auto& key : deleted_keys) {
+        _meta->remove(META_COLUMN_FAMILY_INDEX, key);
+    }
+}
+
 } // namespace doris

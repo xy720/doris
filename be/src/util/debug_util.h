@@ -15,41 +15,42 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_SRC_COMMON_UTIL_DEBUG_UTIL_H
-#define DORIS_BE_SRC_COMMON_UTIL_DEBUG_UTIL_H
+#pragma once
 
-#include <ostream>
+#include <gen_cpp/HeartbeatService_types.h>
+#include <gen_cpp/Metrics_types.h>
+#include <gen_cpp/PlanNodes_types.h>
+#include <gen_cpp/Types_types.h>
+
 #include <string>
-#include <boost/cstdint.hpp>
-
-#include "gen_cpp/Descriptors_types.h"
-#include "gen_cpp/Exprs_types.h"
-#include "gen_cpp/Opcodes_types.h"
-#include "gen_cpp/PlanNodes_types.h"
-#include "gen_cpp/Types_types.h"
-#include "gen_cpp/RuntimeProfile_types.h"
-#include "gen_cpp/AgentService_types.h"
 
 namespace doris {
-
-class PUniqueId;
 
 std::string print_plan_node_type(const TPlanNodeType::type& type);
 std::string print_tstmt_type(const TStmtType::type& type);
 std::string print_query_state(const QueryState::type& type);
 std::string PrintTUnit(const TUnit::type& type);
 std::string PrintTMetricKind(const TMetricKind::type& type);
+std::string PrintThriftNetworkAddress(const TNetworkAddress&);
+std::string PrintFrontendInfo(const TFrontendInfo& fe_info);
+std::string PrintFrontendInfos(const std::vector<TFrontendInfo>& fe_infos);
+
+// A desirable scenario would be to call this function WHENEVER whenever we need to print instance information.
+// By using a fixed format, we would be able to identify all the paths in which this instance is executed.
+// InstanceId|FragmentIdx|QueryId
+std::string PrintInstanceStandardInfo(const TUniqueId& qid, const int fid, const TUniqueId& iid);
 
 // Returns a string "<product version number> (build <build hash>)"
 // If compact == false, this string is appended: "\nBuilt on <build time>"
 // This is used to set gflags build version
 std::string get_build_version(bool compact);
 
+// Returns a string "<product version number> (<short build hash>)"
+std::string get_short_version();
+
 // Returns "<program short name> version <GetBuildVersion(compact)>"
 std::string get_version_string(bool compact);
 
 std::string hexdump(const char* buf, int len);
 
-}
-
-#endif
+} // namespace doris

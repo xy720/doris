@@ -1,3 +1,6 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
 // regarding copyright ownership.  The ASF licenses this file
 // to you under the Apache License, Version 2.0 (the
 // "License"); you may not use this file except in compliance
@@ -15,16 +18,27 @@
 namespace cpp doris
 namespace java org.apache.doris.thrift
 
+include "AgentService.thrift"
 include "Status.thrift"
 include "Types.thrift"
+
+const i64 IS_SET_DEFAULT_ROWSET_TO_BETA_BIT = 0x01;
+
+struct TFrontendInfo {
+    1: optional Types.TNetworkAddress coordinator_address
+    2: optional i64 process_uuid
+}
 
 struct TMasterInfo {
     1: required Types.TNetworkAddress network_address
     2: required Types.TClusterId cluster_id
     3: required Types.TEpoch epoch
     4: optional string token 
-    5: optional string backend_ip
+    5: optional string backend_ip //This may be an IP or domain name, and it should be renamed 'backend_host', as it requires compatibility with historical versions, the name is still 'backend_ ip'
     6: optional Types.TPort http_port
+    7: optional i64 heartbeat_flags
+    8: optional i64 backend_id
+    9: optional list<TFrontendInfo> frontend_infos
 }
 
 struct TBackendInfo {
@@ -32,6 +46,10 @@ struct TBackendInfo {
     2: required Types.TPort http_port
     3: optional Types.TPort be_rpc_port
     4: optional Types.TPort brpc_port
+    5: optional string version
+    6: optional i64 be_start_time // This field will also be uesd to identify a be process
+    7: optional string be_node_role
+    8: optional bool is_shutdown
 }
 
 struct THeartbeatResult {

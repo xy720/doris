@@ -17,17 +17,25 @@
 
 #include "olap/skiplist.h"
 
-#include <set>
-#include <thread>
+#include <gtest/gtest-message.h>
+#include <gtest/gtest-test-part.h>
+#include <stdint.h>
+#include <stdio.h>
 
-#include <gtest/gtest.h>
-#include "olap/schema.h"
-#include "olap/utils.h"
-#include "runtime/mem_pool.h"
-#include "runtime/mem_tracker.h"
+#include <condition_variable>
+#include <functional>
+#include <iterator>
+#include <memory>
+#include <mutex>
+#include <set>
+#include <utility>
+
+#include "gtest/gtest_pred_impl.h"
+#include "testutil/test_util.h"
 #include "util/hash_util.hpp"
 #include "util/random.h"
-#include "util/thread_pool.hpp"
+#include "util/work_thread_pool.hpp"
+#include "vec/common/arena.h"
 
 namespace doris {
 
@@ -49,65 +57,64 @@ struct TestComparator {
 class SkipTest : public testing::Test {};
 
 TEST_F(SkipTest, Empty) {
-    std::unique_ptr<MemTracker> tracker(new MemTracker(-1));
-    std::unique_ptr<MemPool> mem_pool(new MemPool(tracker.get()));
+    std::unique_ptr<vectorized::Arena> arena(new vectorized::Arena());
 
-    TestComparator cmp;
-    SkipList<Key, TestComparator> list(cmp, mem_pool.get());
-    ASSERT_TRUE(!list.Contains(10));
+    TestComparator* cmp = new TestComparator();
+    SkipList<Key, TestComparator> list(cmp, arena.get(), false);
+    EXPECT_TRUE(!list.Contains(10));
 
     SkipList<Key, TestComparator>::Iterator iter(&list);
-    ASSERT_TRUE(!iter.Valid());
+    EXPECT_TRUE(!iter.Valid());
     iter.SeekToFirst();
-    ASSERT_TRUE(!iter.Valid());
+    EXPECT_TRUE(!iter.Valid());
     iter.Seek(100);
-    ASSERT_TRUE(!iter.Valid());
+    EXPECT_TRUE(!iter.Valid());
     iter.SeekToLast();
-    ASSERT_TRUE(!iter.Valid());
+    EXPECT_TRUE(!iter.Valid());
+    delete cmp;
 }
 
 TEST_F(SkipTest, InsertAndLookup) {
-    std::unique_ptr<MemTracker> tracker(new MemTracker(-1));
-    std::unique_ptr<MemPool> mem_pool(new MemPool(tracker.get()));
+    std::unique_ptr<vectorized::Arena> arena(new vectorized::Arena());
 
     const int N = 2000;
     const int R = 5000;
     Random rnd(1000);
     std::set<Key> keys;
-    TestComparator cmp;
-    SkipList<Key, TestComparator> list(cmp, mem_pool.get());
+    TestComparator* cmp = new TestComparator();
+    SkipList<Key, TestComparator> list(cmp, arena.get(), false);
     for (int i = 0; i < N; i++) {
         Key key = rnd.Next() % R;
         if (keys.insert(key).second) {
             bool overwritten = false;
-            list.Insert(key, &overwritten, KeysType::AGG_KEYS);
+            list.Insert(key, &overwritten);
         }
     }
 
     for (int i = 0; i < R; i++) {
         if (list.Contains(i)) {
-            ASSERT_EQ(keys.count(i), 1);
+            EXPECT_EQ(keys.count(i), 1);
         } else {
-            ASSERT_EQ(keys.count(i), 0);
+            EXPECT_EQ(keys.count(i), 0);
         }
     }
 
     // Simple iterator tests
     {
         SkipList<Key, TestComparator>::Iterator iter(&list);
-        ASSERT_TRUE(!iter.Valid());
+        EXPECT_TRUE(!iter.Valid());
 
         iter.Seek(0);
-        ASSERT_TRUE(iter.Valid());
-        ASSERT_EQ(*(keys.begin()), iter.key());
+        EXPECT_TRUE(iter.Valid());
+        EXPECT_EQ(*(keys.begin()), iter.key());
 
         iter.SeekToFirst();
-        ASSERT_TRUE(iter.Valid());
-        ASSERT_EQ(*(keys.begin()), iter.key());
+        EXPECT_TRUE(iter.Valid());
+        EXPECT_EQ(*(keys.begin()), iter.key());
 
         iter.SeekToLast();
-        ASSERT_TRUE(iter.Valid());
-        ASSERT_EQ(*(keys.rbegin()), iter.key());
+        EXPECT_TRUE(iter.Valid());
+        EXPECT_EQ(*(keys.rbegin()), iter.key());
     }
 
     // Forward iteration test
@@ -119,11 +126,11 @@ TEST_F(SkipTest, InsertAndLookup) {
         std::set<Key>::iterator model_iter = keys.lower_bound(i);
         for (int j = 0; j < 3; j++) {
             if (model_iter == keys.end()) {
-                ASSERT_TRUE(!iter.Valid());
+                EXPECT_TRUE(!iter.Valid());
                 break;
             } else {
-                ASSERT_TRUE(iter.Valid());
-                ASSERT_EQ(*model_iter, iter.key());
+                EXPECT_TRUE(iter.Valid());
+                EXPECT_EQ(*model_iter, iter.key());
                 ++model_iter;
                 iter.Next();
             }
@@ -136,15 +143,47 @@ TEST_F(SkipTest, InsertAndLookup) {
         iter.SeekToLast();
 
         // Compare against model iterator
-        for (std::set<Key>::reverse_iterator model_iter = keys.rbegin();
-                model_iter != keys.rend();
-                ++model_iter) {
-            ASSERT_TRUE(iter.Valid());
-            ASSERT_EQ(*model_iter, iter.key());
+        for (std::set<Key>::reverse_iterator model_iter = keys.rbegin(); model_iter != keys.rend();
+             ++model_iter) {
+            EXPECT_TRUE(iter.Valid());
+            EXPECT_EQ(*model_iter, iter.key());
             iter.Prev();
         }
-        ASSERT_TRUE(!iter.Valid());
+        EXPECT_TRUE(!iter.Valid());
     }
+    delete cmp;
+}
+
+// Only non-DUP model will use Find() and InsertWithHint().
+TEST_F(SkipTest, InsertWithHintNoneDupModel) {
+    std::unique_ptr<vectorized::Arena> arena(new vectorized::Arena());
+
+    const int N = 2000;
+    const int R = 5000;
+    Random rnd(1000);
+    std::set<Key> keys;
+    TestComparator* cmp = new TestComparator();
+    SkipList<Key, TestComparator> list(cmp, arena.get(), false);
+    SkipList<Key, TestComparator>::Hint hint;
+    for (int i = 0; i < N; i++) {
+        Key key = rnd.Next() % R;
+        bool is_exist = list.Find(key, &hint);
+        if (keys.insert(key).second) {
+            EXPECT_FALSE(is_exist);
+            list.InsertWithHint(key, is_exist, &hint);
+        } else {
+            EXPECT_TRUE(is_exist);
+        }
+    }
+
+    for (int i = 0; i < R; i++) {
+        if (list.Contains(i)) {
+            EXPECT_EQ(keys.count(i), 1);
+        } else {
+            EXPECT_EQ(keys.count(i), 0);
+        }
+    }
+    delete cmp;
 }
 
 // We want to make sure that with a single writer and multiple
@@ -180,41 +219,37 @@ private:
     static uint64_t hash(Key key) { return key & 0xff; }
 
     static uint64_t hash_numbers(uint64_t k, uint64_t g) {
-        uint64_t data[2] = { k, g };
+        uint64_t data[2] = {k, g};
         return HashUtil::hash(reinterpret_cast<char*>(data), sizeof(data), 0);
     }
 
     static Key make_key(uint64_t k, uint64_t g) {
-        assert(sizeof(Key) == sizeof(uint64_t));
-        assert(k <= K);  // We sometimes pass K to seek to the end of the skiplist
-        assert(g <= 0xffffffffu);
+        EXPECT_EQ(sizeof(Key), sizeof(uint64_t));
+        EXPECT_LE(k, K); // We sometimes pass K to seek to the end of the skiplist
+        EXPECT_LE(g, 0xffffffffu);
         return ((k << 40) | (g << 8) | (hash_numbers(k, g) & 0xff));
     }
 
-    static bool is_valid_key(Key k) {
-        return hash(k) == (hash_numbers(key(k), gen(k)) & 0xff);
-    }
+    static bool is_valid_key(Key k) { return hash(k) == (hash_numbers(key(k), gen(k)) & 0xff); }
 
     static Key random_target(Random* rnd) {
         switch (rnd->Next() % 10) {
-            case 0:
-                // Seek to beginning
-                return make_key(0, 0);
-            case 1:
-                // Seek to end
-                return make_key(K, 0);
-            default:
-                // Seek to middle
-                return make_key(rnd->Next() % K, 0);
+        case 0:
+            // Seek to beginning
+            return make_key(0, 0);
+        case 1:
+            // Seek to end
+            return make_key(K, 0);
+        default:
+            // Seek to middle
+            return make_key(rnd->Next() % K, 0);
         }
     }
 
     // Per-key generation
     struct State {
         std::atomic<int> generation[K];
-        void set(int k, int v) {
-            generation[k].store(v, std::memory_order_release);
-        }
+        void set(int k, int v) { generation[k].store(v, std::memory_order_release); }
         int get(int k) { return generation[k].load(std::memory_order_acquire); }
 
         State() {
@@ -227,18 +262,17 @@ private:
     // Current state of the test
     State _current;
 
-    std::unique_ptr<MemTracker> _mem_tracker;
-    std::unique_ptr<MemPool> _mem_pool;
-
+    std::unique_ptr<vectorized::Arena> _arena;
+    std::shared_ptr<TestComparator> _comparator;
     // SkipList is not protected by _mu.  We just use a single writer
     // thread to modify it.
     SkipList<Key, TestComparator> _list;
 
 public:
-    ConcurrentTest():
-        _mem_tracker(new MemTracker(-1)),
-        _mem_pool(new MemPool(_mem_tracker.get())),
-        _list(TestComparator(), _mem_pool.get()){}
+    ConcurrentTest()
+            : _arena(new vectorized::Arena()),
+              _comparator(new TestComparator()),
+              _list(_comparator.get(), _arena.get(), false) {}
 
     // REQUIRES: External synchronization
     void write_step(Random* rnd) {
@@ -246,7 +280,7 @@ public:
         const int g = _current.get(k) + 1;
         const Key new_key = make_key(k, g);
         bool overwritten = false;
-        _list.Insert(new_key, &overwritten, KeysType::AGG_KEYS);
+        _list.Insert(new_key, &overwritten);
         _current.set(k, g);
     }
 
@@ -266,23 +300,21 @@ public:
                 current = make_key(K, 0);
             } else {
                 current = iter.key();
-                ASSERT_TRUE(is_valid_key(current)) << current;
+                EXPECT_TRUE(is_valid_key(current)) << current;
             }
-            ASSERT_LE(pos, current) << "should not go backwards";
+            EXPECT_LE(pos, current) << "should not go backwards";
 
             // Verify that everything in [pos,current) was not present in
             // initial_state.
             while (pos < current) {
-                ASSERT_LT(key(pos), K) << pos;
+                EXPECT_LT(key(pos), K) << pos;
 
                 // Note that generation 0 is never inserted, so it is ok if
                 // <*,0,*> is missing.
-                ASSERT_TRUE((gen(pos) == 0) ||
-                        (gen(pos) > static_cast<Key>(initial_state.get(key(pos))))
-                        ) << "key: " << key(pos)
-                    << "; gen: " << gen(pos)
-                    << "; initgen: "
-                    << initial_state.get(key(pos));
+                EXPECT_TRUE((gen(pos) == 0) ||
+                            (gen(pos) > static_cast<Key>(initial_state.get(key(pos)))))
+                        << "key: " << key(pos) << "; gen: " << gen(pos)
+                        << "; initgen: " << initial_state.get(key(pos));
 
                 // Advance to next key in the valid key space
                 if (key(pos) < key(current)) {
@@ -328,47 +360,35 @@ public:
     int _seed;
     std::atomic<bool> _quit_flag;
 
-    enum ReaderState {
-        STARTING,
-        RUNNING,
-        DONE
-    };
+    enum ReaderState { STARTING, RUNNING, DONE };
 
-    explicit TestState(int s)
-        : _seed(s),
-        _quit_flag(NULL),
-        _state(STARTING),
-        _cv_state(_mu) {}
+    explicit TestState(int s) : _seed(s), _quit_flag(false), _state(STARTING) {}
 
     void wait(ReaderState s) {
-        _mu.lock();
+        std::unique_lock l(_mu);
         while (_state != s) {
-            _cv_state.wait();
+            _cv_state.wait(l);
         }
-        _mu.unlock();
     }
 
     void change(ReaderState s) {
-        _mu.lock();
+        std::lock_guard l(_mu);
         _state = s;
-        _cv_state.notify();
-        _mu.unlock();
+        _cv_state.notify_one();
     }
 
 private:
-    Mutex _mu;
+    std::mutex _mu;
     ReaderState _state;
-    Condition _cv_state;
+    std::condition_variable _cv_state;
 };
 
 static void concurrent_reader(void* arg) {
     TestState* state = reinterpret_cast<TestState*>(arg);
     Random rnd(state->_seed);
-    int64_t reads = 0;
     state->change(TestState::RUNNING);
     while (!state->_quit_flag.load(std::memory_order_acquire)) {
         state->_t.read_step(&rnd);
-        ++reads;
     }
     state->change(TestState::DONE);
 }
@@ -376,9 +396,9 @@ static void concurrent_reader(void* arg) {
 static void run_concurrent(int run) {
     const int seed = random_seed + (run * 100);
     Random rnd(seed);
-    const int N = 1000;
+    const int N = LOOP_LESS_OR_MORE(10, 1000);
     const int kSize = 1000;
-    ThreadPool thread_pool(10, 100);
+    PriorityThreadPool thread_pool(10, 100, "ut");
     for (int i = 0; i < N; i++) {
         if ((i % 100) == 0) {
             fprintf(stderr, "Run %d of %d\n", i, N);
@@ -389,21 +409,15 @@ static void run_concurrent(int run) {
         for (int i = 0; i < kSize; i++) {
             state._t.write_step(&rnd);
         }
-        state._quit_flag.store(true, std::memory_order_release);  // Any non-NULL arg will do
+        state._quit_flag.store(true, std::memory_order_release); // Any non-nullptr arg will do
         state.wait(TestState::DONE);
     }
 }
 
-TEST_F(SkipTest, Concurrent1) { run_concurrent(1); }
-TEST_F(SkipTest, Concurrent2) { run_concurrent(2); }
-TEST_F(SkipTest, Concurrent3) { run_concurrent(3); }
-TEST_F(SkipTest, Concurrent4) { run_concurrent(4); }
-TEST_F(SkipTest, Concurrent5) { run_concurrent(5); }
-
-}  // namespace doris
-
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    doris::CpuInfo::init();
-    return RUN_ALL_TESTS();
+TEST_F(SkipTest, Concurrent) {
+    for (int i = 1; i < LOOP_LESS_OR_MORE(2, 6); ++i) {
+        run_concurrent(i);
+    }
 }
+
+} // namespace doris

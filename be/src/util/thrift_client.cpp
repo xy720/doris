@@ -15,11 +15,16 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include <util/thrift_client.h>
+#include "util/thrift_client.h"
 
-#include <ostream>
+#include <thrift/transport/TTransport.h>
+#include <thrift/transport/TTransportException.h>
+// IWYU pragma: no_include <bits/chrono.h>
+#include <chrono> // IWYU pragma: keep
+#include <string>
+#include <thread>
 
-#include <boost/assign.hpp>
+#include "gutil/strings/substitute.h"
 
 namespace doris {
 
@@ -28,13 +33,21 @@ Status ThriftClientImpl::open() {
         if (!_transport->isOpen()) {
             _transport->open();
         }
-    } catch (apache::thrift::transport::TTransportException& e) {
-        std::stringstream msg;
-        msg << "Couldn't open transport for " << ipaddress() << ":" << port()
-            << "(" << e.what() << ")";
-        return Status::ThriftRpcError(msg.str());
+    } catch (const apache::thrift::transport::TTransportException& e) {
+        try {
+            _transport->close();
+        } catch (const apache::thrift::transport::TTransportException& e) {
+            VLOG_CRITICAL << "Error closing socket to: " << ipaddress() << ":" << port()
+                          << ", ignoring (" << e.what() << ")";
+        }
+        // In certain cases in which the remote host is overloaded, this failure can
+        // happen quite frequently. Let's print this error message without the stack
+        // trace as there aren't many callers of this function.
+        const std::string& err_msg = strings::Substitute("Couldn't open transport for $0:$1 ($2)",
+                                                         ipaddress(), port(), e.what());
+        VLOG_CRITICAL << err_msg;
+        return Status::RpcError(err_msg);
     }
-
     return Status::OK();
 }
 
@@ -59,18 +72,31 @@ Status ThriftClientImpl::open_with_retry(int num_tries, int wait_ms) {
             LOG(INFO) << "(Attempt " << try_count << " of " << num_tries << ")";
         }
 
-        usleep(wait_ms * 1000L);
+        std::this_thread::sleep_for(std::chrono::milliseconds(wait_ms));
     }
 
     return status;
 }
 
-Status ThriftClientImpl::close() {
-    if (_transport->isOpen()) {
-        _transport->close();
+void ThriftClientImpl::close() {
+    try {
+        if (_transport != nullptr && _transport->isOpen()) {
+            _transport->close();
+        }
+    } catch (const apache::thrift::transport::TTransportException& e) {
+        LOG(INFO) << "Error closing connection to: " << ipaddress() << ":" << port()
+                  << ", ignoring (" << e.what() << ")";
+        // Forcibly close the socket (since the transport may have failed to get that far
+        // during close())
+        try {
+            if (_socket != nullptr) {
+                _socket->close();
+            }
+        } catch (const apache::thrift::transport::TTransportException& e) {
+            LOG(INFO) << "Error closing socket to: " << ipaddress() << ":" << port()
+                      << ", ignoring (" << e.what() << ")";
+        }
     }
-
-    return Status::OK();
 }
 
-}
+} // namespace doris

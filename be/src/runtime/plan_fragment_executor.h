@@ -14,33 +14,45 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/cloudera/Impala/blob/v0.7refresh/be/src/runtime/plan-fragment-executor.h
+// and modified by Doris
 
-#ifndef DORIS_BE_RUNTIME_PLAN_FRAGMENT_EXECUTOR_H
-#define DORIS_BE_RUNTIME_PLAN_FRAGMENT_EXECUTOR_H
+#pragma once
 
+#include <gen_cpp/PaloInternalService_types.h>
+#include <gen_cpp/Types_types.h>
+#include <gen_cpp/types.pb.h>
+
+#include <condition_variable>
+#include <functional>
+#include <future>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <string>
 #include <vector>
-#include <boost/scoped_ptr.hpp>
-#include <boost/function.hpp>
 
 #include "common/status.h"
-#include "common/object_pool.h"
-#include "runtime/query_statistics.h"
+#include "runtime/query_context.h"
 #include "runtime/runtime_state.h"
+#include "util/runtime_profile.h"
 
 namespace doris {
 
-class HdfsFsCache;
+class QueryContext;
 class ExecNode;
 class RowDescriptor;
-class RowBatch;
 class DataSink;
-class DataStreamMgr;
-class RuntimeProfile;
-class RuntimeState;
-class TPlanExecRequest;
-class TPlanFragment;
-class TPlanFragmentExecParams;
-class TPlanExecParams;
+class DescriptorTbl;
+class ExecEnv;
+class ObjectPool;
+class QueryStatistics;
+struct ReportStatusRequest;
+
+namespace vectorized {
+class Block;
+} // namespace vectorized
 
 // PlanFragmentExecutor handles all aspects of the execution of a single plan fragment,
 // including setup and tear-down, both in the success and error case.
@@ -63,19 +75,12 @@ class TPlanExecParams;
 // thread-safe.
 class PlanFragmentExecutor {
 public:
-    // Callback to report execution status of plan fragment.
-    // 'profile' is the cumulative profile, 'done' indicates whether the execution
-    // is done or still continuing.
-    // Note: this does not take a const RuntimeProfile&, because it might need to call
-    // functions like PrettyPrint() or to_thrift(), neither of which is const
-    // because they take locks.
-    typedef boost::function <
-    void (const Status& status, RuntimeProfile* profile, bool done) >
-    report_status_callback;
-
+    using report_status_callback = std::function<void(const ReportStatusRequest)>;
     // report_status_cb, if !empty(), is used to report the accumulated profile
     // information periodically during execution (open() or get_next()).
-    PlanFragmentExecutor(ExecEnv* exec_env, const report_status_callback& report_status_cb);
+    PlanFragmentExecutor(ExecEnv* exec_env, std::shared_ptr<QueryContext> query_ctx,
+                         const TUniqueId& instance_id, int fragment_id, int backend_num,
+                         const report_status_callback& report_status_cb);
 
     // Closes the underlying plan fragment and frees up all resources allocated
     // in open()/get_next().
@@ -90,6 +95,7 @@ public:
     // If request.query_options.mem_limit > 0, it is used as an approximate limit on the
     // number of bytes this query can consume at runtime.
     // The query will be aborted (MEM_LIMIT_EXCEEDED) if it goes over that limit.
+    // If query_ctx is not null, some components will be got from query_ctx.
     Status prepare(const TExecPlanFragmentParams& request);
 
     // Start execution. Call this prior to get_next().
@@ -103,68 +109,73 @@ public:
     // time when open() returns, and the status-reporting thread will have been stopped.
     Status open();
 
-    // Return results through 'batch'. Sets '*batch' to NULL if no more results.
-    // '*batch' is owned by PlanFragmentExecutor and must not be deleted.
-    // When *batch == NULL, get_next() should not be called anymore. Also, report_status_cb
-    // will have been called for the final time and the status-reporting thread
-    // will have been stopped.
-    Status get_next(RowBatch** batch);
+    Status execute();
+
+    const vectorized::VecDateTimeValue& start_time() const { return _start_time; }
 
     // Closes the underlying plan fragment and frees up all resources allocated
     // in open()/get_next().
     void close();
 
     // Initiate cancellation. Must not be called until after prepare() returned.
-    void cancel();
-
-    // Releases the thread token for this fragment executor.
-    void release_thread_token();
+    void cancel(const PPlanFragmentCancelReason& reason = PPlanFragmentCancelReason::INTERNAL_ERROR,
+                const std::string& msg = "");
 
     // call these only after prepare()
-    RuntimeState* runtime_state() {
-        return _runtime_state.get();
-    }
+    RuntimeState* runtime_state() { return _runtime_state.get(); }
     const RowDescriptor& row_desc();
 
     // Profile information for plan and output sink.
     RuntimeProfile* profile();
+    RuntimeProfile* load_channel_profile();
 
-    const Status& status() const {
-        return _status;
+    const Status& status() const { return _status; }
+
+    DataSink* get_sink() const { return _sink.get(); }
+
+    void set_need_wait_execution_trigger() { _need_wait_execution_trigger = true; }
+
+    void set_merge_controller_handler(
+            std::shared_ptr<RuntimeFilterMergeControllerEntity>& handler) {
+        _merge_controller_handler = handler;
     }
 
-    DataSink* get_sink() {
-        return _sink.get();
-    }
+    std::shared_ptr<QueryContext> get_query_ctx() { return _query_ctx; }
 
-    void report_profile_once() {
-        _stop_report_thread_cv.notify_one();
-    }
+    TUniqueId fragment_instance_id() const { return _fragment_instance_id; }
 
-    void set_is_report_on_cancel(bool val) {
-        _is_report_on_cancel = val;
-    }
+    TUniqueId query_id() const { return _query_ctx->query_id(); }
+
+    bool is_timeout(const vectorized::VecDateTimeValue& now) const;
+
+    bool is_canceled() { return _runtime_state->is_cancelled(); }
+
+    Status update_status(Status status);
 
 private:
-    ExecEnv* _exec_env;  // not owned
-    ExecNode* _plan;  // lives in _runtime_state->obj_pool()
-    TUniqueId _query_id;
-    // MemTracker* _mem_tracker;
-    boost::scoped_ptr<MemTracker> _mem_tracker;
+    ExecEnv* _exec_env; // not owned
+    ExecNode* _plan;    // lives in _runtime_state->obj_pool()
+    std::shared_ptr<QueryContext> _query_ctx;
+    // Id of this instance
+    TUniqueId _fragment_instance_id;
+    int _fragment_id;
+    // Used to report to coordinator which backend is over
+    int _backend_num;
 
     // profile reporting-related
     report_status_callback _report_status_cb;
-    boost::thread _report_thread;
-    boost::mutex _report_thread_lock;
+    std::promise<bool> _report_thread_promise;
+    std::future<bool> _report_thread_future;
+    std::mutex _report_thread_lock;
 
     // Indicates that profile reporting thread should stop.
     // Tied to _report_thread_lock.
-    boost::condition_variable _stop_report_thread_cv;
+    std::condition_variable _stop_report_thread_cv;
 
     // Indicates that profile reporting thread started.
     // Tied to _report_thread_lock.
-    boost::condition_variable _report_thread_started_cv;
-    bool _report_thread_active;  // true if we started the thread
+    std::condition_variable _report_thread_started_cv;
+    bool _report_thread_active; // true if we started the thread
 
     // true if _plan->get_next() indicated that it's done
     bool _done;
@@ -174,9 +185,6 @@ private:
 
     // true if close() has been called
     bool _closed;
-
-    // true if this fragment has not returned the thread token to the thread resource mgr
-    bool _has_thread_token;
 
     bool _is_report_success;
 
@@ -192,39 +200,52 @@ private:
     // lock ordering:
     // 1. _report_thread_lock
     // 2. _status_lock
-    boost::mutex _status_lock;
+    std::mutex _status_lock;
 
+    // note that RuntimeState should be constructed before and destructed after `_sink' and `_row_batch',
+    // therefore we declare it before `_sink' and `_row_batch'
+    std::unique_ptr<RuntimeState> _runtime_state;
     // Output sink for rows sent to this fragment. May not be set, in which case rows are
     // returned via get_next's row batch
     // Created in prepare (if required), owned by this object.
-    boost::scoped_ptr<DataSink> _sink;
-    boost::scoped_ptr<RuntimeState> _runtime_state;
-    boost::scoped_ptr<RowBatch> _row_batch;
+    std::unique_ptr<DataSink> _sink;
 
     // Number of rows returned by this fragment
     RuntimeProfile::Counter* _rows_produced_counter;
 
-    // Average number of thread tokens for the duration of the plan fragment execution.
-    // Fragments that do a lot of cpu work (non-coordinator fragment) will have at
-    // least 1 token.  Fragments that contain a hdfs scan node will have 1+ tokens
-    // depending on system load.  Other nodes (e.g. hash join node) can also reserve
-    // additional tokens.
-    // This is a measure of how much CPU resources this fragment used during the course
-    // of the execution.
-    RuntimeProfile::Counter* _average_thread_tokens;
+    // Number of blocks returned by this fragment
+    RuntimeProfile::Counter* _blocks_produced_counter;
 
-    // It is shared with BufferControlBlock and will be called in two different 
-    // threads. But their calls are all at different time, there is no problem of 
+    RuntimeProfile::Counter* _fragment_cpu_timer;
+
+    std::shared_ptr<RuntimeFilterMergeControllerEntity> _merge_controller_handler;
+
+    // If set the true, this plan fragment will be executed only after FE send execution start rpc.
+    bool _need_wait_execution_trigger = false;
+
+    // Timeout of this instance, it is inited from query options
+    int _timeout_second = -1;
+
+    vectorized::VecDateTimeValue _start_time;
+
+    // It is shared with BufferControlBlock and will be called in two different
+    // threads. But their calls are all at different time, there is no problem of
     // multithreaded access.
     std::shared_ptr<QueryStatistics> _query_statistics;
-    bool _collect_query_statistics_with_every_batch;    
+    bool _collect_query_statistics_with_every_batch;
 
-    ObjectPool* obj_pool() {
-        return _runtime_state->obj_pool();
-    }
+    // Record the cancel information when calling the cancel() method, return it to FE
+    PPlanFragmentCancelReason _cancel_reason;
+    std::string _cancel_msg;
+
+    OpentelemetrySpan _span;
+
+    bool _group_commit = false;
+
+    ObjectPool* obj_pool() { return _runtime_state->obj_pool(); }
 
     // typedef for TPlanFragmentExecParams.per_node_scan_ranges
-    typedef std::map<TPlanNodeId, std::vector<TScanRangeParams> > PerNodeScanRanges;
+    using PerNodeScanRanges = std::map<TPlanNodeId, std::vector<TScanRangeParams>>;
 
     // Main loop of profile reporting thread.
     // Exits when notified on _done_cv.
@@ -236,46 +257,26 @@ private:
     // done == true or we have an error status.
     void send_report(bool done);
 
-    // If _status.ok(), sets _status to status.
-    // If we're transitioning to an error status, stops report thread and
-    // sends a final report.
-    void update_status(const Status& status);
-
-    /// Optimizes the code-generated functions in runtime_state_->llvm_codegen().
-    /// Must be called between plan_->Prepare() and plan_->Open().
-    /// This is somewhat time consuming so we don't want it to do it in
-    /// PlanFragmentExecutor()::Prepare() to allow starting plan fragments more
-    /// quickly and in parallel (in a deep plan tree, the fragments are started
-    /// in level order).
-    void optimize_llvm_module();
-
     // Executes open() logic and returns resulting status. Does not set _status.
     // If this plan fragment has no sink, open_internal() does nothing.
     // If this plan fragment has a sink and open_internal() returns without an
     // error condition, all rows will have been sent to the sink, the sink will
     // have been closed, a final report will have been sent and the report thread will
-    // have been stopped. _sink will be set to NULL after successful execution.
-    Status open_internal();
+    // have been stopped. _sink will be set to nullptr after successful execution.
+    Status open_vectorized_internal();
 
     // Executes get_next() logic and returns resulting status.
-    Status get_next_internal(RowBatch** batch);
+    Status get_vectorized_internal(::doris::vectorized::Block* block, bool* eos);
 
     // Stops report thread, if one is running. Blocks until report thread terminates.
     // Idempotent.
     void stop_report_thread();
 
-    // Print stats about scan ranges for each volumeId in params to info log.
-    void print_volume_ids(const TPlanExecParams& params);
-    void print_volume_ids(const PerNodeScanRanges& per_node_scan_ranges);
+    const DescriptorTbl& desc_tbl() const { return _runtime_state->desc_tbl(); }
 
-    const DescriptorTbl& desc_tbl() {
-        return _runtime_state->desc_tbl();
-    }
+    void _collect_query_statistics();
 
-    void collect_query_statistics();
-
+    void _collect_node_statistics();
 };
 
-}
-
-#endif
+} // namespace doris

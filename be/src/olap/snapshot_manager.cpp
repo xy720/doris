@@ -17,39 +17,53 @@
 
 #include "olap/snapshot_manager.h"
 
-#include <ctype.h>
-#include <errno.h>
-#include <stdio.h>
+#include <fmt/format.h>
+#include <gen_cpp/AgentService_types.h>
+#include <gen_cpp/Types_constants.h>
+#include <gen_cpp/olap_file.pb.h>
+#include <thrift/protocol/TDebugProtocol.h>
+
 #include <algorithm>
-#include <iterator>
+#include <ctime>
+#include <filesystem>
+#include <list>
 #include <map>
+#include <new>
+#include <ostream>
 #include <set>
+#include <shared_mutex>
+#include <unordered_map>
+#include <utility>
 
-#include <boost/date_time/gregorian/gregorian.hpp>
-#include <boost/date_time/posix_time/posix_time.hpp>
-#include <boost/filesystem.hpp>
-
-#include "olap/olap_snapshot_converter.h"
-#include "olap/rowset/alpha_rowset_meta.h"
+#include "common/config.h"
+#include "common/logging.h"
+#include "common/status.h"
+#include "io/fs/local_file_system.h"
+#include "olap/data_dir.h"
+#include "olap/olap_common.h"
+#include "olap/olap_define.h"
+#include "olap/pb_helper.h"
 #include "olap/rowset/rowset.h"
 #include "olap/rowset/rowset_factory.h"
-#include "olap/rowset/rowset_id_generator.h"
+#include "olap/rowset/rowset_meta.h"
 #include "olap/rowset/rowset_writer.h"
+#include "olap/rowset/rowset_writer_context.h"
+#include "olap/storage_engine.h"
+#include "olap/tablet_manager.h"
+#include "olap/tablet_meta.h"
+#include "olap/tablet_schema.h"
+#include "olap/tablet_schema_cache.h"
+#include "olap/utils.h"
+#include "runtime/thread_context.h"
+#include "util/uid_util.h"
 
-#include "env/env.h"
-
-using boost::filesystem::copy_file;
-using boost::filesystem::copy_option;
-using boost::filesystem::path;
-using std::map;
 using std::nothrow;
-using std::set;
 using std::string;
 using std::stringstream;
 using std::vector;
-using std::list;
 
 namespace doris {
+using namespace ErrorCode;
 
 SnapshotManager* SnapshotManager::_s_instance = nullptr;
 std::mutex SnapshotManager::_mlock;
@@ -64,149 +78,182 @@ SnapshotManager* SnapshotManager::instance() {
     return _s_instance;
 }
 
-OLAPStatus SnapshotManager::make_snapshot(
-        const TSnapshotRequest& request,
-        string* snapshot_path) {
-    OLAPStatus res = OLAP_SUCCESS;
+Status SnapshotManager::make_snapshot(const TSnapshotRequest& request, string* snapshot_path,
+                                      bool* allow_incremental_clone) {
+    SCOPED_CONSUME_MEM_TRACKER(_mem_tracker);
+    Status res = Status::OK();
     if (snapshot_path == nullptr) {
-        LOG(WARNING) << "output parameter cannot be NULL";
-        return OLAP_ERR_INPUT_PARAMETER_ERROR;
+        return Status::Error<INVALID_ARGUMENT>("output parameter cannot be null");
     }
 
-    TabletSharedPtr ref_tablet = StorageEngine::instance()->tablet_manager()->get_tablet(request.tablet_id, request.schema_hash);
+    TabletSharedPtr ref_tablet =
+            StorageEngine::instance()->tablet_manager()->get_tablet(request.tablet_id);
     if (ref_tablet == nullptr) {
-        LOG(WARNING) << "failed to get tablet. tablet=" << request.tablet_id
-                  << " schema_hash=" << request.schema_hash;
-        return OLAP_ERR_TABLE_NOT_FOUND;
+        return Status::Error<TABLE_NOT_FOUND>("failed to get tablet. tablet={}", request.tablet_id);
     }
 
-    res = _create_snapshot_files(ref_tablet, request, snapshot_path, request.preferred_snapshot_version);
-    // if all nodes has been upgraded, it can be removed
-    if (request.__isset.missing_version && res == OLAP_SUCCESS) {
-        (const_cast<TSnapshotRequest&>(request)).__set_allow_incremental_clone(true);
-    }
+    res = _create_snapshot_files(ref_tablet, request, snapshot_path, allow_incremental_clone);
 
-    if (res != OLAP_SUCCESS) {
-        LOG(WARNING) << "failed to make snapshot. res=" << res
-                     << " tablet=" << request.tablet_id
-                     << " schema_hash=" << request.schema_hash;
+    if (!res.ok()) {
+        LOG(WARNING) << "failed to make snapshot. res=" << res << " tablet=" << request.tablet_id;
         return res;
     }
 
-    LOG(INFO) << "success to make snapshot. path=['" << snapshot_path << "']";
+    LOG(INFO) << "success to make snapshot. path=['" << *snapshot_path << "']";
     return res;
 }
 
-OLAPStatus SnapshotManager::release_snapshot(const string& snapshot_path) {
-    // 如果请求的snapshot_path位于root/snapshot文件夹下，则认为是合法的，可以删除
-    // 否则认为是非法请求，返回错误结果
+Status SnapshotManager::release_snapshot(const string& snapshot_path) {
+    // If the requested snapshot_path is located in the root/snapshot folder, it is considered legal and can be deleted.
+    // Otherwise, it is considered an illegal request and returns an error result.
+    SCOPED_CONSUME_MEM_TRACKER(_mem_tracker);
     auto stores = StorageEngine::instance()->get_stores();
     for (auto store : stores) {
         std::string abs_path;
-        RETURN_WITH_WARN_IF_ERROR(FileUtils::canonicalize(store->path(), &abs_path),
-                                  OLAP_ERR_DIR_NOT_EXIST,
-                                  "canonical path " + store->path() + "failed");
-
-        if (snapshot_path.compare(0, abs_path.size(), abs_path) == 0
-                && snapshot_path.compare(abs_path.size(),
-                        SNAPSHOT_PREFIX.size(), SNAPSHOT_PREFIX) == 0) {
-            FileUtils::remove_all(snapshot_path);
+        RETURN_IF_ERROR(io::global_local_filesystem()->canonicalize(store->path(), &abs_path));
+        if (snapshot_path.compare(0, abs_path.size(), abs_path) == 0 &&
+            snapshot_path.compare(abs_path.size() + 1, SNAPSHOT_PREFIX.size(), SNAPSHOT_PREFIX) ==
+                    0) {
+            RETURN_IF_ERROR(io::global_local_filesystem()->delete_directory(snapshot_path));
             LOG(INFO) << "success to release snapshot path. [path='" << snapshot_path << "']";
-
-            return OLAP_SUCCESS;
+            return Status::OK();
         }
     }
 
-    LOG(WARNING) << "released snapshot path illegal. [path='" << snapshot_path << "']";
-    return OLAP_ERR_CE_CMD_PARAMS_ERROR;
+    return Status::Error<CE_CMD_PARAMS_ERROR>("released snapshot path illegal. [path='{}']",
+                                              snapshot_path);
 }
 
-// TODO support beta rowset
-OLAPStatus SnapshotManager::convert_rowset_ids(const string& clone_dir, int64_t tablet_id,
-    const int32_t& schema_hash, TabletSharedPtr tablet) {
-    OLAPStatus res = OLAP_SUCCESS;   
+Status SnapshotManager::convert_rowset_ids(const std::string& clone_dir, int64_t tablet_id,
+                                           int64_t replica_id, const int32_t& schema_hash) {
+    SCOPED_CONSUME_MEM_TRACKER(_mem_tracker);
+    Status res = Status::OK();
     // check clone dir existed
-    if (!FileUtils::check_exist(clone_dir)) {
-        res = OLAP_ERR_DIR_NOT_EXIST;
-        LOG(WARNING) << "clone dir not existed when convert rowsetids. clone_dir=" 
-                     << clone_dir;
+    bool exists = true;
+    RETURN_IF_ERROR(io::global_local_filesystem()->exists(clone_dir, &exists));
+    if (!exists) {
+        res = Status::Error<DIR_NOT_EXIST>(
+                "clone dir not existed when convert rowsetids. clone_dir={}", clone_dir);
         return res;
     }
 
     // load original tablet meta
-    string cloned_meta_file = clone_dir + "/" + std::to_string(tablet_id) + ".hdr";
+    auto cloned_meta_file = fmt::format("{}/{}.hdr", clone_dir, tablet_id);
     TabletMeta cloned_tablet_meta;
-    if ((res = cloned_tablet_meta.create_from_file(cloned_meta_file)) != OLAP_SUCCESS) {
+    if ((res = cloned_tablet_meta.create_from_file(cloned_meta_file)) != Status::OK()) {
         LOG(WARNING) << "fail to load original tablet meta after clone. "
                      << ", cloned_meta_file=" << cloned_meta_file;
         return res;
     }
     TabletMetaPB cloned_tablet_meta_pb;
-    res = cloned_tablet_meta.to_meta_pb(&cloned_tablet_meta_pb);
-    if (res != OLAP_SUCCESS) {
-        LOG(WARNING) << "fail to serialize tablet meta to pb object. " 
-                     << " , cloned_meta_file=" << cloned_meta_file;
-        return res;
-    }
-    
+    cloned_tablet_meta.to_meta_pb(&cloned_tablet_meta_pb);
+
     TabletMetaPB new_tablet_meta_pb;
     new_tablet_meta_pb = cloned_tablet_meta_pb;
     new_tablet_meta_pb.clear_rs_metas();
+    // inc_rs_meta is deprecated since 0.13.
+    // keep this just for safety
     new_tablet_meta_pb.clear_inc_rs_metas();
+    new_tablet_meta_pb.clear_stale_rs_metas();
     // should modify tablet id and schema hash because in restore process the tablet id is not
     // equal to tablet id in meta
     new_tablet_meta_pb.set_tablet_id(tablet_id);
+    *new_tablet_meta_pb.mutable_tablet_uid() = TabletUid::gen_uid().to_proto();
+    new_tablet_meta_pb.set_replica_id(replica_id);
     new_tablet_meta_pb.set_schema_hash(schema_hash);
-    TabletSchema tablet_schema;
-    RETURN_NOT_OK(tablet_schema.init_from_pb(new_tablet_meta_pb.schema()));
+    TabletSchemaSPtr tablet_schema;
+    tablet_schema =
+            TabletSchemaCache::instance()->insert(new_tablet_meta_pb.schema().SerializeAsString());
 
-    std::unordered_map<Version, RowsetMetaPB*, HashOfVersion> _rs_version_map;
+    std::unordered_map<Version, RowsetMetaPB*, HashOfVersion> rs_version_map;
+    std::unordered_map<RowsetId, RowsetId, HashOfRowsetId> rowset_id_mapping;
     for (auto& visible_rowset : cloned_tablet_meta_pb.rs_metas()) {
         RowsetMetaPB* rowset_meta = new_tablet_meta_pb.add_rs_metas();
-        RowsetId rowset_id = StorageEngine::instance()->next_rowset_id();
-        RETURN_NOT_OK(_rename_rowset_id(visible_rowset, clone_dir, tablet_schema, rowset_id, rowset_meta));
-        rowset_meta->set_tablet_id(tablet_id);
-        rowset_meta->set_tablet_schema_hash(schema_hash);
+
+        if (!visible_rowset.has_resource_id()) {
+            // src be local rowset
+            RowsetId rowset_id = StorageEngine::instance()->next_rowset_id();
+            RETURN_IF_ERROR(_rename_rowset_id(visible_rowset, clone_dir, tablet_schema, rowset_id,
+                                              rowset_meta));
+            RowsetId src_rs_id;
+            if (visible_rowset.rowset_id() > 0) {
+                src_rs_id.init(visible_rowset.rowset_id());
+            } else {
+                src_rs_id.init(visible_rowset.rowset_id_v2());
+            }
+            rowset_id_mapping[src_rs_id] = rowset_id;
+        } else {
+            // remote rowset
+            *rowset_meta = visible_rowset;
+        }
         Version rowset_version = {visible_rowset.start_version(), visible_rowset.end_version()};
-        _rs_version_map[rowset_version] = rowset_meta;
+        rs_version_map[rowset_version] = rowset_meta;
     }
 
-    for (auto& inc_rowset : cloned_tablet_meta_pb.inc_rs_metas()) {
-        Version rowset_version = {inc_rowset.start_version(), inc_rowset.end_version()};
-        auto exist_rs = _rs_version_map.find(rowset_version); 
-        if (exist_rs != _rs_version_map.end()) {
-            RowsetMetaPB* rowset_meta = new_tablet_meta_pb.add_inc_rs_metas();
-            *rowset_meta = *(exist_rs->second);
+    for (auto& stale_rowset : cloned_tablet_meta_pb.stale_rs_metas()) {
+        Version rowset_version = {stale_rowset.start_version(), stale_rowset.end_version()};
+        auto exist_rs = rs_version_map.find(rowset_version);
+        if (exist_rs != rs_version_map.end()) {
             continue;
         }
-        RowsetMetaPB* rowset_meta = new_tablet_meta_pb.add_inc_rs_metas();
-        RowsetId rowset_id = StorageEngine::instance()->next_rowset_id();
-        RETURN_NOT_OK(_rename_rowset_id(inc_rowset, clone_dir, tablet_schema, rowset_id, rowset_meta));
-        rowset_meta->set_tablet_id(tablet_id);
-        rowset_meta->set_tablet_schema_hash(schema_hash);
+        RowsetMetaPB* rowset_meta = new_tablet_meta_pb.add_stale_rs_metas();
+
+        if (!stale_rowset.has_resource_id()) {
+            // src be local rowset
+            RowsetId rowset_id = StorageEngine::instance()->next_rowset_id();
+            RETURN_IF_ERROR(_rename_rowset_id(stale_rowset, clone_dir, tablet_schema, rowset_id,
+                                              rowset_meta));
+            RowsetId src_rs_id;
+            if (stale_rowset.rowset_id() > 0) {
+                src_rs_id.init(stale_rowset.rowset_id());
+            } else {
+                src_rs_id.init(stale_rowset.rowset_id_v2());
+            }
+            rowset_id_mapping[src_rs_id] = rowset_id;
+        } else {
+            // remote rowset
+            *rowset_meta = stale_rowset;
+        }
+    }
+
+    if (!rowset_id_mapping.empty() && cloned_tablet_meta_pb.has_delete_bitmap()) {
+        auto& cloned_del_bitmap_pb = cloned_tablet_meta_pb.delete_bitmap();
+        DeleteBitmapPB* new_del_bitmap_pb = new_tablet_meta_pb.mutable_delete_bitmap();
+        int rst_ids_size = cloned_del_bitmap_pb.rowset_ids_size();
+        for (size_t i = 0; i < rst_ids_size; ++i) {
+            RowsetId rst_id;
+            rst_id.init(cloned_del_bitmap_pb.rowset_ids(i));
+            // It should not happen, if we can't convert some rowid in delete bitmap, the
+            // data might be inconsist.
+            CHECK(rowset_id_mapping.find(rst_id) != rowset_id_mapping.end())
+                    << "can't find rowset_id " << rst_id.to_string() << " in convert_rowset_ids";
+            new_del_bitmap_pb->set_rowset_ids(i, rowset_id_mapping[rst_id].to_string());
+        }
     }
 
     res = TabletMeta::save(cloned_meta_file, new_tablet_meta_pb);
-    if (res != OLAP_SUCCESS) {
+    if (!res.ok()) {
         LOG(WARNING) << "fail to save converted tablet meta to dir='" << clone_dir;
         return res;
     }
 
-    return OLAP_SUCCESS;
+    return Status::OK();
 }
 
-OLAPStatus SnapshotManager::_rename_rowset_id(const RowsetMetaPB& rs_meta_pb, const string& new_path, 
-        TabletSchema& tablet_schema, const RowsetId& rowset_id, RowsetMetaPB* new_rs_meta_pb) {
-    OLAPStatus res = OLAP_SUCCESS;
-    // TODO use factory to obtain RowsetMeta when SnapshotManager::convert_rowset_ids supports beta rowset
-    RowsetMetaSharedPtr alpha_rowset_meta(new AlphaRowsetMeta());
-    alpha_rowset_meta->init_from_pb(rs_meta_pb);
+Status SnapshotManager::_rename_rowset_id(const RowsetMetaPB& rs_meta_pb,
+                                          const std::string& new_tablet_path,
+                                          TabletSchemaSPtr tablet_schema, const RowsetId& rowset_id,
+                                          RowsetMetaPB* new_rs_meta_pb) {
+    Status res = Status::OK();
+    RowsetMetaSharedPtr rowset_meta(new RowsetMeta());
+    rowset_meta->init_from_pb(rs_meta_pb);
     RowsetSharedPtr org_rowset;
-    RETURN_NOT_OK(RowsetFactory::create_rowset(&tablet_schema, new_path, alpha_rowset_meta, &org_rowset));
+    RETURN_IF_ERROR(
+            RowsetFactory::create_rowset(tablet_schema, new_tablet_path, rowset_meta, &org_rowset));
     // do not use cache to load index
     // because the index file may conflict
     // and the cached fd may be invalid
-    RETURN_NOT_OK(org_rowset->load(false));
+    RETURN_IF_ERROR(org_rowset->load(false));
     RowsetMetaSharedPtr org_rowset_meta = org_rowset->rowset_meta();
     RowsetWriterContext context;
     context.rowset_id = rowset_id;
@@ -214,316 +261,412 @@ OLAPStatus SnapshotManager::_rename_rowset_id(const RowsetMetaPB& rs_meta_pb, co
     context.partition_id = org_rowset_meta->partition_id();
     context.tablet_schema_hash = org_rowset_meta->tablet_schema_hash();
     context.rowset_type = org_rowset_meta->rowset_type();
-    context.rowset_path_prefix = new_path;
-    context.tablet_schema = &tablet_schema;
+    context.rowset_dir = new_tablet_path;
+    context.tablet_schema =
+            org_rowset_meta->tablet_schema() ? org_rowset_meta->tablet_schema() : tablet_schema;
     context.rowset_state = org_rowset_meta->rowset_state();
     context.version = org_rowset_meta->version();
-    context.version_hash = org_rowset_meta->version_hash();
+    context.newest_write_timestamp = org_rowset_meta->newest_write_timestamp();
+    // keep segments_overlap same as origin rowset
+    context.segments_overlap = rowset_meta->segments_overlap();
 
     std::unique_ptr<RowsetWriter> rs_writer;
-    RETURN_NOT_OK(RowsetFactory::create_rowset_writer(context, &rs_writer));
+    RETURN_IF_ERROR(RowsetFactory::create_rowset_writer(context, false, &rs_writer));
 
     res = rs_writer->add_rowset(org_rowset);
-    if (res != OLAP_SUCCESS) {
-        LOG(WARNING) << "failed to add rowset " 
-                     << " id = " << org_rowset->rowset_id()
-                     << " to rowset " << rowset_id;
+    if (!res.ok()) {
+        LOG(WARNING) << "failed to add rowset "
+                     << " id = " << org_rowset->rowset_id() << " to rowset " << rowset_id;
         return res;
     }
     RowsetSharedPtr new_rowset = rs_writer->build();
     if (new_rowset == nullptr) {
-        LOG(WARNING) << "failed to build rowset when rename rowset id";
-        return OLAP_ERR_MALLOC_ERROR; 
+        return Status::Error<MEM_ALLOC_FAILED>("failed to build rowset when rename rowset id");
     }
-    RETURN_NOT_OK(new_rowset->load());
+    RETURN_IF_ERROR(new_rowset->load(false));
     new_rowset->rowset_meta()->to_rowset_pb(new_rs_meta_pb);
     org_rowset->remove();
-    return OLAP_SUCCESS;
+    return Status::OK();
 }
 
 // get snapshot path: curtime.seq.timeout
 // eg: 20190819221234.3.86400
-OLAPStatus SnapshotManager::_calc_snapshot_id_path(
-        const TabletSharedPtr& tablet,
-        int64_t timeout_s,
-        string* out_path) {
-    OLAPStatus res = OLAP_SUCCESS;
+Status SnapshotManager::_calc_snapshot_id_path(const TabletSharedPtr& tablet, int64_t timeout_s,
+                                               std::string* out_path) {
+    Status res = Status::OK();
     if (out_path == nullptr) {
-        LOG(WARNING) << "output parameter cannot be NULL";
-        return OLAP_ERR_INPUT_PARAMETER_ERROR;
+        return Status::Error<INVALID_ARGUMENT>("output parameter cannot be null");
     }
 
     // get current timestamp string
     string time_str;
-    if ((res = gen_timestamp_string(&time_str)) != OLAP_SUCCESS) {
+    if ((res = gen_timestamp_string(&time_str)) != Status::OK()) {
         LOG(WARNING) << "failed to generate time_string when move file to trash."
                      << "err code=" << res;
         return res;
     }
 
-    stringstream snapshot_id_path_stream;
-    MutexLock auto_lock(&_snapshot_mutex); // will automatically unlock when function return.
-    snapshot_id_path_stream << tablet->data_dir()->path() << SNAPSHOT_PREFIX
-                            << "/" << time_str << "." << _snapshot_base_id++
-                            << "." << timeout_s;
-    *out_path = snapshot_id_path_stream.str();
+    std::unique_lock<std::mutex> auto_lock(_snapshot_mutex);
+    uint64_t sid = _snapshot_base_id++;
+    *out_path = fmt::format("{}/{}/{}.{}.{}", tablet->data_dir()->path(), SNAPSHOT_PREFIX, time_str,
+                            sid, timeout_s);
     return res;
 }
 
-string SnapshotManager::get_schema_hash_full_path(
-        const TabletSharedPtr& ref_tablet,
-        const string& location) const {
-    stringstream schema_full_path_stream;
-    schema_full_path_stream << location
-                            << "/" << ref_tablet->tablet_id()
-                            << "/" << ref_tablet->schema_hash();
-    string schema_full_path = schema_full_path_stream.str();
-
-    return schema_full_path;
+// prefix: /path/to/data/DATA_PREFIX/shard_id
+// return: /path/to/data/DATA_PREFIX/shard_id/tablet_id/schema_hash
+std::string SnapshotManager::get_schema_hash_full_path(const TabletSharedPtr& ref_tablet,
+                                                       const std::string& prefix) {
+    return fmt::format("{}/{}/{}", prefix, ref_tablet->tablet_id(), ref_tablet->schema_hash());
 }
 
-string SnapshotManager::_get_header_full_path(
-        const TabletSharedPtr& ref_tablet,
-        const std::string& schema_hash_path) const {
-    stringstream header_name_stream;
-    header_name_stream << schema_hash_path << "/" << ref_tablet->tablet_id() << ".hdr";
-    return header_name_stream.str();
+std::string SnapshotManager::_get_header_full_path(const TabletSharedPtr& ref_tablet,
+                                                   const std::string& schema_hash_path) const {
+    return fmt::format("{}/{}.hdr", schema_hash_path, ref_tablet->tablet_id());
 }
 
-OLAPStatus SnapshotManager::_link_index_and_data_files(
-        const string& schema_hash_path,
-        const TabletSharedPtr& ref_tablet,
+std::string SnapshotManager::_get_json_header_full_path(const TabletSharedPtr& ref_tablet,
+                                                        const std::string& schema_hash_path) const {
+    return fmt::format("{}/{}.hdr.json", schema_hash_path, ref_tablet->tablet_id());
+}
+
+Status SnapshotManager::_link_index_and_data_files(
+        const std::string& schema_hash_path, const TabletSharedPtr& ref_tablet,
         const std::vector<RowsetSharedPtr>& consistent_rowsets) {
-    OLAPStatus res = OLAP_SUCCESS;
+    Status res = Status::OK();
     for (auto& rs : consistent_rowsets) {
-        RETURN_NOT_OK(rs->link_files_to(schema_hash_path, rs->rowset_id()));
+        RETURN_IF_ERROR(rs->link_files_to(schema_hash_path, rs->rowset_id()));
     }
     return res;
 }
 
-OLAPStatus SnapshotManager::_create_snapshot_files(
-        const TabletSharedPtr& ref_tablet,
-        const TSnapshotRequest& request,
-        string* snapshot_path, 
-        int32_t snapshot_version) {
-    
-    LOG(INFO) << "receive a make snapshot request,"
-              << " request detail is " << apache::thrift::ThriftDebugString(request)
-              << " snapshot_path is " << *snapshot_path
-              << " snapshot_version is " << snapshot_version;
-    OLAPStatus res = OLAP_SUCCESS;
+// `rs_metas` MUST already be sorted by `RowsetMeta::comparator`
+Status check_version_continuity(const std::vector<RowsetSharedPtr>& rowsets) {
+    if (rowsets.size() < 2) {
+        return Status::OK();
+    }
+    auto prev = rowsets.begin();
+    for (auto it = rowsets.begin() + 1; it != rowsets.end(); ++it) {
+        if ((*prev)->end_version() + 1 != (*it)->start_version()) {
+            return Status::InternalError("versions are not continuity: prev={} cur={}",
+                                         (*prev)->version().to_string(),
+                                         (*it)->version().to_string());
+        }
+        prev = it;
+    }
+    return Status::OK();
+}
+
+Status SnapshotManager::_create_snapshot_files(const TabletSharedPtr& ref_tablet,
+                                               const TSnapshotRequest& request,
+                                               string* snapshot_path,
+                                               bool* allow_incremental_clone) {
+    int32_t snapshot_version = request.preferred_snapshot_version;
+    LOG(INFO) << "receive a make snapshot request"
+              << ", request detail is " << apache::thrift::ThriftDebugString(request)
+              << ", snapshot_version is " << snapshot_version;
+    Status res = Status::OK();
     if (snapshot_path == nullptr) {
-        LOG(WARNING) << "output parameter cannot be NULL";
-        return OLAP_ERR_INPUT_PARAMETER_ERROR;
+        return Status::Error<INVALID_ARGUMENT>("output parameter cannot be null");
     }
 
-    string snapshot_id_path;
+    // snapshot_id_path:
+    //      /data/shard_id/tablet_id/snapshot/time_str/id.timeout/
     int64_t timeout_s = config::snapshot_expire_time_sec;
     if (request.__isset.timeout) {
         timeout_s = request.timeout;
     }
+    std::string snapshot_id_path;
     res = _calc_snapshot_id_path(ref_tablet, timeout_s, &snapshot_id_path);
-    if (res != OLAP_SUCCESS) {
+    if (!res.ok()) {
         LOG(WARNING) << "failed to calc snapshot_id_path, ref tablet="
                      << ref_tablet->data_dir()->path();
         return res;
     }
 
-    string schema_full_path = get_schema_hash_full_path(
-            ref_tablet, snapshot_id_path);
-    string header_path = _get_header_full_path(ref_tablet, schema_full_path);
-    if (FileUtils::check_exist(schema_full_path)) {
-        VLOG(10) << "remove the old schema_full_path.";
-        FileUtils::remove_all(schema_full_path);
+    bool is_copy_binlog = request.__isset.is_copy_binlog ? request.is_copy_binlog : false;
+
+    // schema_full_path_desc.filepath:
+    //      /snapshot_id_path/tablet_id/schema_hash/
+    auto schema_full_path = get_schema_hash_full_path(ref_tablet, snapshot_id_path);
+    // header_path:
+    //      /schema_full_path/tablet_id.hdr
+    auto header_path = _get_header_full_path(ref_tablet, schema_full_path);
+    //      /schema_full_path/tablet_id.hdr.json
+    auto json_header_path = _get_json_header_full_path(ref_tablet, schema_full_path);
+    bool exists = true;
+    RETURN_IF_ERROR(io::global_local_filesystem()->exists(schema_full_path, &exists));
+    if (exists) {
+        VLOG_TRACE << "remove the old schema_full_path." << schema_full_path;
+        RETURN_IF_ERROR(io::global_local_filesystem()->delete_directory(schema_full_path));
     }
 
-    RETURN_WITH_WARN_IF_ERROR(FileUtils::create_dir(schema_full_path), OLAP_ERR_CANNOT_CREATE_DIR,
-            "create path " + schema_full_path + "failed");
-
+    RETURN_IF_ERROR(io::global_local_filesystem()->create_directory(schema_full_path));
     string snapshot_id;
-    RETURN_WITH_WARN_IF_ERROR(FileUtils::canonicalize(snapshot_id_path, &snapshot_id), OLAP_ERR_CANNOT_CREATE_DIR,
-                              "canonicalize path " + snapshot_id_path + " failed");
-    
+    RETURN_IF_ERROR(io::global_local_filesystem()->canonicalize(snapshot_id_path, &snapshot_id));
+
     do {
         TabletMetaSharedPtr new_tablet_meta(new (nothrow) TabletMeta());
         if (new_tablet_meta == nullptr) {
-            LOG(WARNING) << "fail to malloc TabletMeta.";
-            res = OLAP_ERR_MALLOC_ERROR;
+            res = Status::Error<MEM_ALLOC_FAILED>("fail to malloc TabletMeta.");
             break;
         }
-        vector<RowsetSharedPtr> consistent_rowsets;
-        if (request.__isset.missing_version) {
-            ReadLock rdlock(ref_tablet->get_header_lock_ptr());
-            for (int64_t missed_version : request.missing_version) {
-                Version version = { missed_version, missed_version };
-                const RowsetSharedPtr rowset = ref_tablet->get_inc_rowset_by_version(version);
+        std::vector<RowsetSharedPtr> consistent_rowsets;
+        DeleteBitmap delete_bitmap_snapshot(new_tablet_meta->tablet_id());
+
+        /// If set missing_version, try to get all missing version.
+        /// If some of them not exist in tablet, we will fall back to
+        /// make the full snapshot of the tablet.
+        {
+            std::shared_lock rdlock(ref_tablet->get_header_lock());
+            if (ref_tablet->tablet_state() == TABLET_SHUTDOWN) {
+                return Status::Aborted("tablet has shutdown");
+            }
+            bool is_single_rowset_clone =
+                    (request.__isset.start_version && request.__isset.end_version);
+            if (is_single_rowset_clone) {
+                LOG(INFO) << "handle compaction clone make snapshot, tablet_id: "
+                          << ref_tablet->tablet_id();
+                Version version(request.start_version, request.end_version);
+                const RowsetSharedPtr rowset = ref_tablet->get_rowset_by_version(version, false);
                 if (rowset != nullptr) {
                     consistent_rowsets.push_back(rowset);
                 } else {
-                    LOG(WARNING) << "failed to find missed version when snapshot. "
+                    LOG(WARNING) << "failed to find version when do compaction snapshot. "
                                  << " tablet=" << request.tablet_id
                                  << " schema_hash=" << request.schema_hash
-                                 << " version=" << version.first << "-" << version.second;
-                    res = OLAP_ERR_VERSION_NOT_EXIST;
+                                 << " version=" << version;
+                    res = Status::InternalError(
+                            "failed to find version when do compaction snapshot");
                     break;
                 }
             }
-            if (res != OLAP_SUCCESS) {
-                break;
-            }
-            res = ref_tablet->generate_tablet_meta_copy(new_tablet_meta);
-            if (res != OLAP_SUCCESS) {
-                LOG(WARNING) << "fail to load header. res=" << res
-                             << " tablet_id=" << ref_tablet->tablet_id() 
-                             << " schema_hash=" << ref_tablet->schema_hash();
-                break;
-            }
-        } else {
-            ReadLock rdlock(ref_tablet->get_header_lock_ptr());
-            // get latest version
-            const RowsetSharedPtr lastest_version = ref_tablet->rowset_with_max_version();
-            if (lastest_version == nullptr) {
-                LOG(WARNING) << "tablet has not any version. path="
-                             << ref_tablet->full_name().c_str();
-                res = OLAP_ERR_VERSION_NOT_EXIST;
-                break;
-            }
-            // get snapshot version, use request.version if specified
-            int32_t version = lastest_version->end_version();
-            if (request.__isset.version) {
-                if (lastest_version->end_version() < request.version
-                        || (lastest_version->start_version() == lastest_version->end_version()
-                        && lastest_version->end_version() == request.version
-                        && lastest_version->version_hash() != request.version_hash)) {
-                    LOG(WARNING) << "invalid make snapshot request. "
-                                 << " version=" << lastest_version->end_version()
-                                 << " version_hash=" << lastest_version->version_hash()
-                                 << " req_version=" << request.version
-                                 << " req_version_hash=" << request.version_hash;
-                    res = OLAP_ERR_INPUT_PARAMETER_ERROR;
-                    break;
+            // be would definitely set it as true no matter has missed version or not
+            // but it would take no effets on the following range loop
+            if (!is_single_rowset_clone && request.__isset.missing_version) {
+                for (int64_t missed_version : request.missing_version) {
+                    Version version = {missed_version, missed_version};
+                    // find rowset in both rs_meta and stale_rs_meta
+                    const RowsetSharedPtr rowset = ref_tablet->get_rowset_by_version(version, true);
+                    if (rowset != nullptr) {
+                        if (!rowset->is_local()) {
+                            // MUST make full snapshot to ensure `cooldown_meta_id` is consistent with the cooldowned rowsets after clone.
+                            res = Status::Error<ErrorCode::INTERNAL_ERROR>(
+                                    "missed version is a cooldowned rowset, must make full "
+                                    "snapshot. missed_version={}, tablet_id={}",
+                                    missed_version, ref_tablet->tablet_id());
+                            break;
+                        }
+                        consistent_rowsets.push_back(rowset);
+                    } else {
+                        res = Status::InternalError(
+                                "failed to find missed version when snapshot. tablet={}, "
+                                "schema_hash={}, version={}",
+                                request.tablet_id, request.schema_hash, version.to_string());
+                        break;
+                    }
                 }
-                version = request.version;
-            }
-            // get shortest version path
-            // it very important!!!!
-            // it means 0-version has to be a readable version graph
-            res = ref_tablet->capture_consistent_rowsets(Version(0, version), &consistent_rowsets);
-            if (res != OLAP_SUCCESS) {
-                LOG(WARNING) << "fail to select versions to span. res=" << res;
-                break;
             }
 
-            res = ref_tablet->generate_tablet_meta_copy(new_tablet_meta);
-            if (res != OLAP_SUCCESS) {
-                LOG(WARNING) << "fail to load header. res=" << res
-                             << " tablet_id=" << ref_tablet->tablet_id() 
-                             << " schema_hash=" << ref_tablet->schema_hash();
-                break;
+            // be would definitely set it as true no matter has missed version or not, we could
+            // just check whether the missed version is empty or not
+            int64_t version = -1;
+            if (!is_single_rowset_clone && (!res.ok() || request.missing_version.empty())) {
+                if (!request.__isset.missing_version &&
+                    ref_tablet->tablet_meta()->cooldown_meta_id().initialized()) {
+                    LOG(WARNING) << "currently not support backup tablet with cooldowned remote "
+                                    "data. tablet="
+                                 << request.tablet_id;
+                    return Status::NotSupported(
+                            "currently not support backup tablet with cooldowned remote data");
+                }
+                /// not all missing versions are found, fall back to full snapshot.
+                res = Status::OK();         // reset res
+                consistent_rowsets.clear(); // reset vector
+
+                // get latest version
+                const RowsetSharedPtr last_version = ref_tablet->rowset_with_max_version();
+                if (last_version == nullptr) {
+                    res = Status::InternalError("tablet has not any version. path={}",
+                                                ref_tablet->full_name());
+                    break;
+                }
+                // get snapshot version, use request.version if specified
+                version = last_version->end_version();
+                if (request.__isset.version) {
+                    if (last_version->end_version() < request.version) {
+                        res = Status::Error<INVALID_ARGUMENT>(
+                                "invalid make snapshot request. version={}, req_version={}",
+                                last_version->version().to_string(), request.version);
+                        break;
+                    }
+                    version = request.version;
+                }
+                if (ref_tablet->tablet_meta()->cooldown_meta_id().initialized()) {
+                    // Tablet has cooldowned data, MUST pick consistent rowsets with continuous cooldowned version
+                    // Get max cooldowned version
+                    int64_t max_cooldowned_version = -1;
+                    for (auto& [v, rs] : ref_tablet->rowset_map()) {
+                        if (rs->is_local()) {
+                            continue;
+                        }
+                        consistent_rowsets.push_back(rs);
+                        max_cooldowned_version = std::max(max_cooldowned_version, v.second);
+                    }
+                    DCHECK_GE(max_cooldowned_version, 1) << "tablet_id=" << ref_tablet->tablet_id();
+                    std::sort(consistent_rowsets.begin(), consistent_rowsets.end(),
+                              Rowset::comparator);
+                    res = check_version_continuity(consistent_rowsets);
+                    if (res.ok() && max_cooldowned_version < version) {
+                        // Pick consistent rowsets of remaining required version
+                        res = ref_tablet->capture_consistent_rowsets(
+                                {max_cooldowned_version + 1, version}, &consistent_rowsets);
+                    }
+                } else {
+                    // get shortest version path
+                    res = ref_tablet->capture_consistent_rowsets(Version(0, version),
+                                                                 &consistent_rowsets);
+                }
+                if (!res.ok()) {
+                    LOG(WARNING) << "fail to select versions to span. res=" << res;
+                    break;
+                }
+                *allow_incremental_clone = false;
+            } else {
+                version = ref_tablet->max_version_unlocked().second;
+                *allow_incremental_clone = true;
+            }
+
+            // copy the tablet meta to new_tablet_meta inside header lock
+            CHECK(res.ok()) << res;
+            ref_tablet->generate_tablet_meta_copy_unlocked(new_tablet_meta);
+            // The delete bitmap update operation and the add_inc_rowset operation is not atomic,
+            // so delete bitmap may contains some data generated by invisible rowset, we should
+            // get rid of these useless bitmaps when doing snapshot.
+            if (ref_tablet->keys_type() == UNIQUE_KEYS &&
+                ref_tablet->enable_unique_key_merge_on_write()) {
+                delete_bitmap_snapshot =
+                        ref_tablet->tablet_meta()->delete_bitmap().snapshot(version);
             }
         }
 
-        vector<RowsetMetaSharedPtr> rs_metas;
+        std::vector<RowsetMetaSharedPtr> rs_metas;
         for (auto& rs : consistent_rowsets) {
-            res = rs->link_files_to(schema_full_path, rs->rowset_id());
-            if (res != OLAP_SUCCESS) { break; }
+            if (rs->is_local()) {
+                // local rowset
+                res = rs->link_files_to(schema_full_path, rs->rowset_id());
+                if (!res.ok()) {
+                    break;
+                }
+            }
             rs_metas.push_back(rs->rowset_meta());
-            VLOG(3) << "add rowset meta to clone list. " 
-                    << " start version " << rs->rowset_meta()->start_version()
-                    << " end version " << rs->rowset_meta()->end_version()
-                    << " empty " << rs->rowset_meta()->empty();
+            VLOG_NOTICE << "add rowset meta to clone list. "
+                        << " start version " << rs->rowset_meta()->start_version()
+                        << " end version " << rs->rowset_meta()->end_version() << " empty "
+                        << rs->rowset_meta()->empty();
         }
-        if (res != OLAP_SUCCESS) {
+        if (!res.ok()) {
             LOG(WARNING) << "fail to create hard link. [path=" << snapshot_id_path << "]";
             break;
         }
 
-        // clear alter task info in snapshot files
-        new_tablet_meta->delete_alter_task();
+        // The inc_rs_metas is deprecated since Doris version 0.13.
+        // Clear it for safety reason.
+        // Whether it is incremental or full snapshot, rowset information is stored in rs_meta.
+        new_tablet_meta->revise_rs_metas(std::move(rs_metas));
+        if (ref_tablet->keys_type() == UNIQUE_KEYS &&
+            ref_tablet->enable_unique_key_merge_on_write()) {
+            new_tablet_meta->revise_delete_bitmap_unlocked(delete_bitmap_snapshot);
+        }
 
-        if (request.__isset.missing_version) {
-            new_tablet_meta->revise_inc_rs_metas(rs_metas);
-            vector<RowsetMetaSharedPtr> empty_rowsets;
-            new_tablet_meta->revise_rs_metas(empty_rowsets);
-        } else {
-            // If this is a full clone, then should clear inc rowset metas because 
-            // related files is not created
-            vector<RowsetMetaSharedPtr> empty_rowsets;
-            new_tablet_meta->revise_inc_rs_metas(empty_rowsets);
-            new_tablet_meta->revise_rs_metas(rs_metas);
-        }
-        if (snapshot_version < PREFERRED_SNAPSHOT_VERSION) {
-            set<string> exist_old_files;
-            Status ret = FileUtils::list_dirs_files(schema_full_path, nullptr, &exist_old_files,
-                                       Env::Default());
-            if (!ret.ok()) { 
-                res = OLAP_ERR_DISK_FAILURE;
-                LOG(WARNING) << "failed to dir walk when convert old files. dir=" 
-                             << schema_full_path << ", error:" << ret.to_string();
-                break;
-            }
-            OlapSnapshotConverter converter;
-            TabletMetaPB tablet_meta_pb;
-            OLAPHeaderMessage olap_header_msg;
-            new_tablet_meta->to_meta_pb(&tablet_meta_pb);
-            res = converter.to_old_snapshot(tablet_meta_pb, schema_full_path, schema_full_path, &olap_header_msg);
-            if (res != OLAP_SUCCESS) {
-                break;
-            }
-            // convert new version files to old version files successuflly, then should remove the old files
-            vector<string> files_to_delete;
-            for (auto file_name : exist_old_files) {
-                string full_file_path = schema_full_path + "/" + file_name;
-                files_to_delete.push_back(full_file_path);
-            }
-            // remove all files
-            ret = FileUtils::remove_paths(files_to_delete);
-            if (!ret.ok()) {
-                res = OLAP_ERR_IO_ERROR;
-                LOG(WARNING) << "remove paths failed. error: " << ret.to_string(); 
-                break;
-            }
-            // save new header to snapshot header path
-            res = converter.save(header_path, olap_header_msg);
-            LOG(INFO) << "finished convert new snapshot to old snapshot, res=" << res;
-        } else {
+        if (snapshot_version == g_Types_constants.TSNAPSHOT_REQ_VERSION2) {
             res = new_tablet_meta->save(header_path);
+            if (res.ok() && request.__isset.is_copy_tablet_task && request.is_copy_tablet_task) {
+                res = new_tablet_meta->save_as_json(json_header_path, ref_tablet->data_dir());
+            }
+        } else {
+            res = Status::Error<INVALID_SNAPSHOT_VERSION>(
+                    "snapshot_version not equal to g_Types_constants.TSNAPSHOT_REQ_VERSION2");
         }
-        if (res != OLAP_SUCCESS) {
+
+        if (!res.ok()) {
+            LOG(WARNING) << "convert rowset failed, res:" << res
+                         << ", tablet:" << new_tablet_meta->tablet_id()
+                         << ", schema hash:" << new_tablet_meta->schema_hash()
+                         << ", snapshot_version:" << snapshot_version
+                         << ", is incremental:" << request.__isset.missing_version;
             break;
         }
-        
-        // append a single delta if request.version is end_version of cumulative delta
-        if (request.__isset.version) {
-            for (auto& rs : consistent_rowsets) {
-                if (rs->end_version() == request.version) {
-                    if (rs->start_version() != request.version) {
-                        // visible version in fe is 900
-                        // A need to clone 900 from B, but B's last version is 901, and 901 is not a visible version
-                        // and 901 will be reverted
-                        // since 900 is not the last version in B, 900 maybe compacted with other versions
-                        // if A only get 900, then A's last version will be a comulative delta
-                        // many codes in be assumes that the last version is a single delta
-                        // both clone and backup restore depend on this logic
-                        // TODO (yiguolei) fix it in the future
-                        // res = _append_single_delta(request, data_dir);
-                        if (res != OLAP_SUCCESS) {
-                            LOG(WARNING) << "fail to append single delta. res=" << res;
-                        }
-                    }
+
+    } while (false);
+
+    // link all binlog files to snapshot path
+    do {
+        if (!res.ok()) {
+            break;
+        }
+
+        if (!is_copy_binlog) {
+            break;
+        }
+
+        RowsetBinlogMetasPB rowset_binlog_metas_pb;
+        if (request.__isset.missing_version) {
+            res = ref_tablet->get_rowset_binlog_metas(request.missing_version,
+                                                      &rowset_binlog_metas_pb);
+        } else {
+            std::vector<TVersion> missing_versions;
+            res = ref_tablet->get_rowset_binlog_metas(missing_versions, &rowset_binlog_metas_pb);
+        }
+        if (!res.ok()) {
+            break;
+        }
+        if (rowset_binlog_metas_pb.rowset_binlog_metas_size() == 0) {
+            break;
+        }
+
+        // write to pb file
+        auto rowset_binlog_metas_pb_filename =
+                fmt::format("{}/rowset_binlog_metas.pb", schema_full_path);
+        res = write_pb(rowset_binlog_metas_pb_filename, rowset_binlog_metas_pb);
+        if (!res.ok()) {
+            break;
+        }
+
+        for (auto& rowset_binlog_meta : rowset_binlog_metas_pb.rowset_binlog_metas()) {
+            std::string segment_file_path;
+            auto num_segments = rowset_binlog_meta.num_segments();
+            std::string_view rowset_id = rowset_binlog_meta.rowset_id();
+
+            for (int64_t segment_index = 0; segment_index < num_segments; ++segment_index) {
+                segment_file_path = ref_tablet->get_segment_filepath(rowset_id, segment_index);
+                auto snapshot_segment_file_path =
+                        fmt::format("{}/{}_{}.binlog", schema_full_path, rowset_id, segment_index);
+
+                res = io::global_local_filesystem()->link_file(segment_file_path,
+                                                               snapshot_segment_file_path);
+                if (!res.ok()) {
+                    LOG(WARNING) << "fail to link binlog file. [src=" << segment_file_path
+                                 << ", dest=" << snapshot_segment_file_path << "]";
                     break;
                 }
             }
-        }
-    } while (0);
 
-    if (res != OLAP_SUCCESS) {
+            if (!res.ok()) {
+                break;
+            }
+        }
+    } while (false);
+
+    if (!res.ok()) {
         LOG(WARNING) << "fail to make snapshot, try to delete the snapshot path. path="
                      << snapshot_id_path.c_str();
 
-        if (FileUtils::check_exist(snapshot_id_path)) {
-            VLOG(3) << "remove snapshot path. [path=" << snapshot_id_path << "]";
-            FileUtils::remove_all(snapshot_id_path);
+        bool exists = true;
+        RETURN_IF_ERROR(io::global_local_filesystem()->exists(snapshot_id_path, &exists));
+        if (exists) {
+            VLOG_NOTICE << "remove snapshot path. [path=" << snapshot_id_path << "]";
+            RETURN_IF_ERROR(io::global_local_filesystem()->delete_directory(snapshot_id_path));
         }
     } else {
         *snapshot_path = snapshot_id;
@@ -532,4 +675,4 @@ OLAPStatus SnapshotManager::_create_snapshot_files(
     return res;
 }
 
-}  // namespace doris
+} // namespace doris

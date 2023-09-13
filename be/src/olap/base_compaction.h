@@ -15,39 +15,48 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_SRC_OLAP_BASE_COMPACTION_H
-#define DORIS_BE_SRC_OLAP_BASE_COMPACTION_H
+#pragma once
 
+#include <butil/macros.h>
+
+#include <string>
+#include <vector>
+
+#include "common/status.h"
+#include "io/io_common.h"
 #include "olap/compaction.h"
+#include "olap/rowset/rowset.h"
+#include "olap/tablet.h"
 
 namespace doris {
 
 // BaseCompaction is derived from Compaction.
 // BaseCompaction will implements
-//   1. its policy to pick rowsests
+//   1. its policy to pick rowsets
 //   2. do compaction to produce new rowset.
 
 class BaseCompaction : public Compaction {
 public:
-    BaseCompaction(TabletSharedPtr tablet);
+    BaseCompaction(const TabletSharedPtr& tablet);
     ~BaseCompaction() override;
 
-    OLAPStatus compact() override;
+    Status prepare_compact() override;
+    Status execute_compact_impl() override;
+
+    std::vector<RowsetSharedPtr> get_input_rowsets() { return _input_rowsets; }
 
 protected:
-    OLAPStatus pick_rowsets_to_compact() override;
-    std::string compaction_name() const override {
-        return "base compaction";
-    }
+    Status pick_rowsets_to_compact() override;
+    std::string compaction_name() const override { return "base compaction"; }
 
-    ReaderType compaction_type() const override {
-        return ReaderType::READER_BASE_COMPACTION;
-    }
+    ReaderType compaction_type() const override { return ReaderType::READER_BASE_COMPACTION; }
 
 private:
+    // filter input rowset in some case:
+    // 1. dup key without delete predicate
+    void _filter_input_rowset();
+
     DISALLOW_COPY_AND_ASSIGN(BaseCompaction);
 };
 
-}  // namespace doris
-
-#endif // DORIS_BE_SRC_OLAP_BASE_COMPACTION_H
+} // namespace doris

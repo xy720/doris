@@ -15,12 +15,14 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#pragma once
+
 #include <cstddef>
 #include <string>
 
 namespace doris {
 
-void errno_to_cstring(int err, char *buf, size_t buf_len);
+void errno_to_cstring(int err, char* buf, size_t buf_len);
 
 // Return a string representing an errno.
 inline static std::string errno_to_string(int err) {
@@ -29,4 +31,4 @@ inline static std::string errno_to_string(int err) {
     return std::string(buf);
 }
 
-}
+} // namespace doris

@@ -17,36 +17,25 @@
 
 #include "runtime/large_int_value.h"
 
-#include "util/string_parser.hpp"
-
 #include <string>
+
+#include "util/hash_util.hpp"
+#include "util/string_parser.hpp"
 
 namespace doris {
 
 std::ostream& operator<<(std::ostream& os, __int128 const& value) {
     std::ostream::sentry s(os);
     if (s) {
-        unsigned __int128 tmp = value < 0 ? -value : value;
-        char buffer[48];
-        char* d = std::end(buffer);
-        do {
-            --d;
-            *d = "0123456789"[tmp % 10];
-            tmp /= 10;
-        } while (tmp != 0);
-        if (value < 0) {
-            --d;
-            *d = '-';
-        }
-        int len = std::end(buffer) - d;
-        if (os.rdbuf()->sputn(d, len) != len) {
+        std::string value_str = fmt::format("{}", value);
+        if (os.rdbuf()->sputn(value_str.data(), value_str.size()) != value_str.size()) {
             os.setstate(std::ios_base::badbit);
         }
     }
     return os;
 }
 
-std::istream& operator>>(std::istream& is, __int128 & value) {
+std::istream& operator>>(std::istream& is, __int128& value) {
     std::string str;
     is >> str;
     StringParser::ParseResult result;
@@ -61,6 +50,6 @@ std::size_t hash_value(__int128 const& value) {
     return HashUtil::hash(&value, sizeof(value), 0);
 }
 
-}
+} // namespace doris
 
 /* vim: set expandtab ts=4 sw=4 sts=4 tw=100: */

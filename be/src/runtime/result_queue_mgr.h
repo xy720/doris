@@ -17,45 +17,43 @@
 
 #pragma once
 
-#include <map>
+#include <gen_cpp/Types_types.h>
+
 #include <memory>
 #include <mutex>
 #include <unordered_map>
 
 #include "common/status.h"
-#include "util/blocking_queue.hpp"
-#include "util/hash_util.hpp"
-#include "runtime/primitive_type.h"
-#include "runtime/raw_value.h"
-
+#include "util/hash_util.hpp" // IWYU pragma: keep
 
 namespace arrow {
-    
+
 class RecordBatch;
 }
 
 namespace doris {
 
-class TUniqueId;
-class TScanRowBatch;
-typedef std::shared_ptr<BlockingQueue< std::shared_ptr<arrow::RecordBatch>>> shared_block_queue_t;
+class RecordBatchQueue;
+
+using BlockQueueSharedPtr = std::shared_ptr<RecordBatchQueue>;
 
 class ResultQueueMgr {
-
 public:
     ResultQueueMgr();
     ~ResultQueueMgr();
 
-    Status fetch_result(const TUniqueId& fragment_instance_id, std::shared_ptr<arrow::RecordBatch>* result, bool *eos);
+    Status fetch_result(const TUniqueId& fragment_instance_id,
+                        std::shared_ptr<arrow::RecordBatch>* result, bool* eos);
 
-    void create_queue(const TUniqueId& fragment_instance_id, shared_block_queue_t* queue);
+    void create_queue(const TUniqueId& fragment_instance_id, BlockQueueSharedPtr* queue);
 
     Status cancel(const TUniqueId& fragment_id);
 
+    void update_queue_status(const TUniqueId& fragment_id, const Status& status);
+
 private:
     std::mutex _lock;
-    u_int32_t _max_sink_batch_count;
-    std::unordered_map<TUniqueId, shared_block_queue_t> _fragment_queue_map;
+    std::unordered_map<TUniqueId, BlockQueueSharedPtr> _fragment_queue_map;
 };
 
-}
+} // namespace doris

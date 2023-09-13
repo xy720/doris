@@ -54,6 +54,11 @@ struct TScanOpenParams {
   10: optional string passwd
     // max keep alive time min
   11: optional i16 keep_alive_min
+
+  12: optional i32 execution_timeout
+  
+  // memory limit for a single query
+  13: optional i64 mem_limit
 }
 
 struct TScanColumnDesc {

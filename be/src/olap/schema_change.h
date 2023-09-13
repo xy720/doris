@@ -15,112 +15,149 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_SRC_OLAP_SCHEMA_CHANGE_H
-#define DORIS_BE_SRC_OLAP_SCHEMA_CHANGE_H
+#pragma once
 
-#include <deque>
-#include <queue>
+#include <butil/macros.h>
+#include <fmt/format.h>
+#include <gen_cpp/Descriptors_types.h>
+#include <glog/logging.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#include <memory>
+#include <ostream>
+#include <set>
+#include <shared_mutex>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
 #include <vector>
 
-#include "gen_cpp/AgentService_types.h"
-#include "olap/delete_handler.h"
-#include "olap/rowset/rowset.h"
-#include "olap/rowset/rowset_writer.h"
-#include "olap/tablet.h"
+#include "common/config.h"
+#include "common/object_pool.h"
+#include "common/status.h"
 #include "olap/column_mapping.h"
+#include "olap/olap_common.h"
+#include "olap/rowset/rowset.h"
+#include "olap/rowset/rowset_reader.h"
+#include "olap/rowset/rowset_writer.h"
+#include "olap/rowset/segment_v2/inverted_index_writer.h"
+#include "olap/tablet.h"
+#include "olap/tablet_schema.h"
+#include "runtime/descriptors.h"
+#include "runtime/memory/mem_tracker.h"
+#include "vec/data_types/data_type.h"
 
 namespace doris {
-// defined in 'field.h'
+class DeleteHandler;
 class Field;
-class FieldInfo;
-// defined in 'tablet.h'
-class Tablet;
-// defined in 'row_block.h'
-class RowBlock;
-// defined in 'row_cursor.h'
-class RowCursor;
+class TAlterInvertedIndexReq;
+class TAlterTabletReqV2;
+class TExpr;
+enum AlterTabletType : int;
+enum RowsetTypePB : int;
+enum SegmentsOverlapPB : int;
 
-class RowBlockChanger {
+namespace vectorized {
+class Block;
+class OlapBlockDataConvertor;
+} // namespace vectorized
+
+class BlockChanger {
 public:
-    RowBlockChanger(const TabletSchema& tablet_schema,
-                    const TabletSharedPtr& base_tablet,
-                    const DeleteHandler& delete_handler);
+    BlockChanger(TabletSchemaSPtr tablet_schema, DescriptorTbl desc_tbl);
 
-    RowBlockChanger(const TabletSchema& tablet_schema,
-                    const TabletSharedPtr& base_tablet);
-
-    virtual ~RowBlockChanger();
+    ~BlockChanger();
 
     ColumnMapping* get_mutable_column_mapping(size_t column_index);
 
-    SchemaMapping get_schema_mapping() const {
-        return _schema_mapping;
-    }
+    Status change_block(vectorized::Block* ref_block, vectorized::Block* new_block) const;
 
-    bool change_row_block(
-            const RowBlock* ref_block,
-            int32_t data_version,
-            RowBlock* mutable_block,
-            uint64_t* filtered_rows) const;
+    void set_where_expr(const std::shared_ptr<TExpr>& where_expr) { _where_expr = where_expr; }
+
+    void set_type(AlterTabletType type) { _type = type; }
+
+    void set_compatible_version(int32_t version) noexcept { _fe_compatible_version = version; }
+
+    bool has_where() const { return _where_expr != nullptr; }
 
 private:
+    Status _check_cast_valid(vectorized::ColumnPtr ref_column, vectorized::ColumnPtr new_column,
+                             AlterTabletType type) const;
+
     // @brief column-mapping specification of new schema
     SchemaMapping _schema_mapping;
 
-    // delete handler for filtering data which use specified in DELETE_DATA
-    DeleteHandler _delete_handler;
+    DescriptorTbl _desc_tbl;
 
-    DISALLOW_COPY_AND_ASSIGN(RowBlockChanger);
-};
+    std::shared_ptr<TExpr> _where_expr;
 
-class RowBlockAllocator {
-public:
-    RowBlockAllocator(const TabletSchema& tablet_schema, size_t memory_limitation);
-    virtual ~RowBlockAllocator();
+    AlterTabletType _type;
 
-    OLAPStatus allocate(RowBlock** row_block, size_t num_rows,
-                        bool null_supported);
-    void release(RowBlock* row_block);
-
-private:
-    const TabletSchema& _tablet_schema;
-    size_t _memory_allocated;
-    size_t _row_len;
-    size_t _memory_limitation;
+    int32_t _fe_compatible_version = -1;
 };
 
 class SchemaChange {
 public:
     SchemaChange() : _filtered_rows(0), _merged_rows(0) {}
-    virtual ~SchemaChange() {}
+    virtual ~SchemaChange() = default;
 
-    virtual bool process(RowsetReaderSharedPtr rowset_reader,
-                         RowsetWriter* new_rowset_builder,
-                         TabletSharedPtr tablet,
-                         TabletSharedPtr base_tablet) = 0;
+    virtual Status process(RowsetReaderSharedPtr rowset_reader, RowsetWriter* rowset_writer,
+                           TabletSharedPtr new_tablet, TabletSharedPtr base_tablet,
+                           TabletSchemaSPtr base_tablet_schema) {
+        if (rowset_reader->rowset()->empty() || rowset_reader->rowset()->num_rows() == 0) {
+            RETURN_WITH_WARN_IF_ERROR(
+                    rowset_writer->flush(), Status::Error<ErrorCode::INVALID_ARGUMENT>(""),
+                    fmt::format("create empty version for schema change failed. version= {}-{}",
+                                rowset_writer->version().first, rowset_writer->version().second));
 
-    void add_filtered_rows(uint64_t filtered_rows) {
-        _filtered_rows += filtered_rows;
-    }
+            return Status::OK();
+        }
 
-    void add_merged_rows(uint64_t merged_rows) {
-        _merged_rows += merged_rows;
-    }
-
-    uint64_t filtered_rows() const {
-        return _filtered_rows;
-    }
-
-    uint64_t merged_rows() const {
-        return _merged_rows;
-    }
-
-    void reset_filtered_rows() {
         _filtered_rows = 0;
+        _merged_rows = 0;
+
+        RETURN_IF_ERROR(
+                _inner_process(rowset_reader, rowset_writer, new_tablet, base_tablet_schema));
+        _add_filtered_rows(rowset_reader->filtered_rows());
+
+        // Check row num changes
+        if (!_check_row_nums(rowset_reader, *rowset_writer)) {
+            return Status::Error<ErrorCode::ALTER_STATUS_ERR>("SchemaChange check row nums failed");
+        }
+
+        LOG(INFO) << "all row nums. source_rows=" << rowset_reader->rowset()->num_rows()
+                  << ", merged_rows=" << merged_rows() << ", filtered_rows=" << filtered_rows()
+                  << ", new_index_rows=" << rowset_writer->num_rows();
+        return Status::OK();
     }
 
-    void reset_merged_rows() {
-        _merged_rows = 0;
+    uint64_t filtered_rows() const { return _filtered_rows; }
+
+    uint64_t merged_rows() const { return _merged_rows; }
+
+protected:
+    void _add_filtered_rows(uint64_t filtered_rows) { _filtered_rows += filtered_rows; }
+
+    void _add_merged_rows(uint64_t merged_rows) { _merged_rows += merged_rows; }
+
+    virtual Status _inner_process(RowsetReaderSharedPtr rowset_reader, RowsetWriter* rowset_writer,
+                                  TabletSharedPtr new_tablet, TabletSchemaSPtr base_tablet_schema) {
+        return Status::NotSupported("inner process unsupported.");
+    }
+
+    virtual bool _check_row_nums(RowsetReaderSharedPtr reader, const RowsetWriter& writer) const {
+        if (reader->rowset()->num_rows() != writer.num_rows() + _merged_rows + _filtered_rows) {
+            LOG(WARNING) << "fail to check row num! "
+                         << "source_rows=" << reader->rowset()->num_rows()
+                         << ", writer rows=" << writer.num_rows()
+                         << ", merged_rows=" << merged_rows()
+                         << ", filtered_rows=" << filtered_rows()
+                         << ", new_index_rows=" << writer.num_rows();
+            return false;
+        }
+        return true;
     }
 
 private:
@@ -130,146 +167,122 @@ private:
 
 class LinkedSchemaChange : public SchemaChange {
 public:
-    explicit LinkedSchemaChange(const RowBlockChanger& row_block_changer)
-        : _row_block_changer(row_block_changer) { }
-    ~LinkedSchemaChange() {}
+    explicit LinkedSchemaChange(const BlockChanger& changer) : _changer(changer) {}
+    ~LinkedSchemaChange() override = default;
 
-    bool process(RowsetReaderSharedPtr rowset_reader,
-                 RowsetWriter* new_rowset_writer,
-                 TabletSharedPtr new_tablet,
-                 TabletSharedPtr base_tablet) override;
+    Status process(RowsetReaderSharedPtr rowset_reader, RowsetWriter* rowset_writer,
+                   TabletSharedPtr new_tablet, TabletSharedPtr base_tablet,
+                   TabletSchemaSPtr base_tablet_schema) override;
+
 private:
-    const RowBlockChanger& _row_block_changer;
+    const BlockChanger& _changer;
     DISALLOW_COPY_AND_ASSIGN(LinkedSchemaChange);
 };
 
-// @brief schema change without sorting.
-class SchemaChangeDirectly : public SchemaChange {
+class VSchemaChangeDirectly : public SchemaChange {
 public:
-    // @params tablet           the instance of tablet which has new schema.
-    // @params row_block_changer    changer to modifiy the data of RowBlock
-    explicit SchemaChangeDirectly(
-            const RowBlockChanger& row_block_changer);
-    virtual ~SchemaChangeDirectly();
-
-    virtual bool process(RowsetReaderSharedPtr rowset_reader,
-                         RowsetWriter* new_rowset_writer,
-                         TabletSharedPtr new_tablet,
-                         TabletSharedPtr base_tablet) override;
+    VSchemaChangeDirectly(const BlockChanger& changer) : _changer(changer) {}
 
 private:
-    const RowBlockChanger& _row_block_changer;
-    RowBlockAllocator* _row_block_allocator;
-    RowCursor* _cursor;
+    Status _inner_process(RowsetReaderSharedPtr rowset_reader, RowsetWriter* rowset_writer,
+                          TabletSharedPtr new_tablet, TabletSchemaSPtr base_tablet_schema) override;
 
-    bool _write_row_block(RowsetWriter* rowset_builder, RowBlock* row_block);
+    bool _check_row_nums(RowsetReaderSharedPtr reader, const RowsetWriter& writer) const override {
+        return _changer.has_where() || SchemaChange::_check_row_nums(reader, writer);
+    }
 
-    DISALLOW_COPY_AND_ASSIGN(SchemaChangeDirectly);
+    const BlockChanger& _changer;
 };
 
 // @breif schema change with sorting
-class SchemaChangeWithSorting : public SchemaChange {
+class VSchemaChangeWithSorting : public SchemaChange {
 public:
-    explicit SchemaChangeWithSorting(
-            const RowBlockChanger& row_block_changer,
-            size_t memory_limitation);
-    virtual ~SchemaChangeWithSorting();
-
-    virtual bool process(RowsetReaderSharedPtr rowset_reader,
-                         RowsetWriter* new_rowset_builder,
-                         TabletSharedPtr new_tablet,
-                         TabletSharedPtr base_tablet) override;
+    VSchemaChangeWithSorting(const BlockChanger& changer, size_t memory_limitation);
+    ~VSchemaChangeWithSorting() override = default;
 
 private:
-    bool _internal_sorting(
-            const std::vector<RowBlock*>& row_block_arr,
-            const Version& temp_delta_versions,
-            const VersionHash version_hash,
-            TabletSharedPtr new_tablet,
-            RowsetTypePB new_rowset_type,
-            RowsetSharedPtr* rowset);
+    Status _inner_process(RowsetReaderSharedPtr rowset_reader, RowsetWriter* rowset_writer,
+                          TabletSharedPtr new_tablet, TabletSchemaSPtr base_tablet_schema) override;
 
-    bool _external_sorting(
-            std::vector<RowsetSharedPtr>& src_rowsets,
-            RowsetWriter* rowset_writer,
-            TabletSharedPtr new_tablet);
+    Status _internal_sorting(const std::vector<std::unique_ptr<vectorized::Block>>& blocks,
+                             const Version& temp_delta_versions, int64_t newest_write_timestamp,
+                             TabletSharedPtr new_tablet, RowsetTypePB new_rowset_type,
+                             SegmentsOverlapPB segments_overlap, RowsetSharedPtr* rowset);
 
-    const RowBlockChanger& _row_block_changer;
+    Status _external_sorting(std::vector<RowsetSharedPtr>& src_rowsets, RowsetWriter* rowset_writer,
+                             TabletSharedPtr new_tablet);
+
+    bool _check_row_nums(RowsetReaderSharedPtr reader, const RowsetWriter& writer) const override {
+        return _changer.has_where() || SchemaChange::_check_row_nums(reader, writer);
+    }
+
+    const BlockChanger& _changer;
     size_t _memory_limitation;
     Version _temp_delta_versions;
-    RowBlockAllocator* _row_block_allocator;
-
-    DISALLOW_COPY_AND_ASSIGN(SchemaChangeWithSorting);
+    std::unique_ptr<MemTracker> _mem_tracker;
 };
 
 class SchemaChangeHandler {
 public:
-    SchemaChangeHandler() {}
-    virtual ~SchemaChangeHandler() {}
-
-    OLAPStatus process_alter_tablet(AlterTabletType alter_tablet_type,
-                                   const TAlterTabletReq& request);
-
-    OLAPStatus schema_version_convert(TabletSharedPtr base_tablet,
-                                      TabletSharedPtr new_tablet,
-                                      RowsetSharedPtr* base_rowset,
-                                      RowsetSharedPtr* new_rowset);
-    
     // schema change v2, it will not set alter task in base tablet
-    OLAPStatus process_alter_tablet_v2(const TAlterTabletReqV2& request);
+    static Status process_alter_tablet_v2(const TAlterTabletReqV2& request);
+
+    static std::unique_ptr<SchemaChange> get_sc_procedure(const BlockChanger& changer,
+                                                          bool sc_sorting, bool sc_directly) {
+        if (sc_sorting) {
+            return std::make_unique<VSchemaChangeWithSorting>(
+                    changer, config::memory_limitation_per_thread_for_schema_change_bytes);
+        }
+
+        if (sc_directly) {
+            return std::make_unique<VSchemaChangeDirectly>(changer);
+        }
+
+        return std::make_unique<LinkedSchemaChange>(changer);
+    }
+
+    static bool tablet_in_converting(int64_t tablet_id);
 
 private:
-    // 检查schema_change相关的状态:清理"一对"schema_change table间的信息
-    // 由于A->B的A的schema_change信息会在后续处理过程中覆盖（这里就没有额外清除）
-    // Returns:
-    //  成功：如果存在历史信息，没有问题的就清空；或者没有历史信息
-    //  失败：否则如果有历史信息且无法清空的（有version还没有完成）
-    OLAPStatus _check_and_clear_schema_change_info(TabletSharedPtr tablet,
-                                                   const TAlterTabletReq& request);
+    static Status _get_versions_to_be_changed(TabletSharedPtr base_tablet,
+                                              std::vector<Version>* versions_to_be_changed,
+                                              RowsetSharedPtr* max_rowset);
 
-    OLAPStatus _get_versions_to_be_changed(TabletSharedPtr base_tablet,
-                                           std::vector<Version>* versions_to_be_changed);
+    struct AlterMaterializedViewParam {
+        std::string column_name;
+        std::string origin_column_name;
+        std::shared_ptr<TExpr> expr;
+    };
 
     struct SchemaChangeParams {
         AlterTabletType alter_tablet_type;
         TabletSharedPtr base_tablet;
         TabletSharedPtr new_tablet;
+        TabletSchemaSPtr base_tablet_schema = nullptr;
         std::vector<RowsetReaderSharedPtr> ref_rowset_readers;
-        DeleteHandler delete_handler;
+        DeleteHandler* delete_handler = nullptr;
+        std::unordered_map<std::string, AlterMaterializedViewParam> materialized_params_map;
+        DescriptorTbl* desc_tbl = nullptr;
+        ObjectPool pool;
+        int32_t be_exec_version;
     };
 
-    // add alter task to base_tablet and new_tablet.
-    // add A->(B|C|...) relation chain to all of them.
-    OLAPStatus _add_alter_task(AlterTabletType alter_tablet_type,
-                               TabletSharedPtr base_tablet,
-                               TabletSharedPtr new_tablet,
-                               const std::vector<Version>& versions_to_be_changed);
-    OLAPStatus _save_alter_state(AlterTabletState state,
-                                 TabletSharedPtr base_tablet,
-                                 TabletSharedPtr new_tablet);
-                                
-    OLAPStatus _do_process_alter_tablet_v2(const TAlterTabletReqV2& request);
-    
-    OLAPStatus _validate_alter_result(TabletSharedPtr new_tablet, const TAlterTabletReqV2& request);
+    static Status _do_process_alter_tablet_v2(const TAlterTabletReqV2& request);
 
-    static OLAPStatus _convert_historical_rowsets(const SchemaChangeParams& sc_params);
+    static Status _validate_alter_result(TabletSharedPtr new_tablet,
+                                         const TAlterTabletReqV2& request);
 
-    static OLAPStatus _parse_request(TabletSharedPtr base_tablet,
-                                     TabletSharedPtr new_tablet,
-                                     RowBlockChanger* rb_changer,
-                                     bool* sc_sorting,
-                                     bool* sc_directly);
+    static Status _convert_historical_rowsets(const SchemaChangeParams& sc_params);
 
-    // 需要新建default_value时的初始化设置
-    static OLAPStatus _init_column_mapping(ColumnMapping* column_mapping,
-                                           const TabletColumn& column_schema,
-                                           const std::string& value);
-private:
-    RowsetReaderContext _reader_context;
+    static Status _parse_request(const SchemaChangeParams& sc_params, BlockChanger* changer,
+                                 bool* sc_sorting, bool* sc_directly);
 
-    DISALLOW_COPY_AND_ASSIGN(SchemaChangeHandler);
+    // Initialization Settings for creating a default value
+    static Status _init_column_mapping(ColumnMapping* column_mapping,
+                                       const TabletColumn& column_schema, const std::string& value);
+
+    static std::shared_mutex _mutex;
+    static std::unordered_set<int64_t> _tablet_ids_in_converting;
+    static std::set<std::string> _supported_functions;
 };
-
-}  // namespace doris
-
-#endif // DORIS_BE_SRC_OLAP_SCHEMA_CHANGE_H
+} // namespace doris

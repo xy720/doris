@@ -17,11 +17,16 @@
 
 #include "exec/decompressor.h"
 
+#include <strings.h>
+
+#include <ostream>
+
+#include "common/logging.h"
+
 namespace doris {
 
-Status Decompressor::create_decompressor(CompressType type,
-                                         Decompressor** decompressor) {
-    switch(type) {
+Status Decompressor::create_decompressor(CompressType type, Decompressor** decompressor) {
+    switch (type) {
     case CompressType::UNCOMPRESSED:
         *decompressor = nullptr;
         break;
@@ -37,26 +42,31 @@ Status Decompressor::create_decompressor(CompressType type,
     case CompressType::LZ4FRAME:
         *decompressor = new Lz4FrameDecompressor();
         break;
+    case CompressType::LZ4BLOCK:
+        *decompressor = new Lz4BlockDecompressor();
+        break;
+    case CompressType::SNAPPYBLOCK:
+        *decompressor = new SnappyBlockDecompressor();
+        break;
 #ifdef DORIS_WITH_LZO
     case CompressType::LZOP:
         *decompressor = new LzopDecompressor();
         break;
 #endif
     default:
-        std::stringstream ss;
-        ss << "Unknown compress type: " << type;
-        return Status::InternalError(ss.str());
+        return Status::InternalError("Unknown compress type: {}", type);
     }
 
     Status st = Status::OK();
     if (*decompressor != nullptr) {
         st = (*decompressor)->init();
     }
-    
+
     return st;
 }
 
-Decompressor::~Decompressor() {
+uint32_t Decompressor::_read_int32(uint8_t* buf) {
+    return (buf[0] << 24) | (buf[1] << 16) | (buf[2] << 8) | buf[3];
 }
 
 std::string Decompressor::debug_info() {
@@ -64,17 +74,16 @@ std::string Decompressor::debug_info() {
 }
 
 // Gzip
-GzipDecompressor::GzipDecompressor(bool is_deflate):
-    Decompressor(_is_deflate ? CompressType::DEFLATE : CompressType::GZIP),
-    _is_deflate(is_deflate) {
-}
+GzipDecompressor::GzipDecompressor(bool is_deflate)
+        : Decompressor(is_deflate ? CompressType::DEFLATE : CompressType::GZIP),
+          _is_deflate(is_deflate) {}
 
 GzipDecompressor::~GzipDecompressor() {
-    (void) inflateEnd(&_z_strm);
+    (void)inflateEnd(&_z_strm);
 }
 
 Status GzipDecompressor::init() {
-    _z_strm = {0};
+    _z_strm = {};
     _z_strm.zalloc = Z_NULL;
     _z_strm.zfree = Z_NULL;
     _z_strm.opaque = Z_NULL;
@@ -82,19 +91,16 @@ Status GzipDecompressor::init() {
     int window_bits = _is_deflate ? WINDOW_BITS : (WINDOW_BITS | DETECT_CODEC);
     int ret = inflateInit2(&_z_strm, window_bits);
     if (ret < 0) {
-        std::stringstream ss;
-        ss << "Failed to init inflate. status code: " << ret;
-        return Status::InternalError(ss.str());
+        return Status::InternalError("Failed to init inflate. status code: {}", ret);
     }
 
     return Status::OK();
 }
 
-Status GzipDecompressor::decompress(
-        uint8_t* input, size_t input_len, size_t* input_bytes_read,
-        uint8_t* output, size_t output_max_len,
-        size_t* decompressed_len, bool* stream_end,
-       size_t* more_input_bytes, size_t* more_output_bytes) {
+Status GzipDecompressor::decompress(uint8_t* input, size_t input_len, size_t* input_bytes_read,
+                                    uint8_t* output, size_t output_max_len,
+                                    size_t* decompressed_len, bool* stream_end,
+                                    size_t* more_input_bytes, size_t* more_output_bytes) {
     // 1. set input and output
     _z_strm.next_in = input;
     _z_strm.avail_in = input_len;
@@ -109,15 +115,14 @@ Status GzipDecompressor::decompress(
         //   Provide more output starting at next_out and update next_out and avail_out
         //       accordingly.
         // inflate() returns Z_OK if some progress has been made (more input processed
-        // or more output produced) 
+        // or more output produced)
 
         int ret = inflate(&_z_strm, Z_NO_FLUSH);
         *input_bytes_read = input_len - _z_strm.avail_in;
         *decompressed_len = output_max_len - _z_strm.avail_out;
 
-        VLOG(10) << "gzip dec ret: " << ret
-                 << " input_bytes_read: " << *input_bytes_read
-                 << " decompressed_len: " << *decompressed_len;
+        VLOG_TRACE << "gzip dec ret: " << ret << " input_bytes_read: " << *input_bytes_read
+                   << " decompressed_len: " << *decompressed_len;
 
         if (ret == Z_BUF_ERROR) {
             // Z_BUF_ERROR indicates that inflate() could not consume more input or
@@ -130,14 +135,10 @@ Status GzipDecompressor::decompress(
             // reset _z_strm to continue decoding a subsequent gzip stream
             ret = inflateReset(&_z_strm);
             if (ret != Z_OK) {
-                std::stringstream ss;
-                ss << "Failed to inflateRset. return code: " << ret;
-                return Status::InternalError(ss.str());
+                return Status::InternalError("Failed to inflateReset. return code: {}", ret);
             }
         } else if (ret != Z_OK) {
-            std::stringstream ss;
-            ss << "Failed to inflate. return code: " << ret;
-            return Status::InternalError(ss.str());
+            return Status::InternalError("Failed to inflate. return code: {}", ret);
         } else {
             // here ret must be Z_OK.
             // we continue if avail_out and avail_in > 0.
@@ -150,7 +151,8 @@ Status GzipDecompressor::decompress(
 
 std::string GzipDecompressor::debug_info() {
     std::stringstream ss;
-    ss << "GzipDecompressor." << " is_deflate: " << _is_deflate;
+    ss << "GzipDecompressor."
+       << " is_deflate: " << _is_deflate;
     return ss.str();
 }
 
@@ -163,20 +165,16 @@ Status Bzip2Decompressor::init() {
     bzero(&_bz_strm, sizeof(_bz_strm));
     int ret = BZ2_bzDecompressInit(&_bz_strm, 0, 0);
     if (ret != BZ_OK) {
-        std::stringstream ss;
-        ss << "Failed to init bz2. status code: " << ret;
-        return Status::InternalError(ss.str());
+        return Status::InternalError("Failed to init bz2. status code: {}", ret);
     }
 
     return Status::OK();
 }
 
-Status Bzip2Decompressor::decompress(
-        uint8_t* input, size_t input_len, size_t* input_bytes_read,
-        uint8_t* output, size_t output_max_len,
-        size_t* decompressed_len, bool* stream_end,
-        size_t* more_input_bytes, size_t* more_output_bytes) {
-
+Status Bzip2Decompressor::decompress(uint8_t* input, size_t input_len, size_t* input_bytes_read,
+                                     uint8_t* output, size_t output_max_len,
+                                     size_t* decompressed_len, bool* stream_end,
+                                     size_t* more_input_bytes, size_t* more_output_bytes) {
     // 1. set input and output
     _bz_strm.next_in = const_cast<char*>(reinterpret_cast<const char*>(input));
     _bz_strm.avail_in = input_len;
@@ -193,28 +191,22 @@ Status Bzip2Decompressor::decompress(
         if (ret == BZ_DATA_ERROR || ret == BZ_DATA_ERROR_MAGIC) {
             LOG(INFO) << "input_bytes_read: " << *input_bytes_read
                       << " decompressed_len: " << *decompressed_len;
-            std::stringstream ss;
-            ss << "Failed to bz2 decompress. status code: " << ret;
-            return Status::InternalError(ss.str());
+            return Status::InternalError("Failed to bz2 decompress. status code: {}", ret);
         } else if (ret == BZ_STREAM_END) {
             *stream_end = true;
             ret = BZ2_bzDecompressEnd(&_bz_strm);
             if (ret != BZ_OK) {
-                std::stringstream ss;
-                ss << "Failed to end bz2 after meet BZ_STREAM_END. status code: " << ret;
-                return Status::InternalError(ss.str());
+                return Status::InternalError(
+                        "Failed to end bz2 after meet BZ_STREAM_END. status code: {}", ret);
             }
 
             ret = BZ2_bzDecompressInit(&_bz_strm, 0, 0);
             if (ret != BZ_OK) {
-                std::stringstream ss;
-                ss << "Failed to init bz2 after meet BZ_STREAM_END. status code: " << ret;
-                return Status::InternalError(ss.str());
+                return Status::InternalError(
+                        "Failed to init bz2 after meet BZ_STREAM_END. status code: {}", ret);
             }
         } else if (ret != BZ_OK) {
-            std::stringstream ss;
-            ss << "Failed to bz2 decompress. status code: " << ret;
-            return Status::InternalError(ss.str());
+            return Status::InternalError("Failed to bz2 decompress. status code: {}", ret);
         } else {
             // continue
         }
@@ -252,17 +244,15 @@ Status Lz4FrameDecompressor::init() {
     return Status::OK();
 }
 
-Status Lz4FrameDecompressor::decompress(
-        uint8_t* input, size_t input_len, size_t* input_bytes_read,
-        uint8_t* output, size_t output_max_len,
-        size_t* decompressed_len, bool* stream_end,
-        size_t* more_input_bytes, size_t* more_output_bytes) {
-
+Status Lz4FrameDecompressor::decompress(uint8_t* input, size_t input_len, size_t* input_bytes_read,
+                                        uint8_t* output, size_t output_max_len,
+                                        size_t* decompressed_len, bool* stream_end,
+                                        size_t* more_input_bytes, size_t* more_output_bytes) {
     uint8_t* src = input;
-    size_t src_size = input_len;
+    size_t remaining_input_size = input_len;
     size_t ret = 1;
     *input_bytes_read = 0;
-    
+
     if (_expect_dec_buf_size == -1) {
         // init expected decompress buf size, and check if output_max_len is large enough
         // ATTN: _expect_dec_buf_size is uninit, which means this is the first time to call
@@ -270,48 +260,45 @@ Status Lz4FrameDecompressor::decompress(
         //       where lz4 header section is there.
 
         if (input_len < 15) {
-            std::stringstream ss;
-            ss << "Lz4 header size is between 7 and 15 bytes. "
-               << "but input size is only: " << input_len;
-            return Status::InternalError(ss.str());
+            return Status::InternalError(
+                    "Lz4 header size is between 7 and 15 bytes. "
+                    "but input size is only: {}",
+                    input_len);
         }
 
         LZ4F_frameInfo_t info;
-        ret = LZ4F_getFrameInfo(_dctx, &info, (void*) src, &src_size);
+        ret = LZ4F_getFrameInfo(_dctx, &info, (void*)src, &remaining_input_size);
         if (LZ4F_isError(ret)) {
-            std::stringstream ss;
-            ss << "LZ4F_getFrameInfo error: " << std::string(LZ4F_getErrorName(ret));
-            return Status::InternalError(ss.str());
+            return Status::InternalError("LZ4F_getFrameInfo error: {}",
+                                         std::string(LZ4F_getErrorName(ret)));
         }
 
         _expect_dec_buf_size = get_block_size(&info);
         if (_expect_dec_buf_size == -1) {
-            std::stringstream ss;
-            ss << "Impossible lz4 block size unless more block sizes are allowed"
-               << std::string(LZ4F_getErrorName(ret));
-            return Status::InternalError(ss.str());
+            return Status::InternalError(
+                    "Impossible lz4 block size unless more block sizes are allowed {}",
+                    std::string(LZ4F_getErrorName(ret)));
         }
 
-        *input_bytes_read = src_size;
+        *input_bytes_read = remaining_input_size;
 
-        src += src_size;
-        src_size = input_len - src_size;
+        src += remaining_input_size;
+        remaining_input_size = input_len - remaining_input_size;
 
         LOG(INFO) << "lz4 block size: " << _expect_dec_buf_size;
-    } 
-    
+    }
+
     // decompress
     size_t output_len = output_max_len;
-    ret = LZ4F_decompress(_dctx, (void*) output, &output_len, (void*) src, &src_size,
-                          /* LZ4F_decompressOptions_t */ NULL);
+    ret = LZ4F_decompress(_dctx, (void*)output, &output_len, (void*)src, &remaining_input_size,
+                          /* LZ4F_decompressOptions_t */ nullptr);
     if (LZ4F_isError(ret)) {
-        std::stringstream ss;
-        ss << "Decompression error: " << std::string(LZ4F_getErrorName(ret));
-        return Status::InternalError(ss.str());
+        return Status::InternalError("Decompression error: {}",
+                                     std::string(LZ4F_getErrorName(ret)));
     }
 
     // update
-    *input_bytes_read += src_size;
+    *input_bytes_read += remaining_input_size;
     *decompressed_len = output_len;
     if (ret == 0) {
         *stream_end = true;
@@ -332,15 +319,180 @@ std::string Lz4FrameDecompressor::debug_info() {
 
 size_t Lz4FrameDecompressor::get_block_size(const LZ4F_frameInfo_t* info) {
     switch (info->blockSizeID) {
-        case LZ4F_default:
-        case LZ4F_max64KB:  return 1 << 16;
-        case LZ4F_max256KB: return 1 << 18;
-        case LZ4F_max1MB:   return 1 << 20;
-        case LZ4F_max4MB:   return 1 << 22;
-        default:
-            // error
-            return -1;
+    case LZ4F_default:
+    case LZ4F_max64KB:
+        return 1 << 16;
+    case LZ4F_max256KB:
+        return 1 << 18;
+    case LZ4F_max1MB:
+        return 1 << 20;
+    case LZ4F_max4MB:
+        return 1 << 22;
+    default:
+        // error
+        return -1;
     }
 }
 
-} // namespace
+/// Lz4BlockDecompressor
+Status Lz4BlockDecompressor::init() {
+    return Status::OK();
+}
+
+Status Lz4BlockDecompressor::decompress(uint8_t* input, size_t input_len, size_t* input_bytes_read,
+                                        uint8_t* output, size_t output_max_len,
+                                        size_t* decompressed_len, bool* stream_end,
+                                        size_t* more_input_bytes, size_t* more_output_bytes) {
+    uint8_t* src = input;
+    size_t remaining_input_size = input_len;
+    int64_t uncompressed_total_len = 0;
+    *input_bytes_read = 0;
+
+    // The hadoop lz4 codec is as:
+    // <4 byte big endian uncompressed size>
+    // <4 byte big endian compressed size>
+    // <lz4 compressed block>
+    // ....
+    // <4 byte big endian uncompressed size>
+    // <4 byte big endian compressed size>
+    // <lz4 compressed block>
+    //
+    // See:
+    // https://github.com/apache/hadoop/blob/trunk/hadoop-mapreduce-project/hadoop-mapreduce-client/hadoop-mapreduce-client-nativetask/src/main/native/src/codec/Lz4Codec.cc
+    while (remaining_input_size > 0) {
+        // Read uncompressed size
+        uint32_t uncompressed_block_len = Decompressor::_read_int32(src);
+        int64_t remaining_output_size = output_max_len - uncompressed_total_len;
+        if (remaining_output_size < uncompressed_block_len) {
+            // Need more output buffer
+            *more_output_bytes = uncompressed_block_len - remaining_output_size;
+            break;
+        }
+
+        // Read compressed size
+        size_t tmp_src_size = remaining_input_size - sizeof(uint32_t);
+        size_t compressed_len = Decompressor::_read_int32(src + sizeof(uint32_t));
+        if (compressed_len == 0 || compressed_len > tmp_src_size) {
+            // Need more input data
+            *more_input_bytes = compressed_len - tmp_src_size;
+            break;
+        }
+
+        src += 2 * sizeof(uint32_t);
+        remaining_input_size -= 2 * sizeof(uint32_t);
+
+        // Decompress
+        int uncompressed_len = LZ4_decompress_safe(reinterpret_cast<const char*>(src),
+                                                   reinterpret_cast<char*>(output), compressed_len,
+                                                   remaining_output_size);
+        if (uncompressed_len < 0 || uncompressed_len != uncompressed_block_len) {
+            return Status::InternalError(
+                    "lz4 block decompress failed. uncompressed_len: {}, expected: {}",
+                    uncompressed_len, uncompressed_block_len);
+        }
+
+        output += uncompressed_len;
+        src += compressed_len;
+        remaining_input_size -= compressed_len;
+        uncompressed_total_len += uncompressed_len;
+    }
+
+    *input_bytes_read += (input_len - remaining_input_size);
+    *decompressed_len = uncompressed_total_len;
+    // If no more input and output need, means this is the end of a compressed block
+    *stream_end = (*more_input_bytes == 0 && *more_output_bytes == 0);
+
+    return Status::OK();
+}
+
+std::string Lz4BlockDecompressor::debug_info() {
+    std::stringstream ss;
+    ss << "Lz4BlockDecompressor.";
+    return ss.str();
+}
+
+/// SnappyBlockDecompressor
+Status SnappyBlockDecompressor::init() {
+    return Status::OK();
+}
+
+Status SnappyBlockDecompressor::decompress(uint8_t* input, size_t input_len,
+                                           size_t* input_bytes_read, uint8_t* output,
+                                           size_t output_max_len, size_t* decompressed_len,
+                                           bool* stream_end, size_t* more_input_bytes,
+                                           size_t* more_output_bytes) {
+    uint8_t* src = input;
+    size_t remaining_input_size = input_len;
+    int64_t uncompressed_total_len = 0;
+    *input_bytes_read = 0;
+
+    // The hadoop snappy codec is as:
+    // <4 byte big endian uncompressed size>
+    // <4 byte big endian compressed size>
+    // <snappy compressed block>
+    // ....
+    // <4 byte big endian uncompressed size>
+    // <4 byte big endian compressed size>
+    // <snappy compressed block>
+    //
+    // See:
+    // https://github.com/apache/hadoop/blob/trunk/hadoop-mapreduce-project/hadoop-mapreduce-client/hadoop-mapreduce-client-nativetask/src/main/native/src/codec/SnappyCodec.cc
+    while (remaining_input_size > 0) {
+        // Read uncompressed size
+        uint32_t uncompressed_block_len = Decompressor::_read_int32(src);
+        int64_t remaining_output_size = output_max_len - uncompressed_total_len;
+        if (remaining_output_size < uncompressed_block_len) {
+            // Need more output buffer
+            *more_output_bytes = uncompressed_block_len - remaining_output_size;
+            break;
+        }
+
+        // Read compressed size
+        size_t tmp_src_size = remaining_input_size - sizeof(uint32_t);
+        size_t compressed_len = _read_int32(src + sizeof(uint32_t));
+        if (compressed_len == 0 || compressed_len > tmp_src_size) {
+            // Need more input data
+            *more_input_bytes = compressed_len - tmp_src_size;
+            break;
+        }
+
+        src += 2 * sizeof(uint32_t);
+        remaining_input_size -= 2 * sizeof(uint32_t);
+
+        // ATTN: the uncompressed len from GetUncompressedLength() is same as
+        // uncompressed_block_len, so I think it is unnecessary to get it again.
+        // Get uncompressed len from snappy
+        // size_t uncompressed_len;
+        // if (!snappy::GetUncompressedLength(reinterpret_cast<const char*>(src),
+        //             compressed_len, &uncompressed_len)) {
+        //     return Status::InternalError("snappy block decompress failed to get uncompressed len");
+        // }
+
+        // Decompress
+        if (!snappy::RawUncompress(reinterpret_cast<const char*>(src), compressed_len,
+                                   reinterpret_cast<char*>(output))) {
+            return Status::InternalError("snappy block decompress failed. uncompressed_len: {}",
+                                         uncompressed_block_len);
+        }
+
+        output += uncompressed_block_len;
+        src += compressed_len;
+        remaining_input_size -= compressed_len;
+        uncompressed_total_len += uncompressed_block_len;
+    }
+
+    *input_bytes_read += (input_len - remaining_input_size);
+    *decompressed_len = uncompressed_total_len;
+    // If no more input and output need, means this is the end of a compressed block
+    *stream_end = (*more_input_bytes == 0 && *more_output_bytes == 0);
+
+    return Status::OK();
+}
+
+std::string SnappyBlockDecompressor::debug_info() {
+    std::stringstream ss;
+    ss << "SnappyBlockDecompressor.";
+    return ss.str();
+}
+
+} // namespace doris

@@ -43,10 +43,37 @@ enum TExprNodeType {
   TUPLE_IS_NULL_PRED,
   INFO_FUNC,
   FUNCTION_CALL,
+  ARRAY_LITERAL,
   
   // TODO: old style compute functions. this will be deprecated
   COMPUTE_FUNCTION_CALL,
   LARGE_INT_LITERAL,
+
+  // only used in runtime filter
+  BLOOM_PRED,
+
+  // for josn
+  JSON_LITERAL,
+
+  // only used in runtime filter
+  BITMAP_PRED,
+
+  // for fulltext search
+  MATCH_PRED,
+
+  // for map 
+  MAP_LITERAL,
+
+  // for struct
+  STRUCT_LITERAL,
+
+  // for schema change
+  SCHEMA_CHANGE_EXPR,
+  // for lambda function expr
+  LAMBDA_FUNCTION_EXPR,
+  LAMBDA_FUNCTION_CALL_EXPR,
+  // for column_ref expr
+  COLUMN_REF,
 }
 
 //enum TAggregationOp {
@@ -69,6 +96,7 @@ enum TExprNodeType {
 struct TAggregateExpr {
   // Indicates whether this expr is the merge() of an aggregation.
   1: required bool is_merge_agg
+  2: optional list<Types.TTypeDesc> param_types
 }
 struct TBoolLiteral {
   1: required bool value
@@ -111,21 +139,42 @@ struct TLikePredicate {
   1: required string escape_char;
 }
 
+struct TMatchPredicate {
+  1: required string parser_type;
+  2: required string parser_mode;
+}
+
 struct TLiteralPredicate {
   1: required bool value
   2: required bool is_null
 }
 
+enum TNullSide {
+   LEFT,
+   RIGHT
+}
+
 struct TTupleIsNullPredicate {
   1: required list<Types.TTupleId> tuple_ids
+  2: optional TNullSide null_side
 }
 
 struct TSlotRef {
   1: required Types.TSlotId slot_id
   2: required Types.TTupleId tuple_id
+  3: optional i32 col_unique_id
+}
+
+struct TColumnRef {
+  1: optional Types.TSlotId column_id
+  2: optional string column_name
 }
 
 struct TStringLiteral {
+  1: required string value;
+}
+
+struct TJsonLiteral {
   1: required string value;
 }
 
@@ -141,6 +190,11 @@ struct TFunctionCallExpr {
   // If set, this aggregate function udf has varargs and this is the index for the
   // first variable argument.
   2: optional i32 vararg_start_idx
+}
+
+struct TSchemaChangeExpr {
+  // target schema change table
+  1: optional i64 table_id 
 }
 
 // This is essentially a union over the subclasses of Expr.
@@ -178,12 +232,25 @@ struct TExprNode {
   // If set, child[vararg_start_idx] is the first vararg child.
   27: optional i32 vararg_start_idx
   28: optional Types.TPrimitiveType child_type
+
+  // For vectorized engine
+  29: optional bool is_nullable
+  
+  30: optional TJsonLiteral json_literal
+  31: optional TSchemaChangeExpr schema_change_expr 
+
+  32: optional TColumnRef column_ref 
+  33: optional TMatchPredicate match_predicate
 }
 
 // A flattened representation of a tree of Expr nodes, obtained by depth-first
 // traversal.
 struct TExpr {
   1: required list<TExprNode> nodes
+}
+
+struct TExprList {
+  1: required list<TExpr> exprs
 }
 
 

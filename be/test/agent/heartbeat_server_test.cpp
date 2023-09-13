@@ -15,13 +15,14 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#include "agent/heartbeat_server.h"
+
 #include <ctime>
-#include "gtest/gtest.h"
-#include "gmock/gmock.h"
+
 #include "gen_cpp/HeartbeatService_types.h"
 #include "gen_cpp/Types_types.h"
-#include "agent/heartbeat_server.h"
-#include "util/logging.h"
+#include "gmock/gmock.h"
+#include "gtest/gtest.h"
 
 using ::testing::_;
 using ::testing::Return;
@@ -31,7 +32,7 @@ using std::vector;
 
 namespace doris {
 
-TEST(HeartbeatTest, TestHeartbeat){
+TEST(HeartbeatTest, TestHeartbeat) {
     setenv("DORIS_HOME", "./", 1);
     THeartbeatResult heartbeat_result;
     TMasterInfo ori_master_info;
@@ -46,9 +47,9 @@ TEST(HeartbeatTest, TestHeartbeat){
     EXPECT_EQ(master_info.epoch, heartbeat_server._epoch);
     EXPECT_EQ(master_info.cluster_id, heartbeat_server._master_info->cluster_id);
     EXPECT_EQ(master_info.network_address.hostname,
-            heartbeat_server._master_info->network_address.hostname);
+              heartbeat_server._master_info->network_address.hostname);
     EXPECT_EQ(master_info.network_address.port,
-            heartbeat_server._master_info->network_address.port);
+              heartbeat_server._master_info->network_address.port);
 
     // Diff cluster heartbeat
     master_info.cluster_id = 2;
@@ -69,22 +70,11 @@ TEST(HeartbeatTest, TestHeartbeat){
     EXPECT_EQ(TStatusCode::OK, heartbeat_result.status.status_code);
     EXPECT_EQ(master_info.epoch, heartbeat_server._epoch);
     EXPECT_EQ(master_info.network_address.hostname,
-            heartbeat_server._master_info->network_address.hostname);
+              heartbeat_server._master_info->network_address.hostname);
     EXPECT_EQ(master_info.network_address.port,
-            heartbeat_server._master_info->network_address.port);
+              heartbeat_server._master_info->network_address.port);
 
     heartbeat_server._olap_rootpath_instance = ori_olap_rootpath;
 }
 
-}  // namespace doris
-
-int main(int argc, char **argv) {
-    std::string conffile = std::string(getenv("DORIS_HOME")) + "/conf/be.conf";
-    if (!doris::config::init(conffile.c_str(), false)) {
-        fprintf(stderr, "error read config file. \n");
-        return -1;
-    }
-    doris::init_glog("be-test");
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}
+} // namespace doris

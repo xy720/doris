@@ -15,13 +15,28 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include <http/utils.h>
+#include "http/utils.h"
+
+#include <fcntl.h>
+#include <stdint.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include <memory>
+#include <ostream>
+#include <vector>
 
 #include "common/logging.h"
+#include "common/status.h"
 #include "common/utils.h"
-#include "http/http_common.h"
+#include "http/http_channel.h"
 #include "http/http_headers.h"
+#include "http/http_method.h"
 #include "http/http_request.h"
+#include "http/http_status.h"
+#include "io/fs/file_system.h"
+#include "io/fs/local_file_system.h"
+#include "util/path_util.h"
 #include "util/url_coding.h"
 
 namespace doris {
@@ -56,16 +71,21 @@ bool parse_basic_auth(const HttpRequest& req, std::string* user, std::string* pa
 }
 
 bool parse_basic_auth(const HttpRequest& req, AuthInfo* auth) {
-    std::string full_user;
-    if (!parse_basic_auth(req, &full_user, &auth->passwd)) {
-        return false;
-    }
-    auto pos = full_user.find('@');
-    if (pos != std::string::npos) {
-        auth->user.assign(full_user.data(), pos);
-        auth->cluster.assign(full_user.data() + pos + 1);
+    auto& token = req.header("token");
+    if (token.empty()) {
+        std::string full_user;
+        if (!parse_basic_auth(req, &full_user, &auth->passwd)) {
+            return false;
+        }
+        auto pos = full_user.find('@');
+        if (pos != std::string::npos) {
+            auth->user.assign(full_user.data(), pos);
+            auth->cluster.assign(full_user.data() + pos + 1);
+        } else {
+            auth->user = full_user;
+        }
     } else {
-        auth->user = full_user;
+        auth->token = token;
     }
 
     // set user ip
@@ -78,4 +98,90 @@ bool parse_basic_auth(const HttpRequest& req, AuthInfo* auth) {
     return true;
 }
 
+// Do a simple decision, only deal a few type
+std::string get_content_type(const std::string& file_name) {
+    std::string file_ext = path_util::file_extension(file_name);
+    VLOG_TRACE << "file_name: " << file_name << "; file extension: [" << file_ext << "]";
+    if (file_ext == std::string(".html") || file_ext == std::string(".htm")) {
+        return std::string("text/html; charset=utf-8");
+    } else if (file_ext == std::string(".js")) {
+        return std::string("application/javascript; charset=utf-8");
+    } else if (file_ext == std::string(".css")) {
+        return std::string("text/css; charset=utf-8");
+    } else if (file_ext == std::string(".txt")) {
+        return std::string("text/plain; charset=utf-8");
+    } else if (file_ext == std::string(".png")) {
+        return std::string("image/png");
+    } else if (file_ext == std::string(".ico")) {
+        return std::string("image/x-icon");
+    } else {
+        return "text/plain; charset=utf-8";
+    }
+    return "";
 }
+
+void do_file_response(const std::string& file_path, HttpRequest* req) {
+    if (file_path.find("..") != std::string::npos) {
+        LOG(WARNING) << "Not allowed to read relative path: " << file_path;
+        HttpChannel::send_error(req, HttpStatus::FORBIDDEN);
+        return;
+    }
+
+    // read file content and send response
+    int fd = open(file_path.c_str(), O_RDONLY);
+    if (fd < 0) {
+        LOG(WARNING) << "Failed to open file: " << file_path;
+        HttpChannel::send_error(req, HttpStatus::NOT_FOUND);
+        return;
+    }
+    struct stat st;
+    auto res = fstat(fd, &st);
+    if (res < 0) {
+        close(fd);
+        LOG(WARNING) << "Failed to open file: " << file_path;
+        HttpChannel::send_error(req, HttpStatus::NOT_FOUND);
+        return;
+    }
+
+    int64_t file_size = st.st_size;
+
+    // TODO(lingbin): process "IF_MODIFIED_SINCE" header
+    // TODO(lingbin): process "RANGE" header
+    const std::string& range_header = req->header(HttpHeaders::RANGE);
+    if (!range_header.empty()) {
+        // analyse range header
+    }
+
+    req->add_output_header(HttpHeaders::CONTENT_TYPE, get_content_type(file_path).c_str());
+
+    if (req->method() == HttpMethod::HEAD) {
+        close(fd);
+        req->add_output_header(HttpHeaders::CONTENT_LENGTH, std::to_string(file_size).c_str());
+        HttpChannel::send_reply(req);
+        return;
+    }
+
+    HttpChannel::send_file(req, fd, 0, file_size);
+}
+
+void do_dir_response(const std::string& dir_path, HttpRequest* req) {
+    bool exists = true;
+    std::vector<io::FileInfo> files;
+    Status st = io::global_local_filesystem()->list(dir_path, true, &files, &exists);
+    if (!st.ok()) {
+        LOG(WARNING) << "Failed to scan dir. " << st;
+        HttpChannel::send_error(req, HttpStatus::INTERNAL_SERVER_ERROR);
+    }
+
+    const std::string FILE_DELIMITER_IN_DIR_RESPONSE = "\n";
+
+    std::stringstream result;
+    for (auto& file : files) {
+        result << file.file_name << FILE_DELIMITER_IN_DIR_RESPONSE;
+    }
+
+    std::string result_str = result.str();
+    HttpChannel::send_reply(req, result_str);
+}
+
+} // namespace doris

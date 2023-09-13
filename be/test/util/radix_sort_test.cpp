@@ -15,15 +15,21 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include <random>
-#include <gtest/gtest.h>
-#include <algorithm>
-#include <iterator>
-#include <iostream>
-#include <cstdlib>
-
-#include "util/tdigest.h"
 #include "util/radix_sort.h"
+
+#include <gtest/gtest-message.h>
+#include <gtest/gtest-test-part.h>
+
+#include <algorithm>
+// IWYU pragma: no_include <bits/std_abs.h>
+#include <cmath> // IWYU pragma: keep
+#include <cmath>
+#include <cstdlib>
+#include <limits>
+#include <random>
+#include <vector>
+
+#include "gtest/gtest_pred_impl.h"
 
 namespace doris {
 
@@ -51,18 +57,6 @@ protected:
         // Code here will be called immediately after each test (right
         // before the destructor).
     }
-
-    static void SetUpTestCase() {
-        static bool initialized = false;
-        if (!initialized) {
-            FLAGS_logtostderr = true;
-            google::InstallFailureSignalHandler();
-            google::InitGoogleLogging("testing::RadixSortTest");
-            initialized = true;
-        }
-    }
-
-    // Objects declared here can be used by all tests in the test case for Foo.
 };
 
 TEST_F(RadixSortTest, TestUint32Sort) {
@@ -122,15 +116,15 @@ TEST_F(RadixSortTest, TestFloatSort) {
     radixSortLSD(data.data(), data.size());
     for (size_t i = 0; i < num_values + 4; ++i) {
         if (i == 0) {
-            ASSERT_TRUE(compare_float_with_epsilon(data[i], min, 0.0000001));
+            EXPECT_TRUE(compare_float_with_epsilon(data[i], min, 0.0000001));
         } else if (i == num_values + 1) {
-            ASSERT_TRUE(compare_float_with_epsilon(data[i], max, 0.0000001));
+            EXPECT_TRUE(compare_float_with_epsilon(data[i], max, 0.0000001));
         } else if (i == num_values + 2) {
-            ASSERT_TRUE(std::isinf(data[i]));
+            EXPECT_TRUE(std::isinf(data[i]));
         } else if (i == num_values + 3) {
-            ASSERT_TRUE(std::isnan(data[i]));
+            EXPECT_TRUE(std::isnan(data[i]));
         } else {
-            ASSERT_TRUE(compare_float_with_epsilon(data[i], 1.0 * i - 5000 + 0.1, 0.0000001));
+            EXPECT_TRUE(compare_float_with_epsilon(data[i], 1.0 * i - 5000 + 0.1, 0.0000001));
         }
     }
 }
@@ -160,16 +154,16 @@ TEST_F(RadixSortTest, TestDoubleSort) {
     radixSortLSD(data.data(), data.size());
     for (size_t i = 0; i < num_values + 4; ++i) {
         if (i == 0) {
-            ASSERT_TRUE(compare_double_with_epsilon(data[i], min, 0.0000001));
+            EXPECT_TRUE(compare_double_with_epsilon(data[i], min, 0.0000001));
         } else if (i == num_values + 1) {
-            ASSERT_TRUE(compare_double_with_epsilon(data[i], max, 0.0000001));
+            EXPECT_TRUE(compare_double_with_epsilon(data[i], max, 0.0000001));
         } else if (i == num_values + 2) {
-            ASSERT_TRUE(std::isinf(data[i]));
+            EXPECT_TRUE(std::isinf(data[i]));
         } else if (i == num_values + 3) {
-            ASSERT_TRUE(std::isnan(data[i]));
+            EXPECT_TRUE(std::isnan(data[i]));
         } else {
             double tmp = 1.0 * i - 5000 + 0.1;
-            ASSERT_TRUE(compare_double_with_epsilon(data[i], tmp, 0.0000001));
+            EXPECT_TRUE(compare_double_with_epsilon(data[i], tmp, 0.0000001));
         }
     }
 }
@@ -190,7 +184,7 @@ struct RadixSortTestTraits {
     using Transform = RadixSortFloatTransform<KeyBits>;
     using Allocator = RadixSortMallocAllocator;
 
-    static Key & extractKey(Element& elem) { return elem.d1;    }
+    static Key& extractKey(Element& elem) { return elem.d1; }
 };
 
 TEST_F(RadixSortTest, TestObjectSort) {
@@ -215,24 +209,18 @@ TEST_F(RadixSortTest, TestObjectSort) {
     RadixSort<RadixSortTestTraits>::executeLSD(data.data(), data.size());
     for (size_t i = 0; i < num_values + 4; ++i) {
         if (i == 0) {
-            ASSERT_TRUE(compare_float_with_epsilon(data[i].d1, min, 0.0000001));
+            EXPECT_TRUE(compare_float_with_epsilon(data[i].d1, min, 0.0000001));
         } else if (i == num_values + 1) {
-            ASSERT_TRUE(compare_float_with_epsilon(data[i].d1, max, 0.0000001));
+            EXPECT_TRUE(compare_float_with_epsilon(data[i].d1, max, 0.0000001));
         } else if (i == num_values + 2) {
-            ASSERT_TRUE(std::isinf(data[i].d1));
+            EXPECT_TRUE(std::isinf(data[i].d1));
         } else if (i == num_values + 3) {
-            ASSERT_TRUE(std::isnan(data[i].d1));
+            EXPECT_TRUE(std::isnan(data[i].d1));
         } else {
             float tmp = 1.0 * i - 5000 + 0.1;
-            ASSERT_TRUE(compare_float_with_epsilon(data[i].d1, tmp, 0.0000001));
+            EXPECT_TRUE(compare_float_with_epsilon(data[i].d1, tmp, 0.0000001));
         }
     }
 }
 
-
-}  // namespace stesting
-
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}
+} // namespace doris

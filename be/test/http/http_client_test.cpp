@@ -17,14 +17,19 @@
 
 #include "http/http_client.h"
 
-#include <gtest/gtest.h>
+#include <gtest/gtest-message.h>
+#include <gtest/gtest-test-part.h>
+#include <unistd.h>
 
-#include "boost/algorithm/string.hpp"
-#include "common/logging.h"
+#include <boost/algorithm/string/predicate.hpp>
+
+#include "gtest/gtest_pred_impl.h"
 #include "http/ev_http_server.h"
 #include "http/http_channel.h"
 #include "http/http_handler.h"
+#include "http/http_headers.h"
 #include "http/http_request.h"
+#include "http/utils.h"
 
 namespace doris {
 
@@ -63,112 +68,139 @@ public:
                 HttpChannel::send_reply(req, post_body);
             } else {
                 HttpChannel::send_reply(req, "empty");
-            } 
-        } 
+            }
+        }
     }
 };
 
-static HttpClientTestSimpleGetHandler s_simple_get_handler = HttpClientTestSimpleGetHandler();
-static HttpClientTestSimplePostHandler s_simple_post_handler = HttpClientTestSimplePostHandler();
+class HttpNotFoundHandler : public HttpHandler {
+public:
+    void handle(HttpRequest* req) override {
+        HttpChannel::send_reply(req, HttpStatus::NOT_FOUND, "file not exist.");
+    }
+};
+
 static EvHttpServer* s_server = nullptr;
+static int real_port = 0;
+static std::string hostname = "";
+
+static HttpClientTestSimpleGetHandler s_simple_get_handler;
+static HttpClientTestSimplePostHandler s_simple_post_handler;
+static HttpNotFoundHandler s_not_found_handler;
 
 class HttpClientTest : public testing::Test {
 public:
-    HttpClientTest() { }
-    ~HttpClientTest() override { }
+    HttpClientTest() {}
+    ~HttpClientTest() override {}
 
     static void SetUpTestCase() {
-        s_server = new EvHttpServer(29998);
+        s_server = new EvHttpServer(0);
         s_server->register_handler(GET, "/simple_get", &s_simple_get_handler);
         s_server->register_handler(HEAD, "/simple_get", &s_simple_get_handler);
         s_server->register_handler(POST, "/simple_post", &s_simple_post_handler);
+        s_server->register_handler(GET, "/not_found", &s_not_found_handler);
         s_server->start();
+        real_port = s_server->get_real_port();
+        EXPECT_NE(0, real_port);
+        hostname = "http://127.0.0.1:" + std::to_string(real_port);
     }
 
-    static void TearDownTestCase() {
-        delete s_server;
-    }
+    static void TearDownTestCase() { delete s_server; }
 };
 
 TEST_F(HttpClientTest, get_normal) {
     HttpClient client;
-    auto st = client.init("http://127.0.0.1:29998/simple_get");
-    ASSERT_TRUE(st.ok());
+    auto st = client.init(hostname + "/simple_get");
+    EXPECT_TRUE(st.ok());
     client.set_method(GET);
     client.set_basic_auth("test1", "");
     std::string response;
     st = client.execute(&response);
-    ASSERT_TRUE(st.ok());
-    ASSERT_STREQ("test1", response.c_str());
+    EXPECT_TRUE(st.ok());
+    EXPECT_STREQ("test1", response.c_str());
 
     // for head
-    st = client.init("http://127.0.0.1:29998/simple_get");
-    ASSERT_TRUE(st.ok());
+    st = client.init(hostname + "/simple_get");
+    EXPECT_TRUE(st.ok());
     client.set_method(HEAD);
     client.set_basic_auth("test1", "");
     st = client.execute();
-    ASSERT_TRUE(st.ok());
-    ASSERT_EQ(5, client.get_content_length());
+    EXPECT_TRUE(st.ok());
+    uint64_t len = 0;
+    st = client.get_content_length(&len);
+    EXPECT_TRUE(st.ok());
+    EXPECT_EQ(5, len);
 }
 
 TEST_F(HttpClientTest, download) {
     HttpClient client;
-    auto st = client.init("http://127.0.0.1:29998/simple_get");
-    ASSERT_TRUE(st.ok());
+    auto st = client.init(hostname + "/simple_get");
+    EXPECT_TRUE(st.ok());
     client.set_basic_auth("test1", "");
     std::string local_file = ".http_client_test.dat";
     st = client.download(local_file);
-    ASSERT_TRUE(st.ok());
+    EXPECT_TRUE(st.ok());
     char buf[50];
     auto fp = fopen(local_file.c_str(), "r");
     auto size = fread(buf, 1, 50, fp);
     buf[size] = 0;
-    ASSERT_STREQ("test1", buf);
+    EXPECT_STREQ("test1", buf);
     unlink(local_file.c_str());
 }
 
 TEST_F(HttpClientTest, get_failed) {
     HttpClient client;
-    auto st = client.init("http://127.0.0.1:29998/simple_get");
-    ASSERT_TRUE(st.ok());
+    auto st = client.init(hostname + "/simple_get");
+    EXPECT_TRUE(st.ok());
     client.set_method(GET);
-    client.set_basic_auth("test1", "");
     std::string response;
     st = client.execute(&response);
-    ASSERT_FALSE(!st.ok());
+    EXPECT_FALSE(st.ok());
 }
 
 TEST_F(HttpClientTest, post_normal) {
     HttpClient client;
-    auto st = client.init("http://127.0.0.1:29998/simple_post");
-    ASSERT_TRUE(st.ok());
+    auto st = client.init(hostname + "/simple_post");
+    EXPECT_TRUE(st.ok());
     client.set_method(POST);
     client.set_basic_auth("test1", "");
     std::string response;
     std::string request_body = "simple post body query";
     st = client.execute_post_request(request_body, &response);
-    ASSERT_TRUE(st.ok());
-    ASSERT_EQ(response.length(), request_body.length());
-    ASSERT_STREQ(response.c_str(), request_body.c_str());
+    EXPECT_TRUE(st.ok());
+    EXPECT_EQ(response.length(), request_body.length());
+    EXPECT_STREQ(response.c_str(), request_body.c_str());
 }
 
 TEST_F(HttpClientTest, post_failed) {
     HttpClient client;
-    auto st = client.init("http://127.0.0.1:29998/simple_pos");
-    ASSERT_TRUE(st.ok());
+    auto st = client.init(hostname + "/simple_pos");
+    EXPECT_TRUE(st.ok());
     client.set_method(POST);
     client.set_basic_auth("test1", "");
     std::string response;
     std::string request_body = "simple post body query";
     st = client.execute_post_request(request_body, &response);
-    ASSERT_FALSE(st.ok());
+    EXPECT_FALSE(st.ok());
     std::string not_found = "404";
-    ASSERT_TRUE(boost::algorithm::contains(st.get_error_msg(), not_found));
+    EXPECT_TRUE(boost::algorithm::contains(st.to_string(), not_found));
 }
 
+TEST_F(HttpClientTest, not_found) {
+    HttpClient client;
+    std::string url = hostname + "/not_found";
+    constexpr uint64_t kMaxTimeoutMs = 1000;
+
+    auto get_cb = [&url](HttpClient* client) {
+        std::string resp;
+        RETURN_IF_ERROR(client->init(url));
+        client->set_timeout_ms(kMaxTimeoutMs);
+        return client->execute(&resp);
+    };
+
+    auto status = HttpClient::execute_with_retry(3, 1, get_cb);
+    // libcurl is configured by CURLOPT_FAILONERROR
+    EXPECT_FALSE(status.ok());
 }
 
-int main(int argc, char* argv[]) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}
+} // namespace doris

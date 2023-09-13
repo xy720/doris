@@ -15,19 +15,13 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_SRC_COMMON_UTIL_DEFAULT_PATH_HANDLERS_H
-#define DORIS_BE_SRC_COMMON_UTIL_DEFAULT_PATH_HANDLERS_H
-
-#include <stdio.h>
+#pragma once
 
 namespace doris {
 
-class MemTracker;
 class WebPageHandler;
 
 // Adds a set of default path handlers to the webserver to display
 // logs and configuration flags
-void add_default_path_handlers(WebPageHandler* web_page_handler, MemTracker* process_mem_tracker);
-}
-
-#endif // IMPALA_UTIL_DEFAULT_PATH_HANDLERS_H
+void add_default_path_handlers(WebPageHandler* web_page_handler);
+} // namespace doris

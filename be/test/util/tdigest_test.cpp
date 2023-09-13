@@ -15,9 +15,16 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include <random>
-#include <gtest/gtest.h>
 #include "util/tdigest.h"
+
+#include <gtest/gtest-message.h>
+#include <gtest/gtest-test-part.h>
+
+#include <memory>
+#include <random>
+
+#include "gtest/gtest_pred_impl.h"
+#include "testutil/test_util.h"
 
 namespace doris {
 
@@ -45,18 +52,6 @@ protected:
         // Code here will be called immediately after each test (right
         // before the destructor).
     }
-
-    static void SetUpTestCase() {
-        static bool initialized = false;
-        if (!initialized) {
-            FLAGS_logtostderr = true;
-            google::InstallFailureSignalHandler();
-            google::InitGoogleLogging("testing::TDigestTest");
-            initialized = true;
-        }
-    }
-
-    // Objects declared here can be used by all tests in the test case for Foo.
 };
 
 static double quantile(const double q, const std::vector<double>& values) {
@@ -74,7 +69,8 @@ static double quantile(const double q, const std::vector<double>& values) {
         } else {
             index -= 0.5;
             const int intIndex = static_cast<int>(index);
-            q1 = values[intIndex + 1] * (index - intIndex) + values[intIndex] * (intIndex + 1 - index);
+            q1 = values[intIndex + 1] * (index - intIndex) +
+                 values[intIndex] * (intIndex + 1 - index);
         }
     }
     return q1;
@@ -84,7 +80,7 @@ TEST_F(TDigestTest, CrashAfterMerge) {
     TDigest digest(1000);
     std::uniform_real_distribution<> reals(0.0, 1.0);
     std::random_device gen;
-    for (int i = 0; i < 100000; i++) {
+    for (int i = 0; i < LOOP_LESS_OR_MORE(100, 100000); i++) {
         digest.add(reals(gen));
     }
     digest.compress();
@@ -122,7 +118,7 @@ TEST_F(TDigestTest, FewValues) {
     std::uniform_int_distribution<> bools(0, 1);
     std::uniform_real_distribution<> qvalue(0.0, 1.0);
 
-    const auto length = 10;//dist(gen);
+    const auto length = 10; //dist(gen);
 
     std::vector<double> values;
     values.reserve(length);
@@ -136,7 +132,7 @@ TEST_F(TDigestTest, FewValues) {
 
     EXPECT_EQ(digest.processed().size(), values.size());
 
-    std::vector<double> testValues{0.0, 1.0e-10, qvalue(gen), 0.5, 1.0 - 1e-10, 1.0};
+    std::vector<double> testValues {0.0, 1.0e-10, qvalue(gen), 0.5, 1.0 - 1e-10, 1.0};
     for (auto q : testValues) {
         double q1 = quantile(q, values);
         auto q2 = digest.quantile(q);
@@ -164,7 +160,7 @@ TEST_F(TDigestTest, MoreThan2BValues) {
     }
     EXPECT_EQ(static_cast<long>(1000 + float(10L * (1 << 28))), digest.totalWeight());
     EXPECT_GT(digest.totalWeight(), std::numeric_limits<int32_t>::max());
-    std::vector<double> quantiles{0, 0.1, 0.5, 0.9, 1, reals(gen)};
+    std::vector<double> quantiles {0, 0.1, 0.5, 0.9, 1, reals(gen)};
     std::sort(quantiles.begin(), quantiles.end());
     auto prev = std::numeric_limits<double>::min();
     for (double q : quantiles) {
@@ -175,11 +171,10 @@ TEST_F(TDigestTest, MoreThan2BValues) {
 }
 
 TEST_F(TDigestTest, MergeTest) {
-
     TDigest digest1(1000);
     TDigest digest2(1000);
 
-    digest2.add(std::vector<const TDigest *> {&digest1});
+    digest2.add(std::vector<const TDigest*> {&digest1});
 }
 
 TEST_F(TDigestTest, TestSorted) {
@@ -214,8 +209,8 @@ TEST_F(TDigestTest, ExtremeQuantiles) {
     // [ ?, 10, ?, 20, ?, ?, 50, ?, ? ]
     // and we expect it to compute approximate missing values:
     // [ 5, 10, 15, 20, 30, 40, 50, 60, 70]
-    std::vector<double> values{5.0, 10.0, 15.0, 20.0, 30.0, 35.0, 40.0, 45.0, 50.0};
-    std::vector<double> quantiles{1.5 / 9.0, 3.5 / 9.0, 6.5 / 9.0};
+    std::vector<double> values {5.0, 10.0, 15.0, 20.0, 30.0, 35.0, 40.0, 45.0, 50.0};
+    std::vector<double> quantiles {1.5 / 9.0, 3.5 / 9.0, 6.5 / 9.0};
     for (auto q : quantiles) {
         EXPECT_NEAR(quantile(q, values), digest.quantile(q), 0.01) << "q = " << q;
     }
@@ -225,13 +220,13 @@ TEST_F(TDigestTest, Montonicity) {
     TDigest digest(1000);
     std::uniform_real_distribution<> reals(0.0, 1.0);
     std::random_device gen;
-    for (int i = 0; i < 100000; i++) {
+    for (int i = 0; i < LOOP_LESS_OR_MORE(10, 100000); i++) {
         digest.add(reals(gen));
     }
 
     double lastQuantile = -1;
     double lastX = -1;
-    for (double z = 0; z <= 1; z += 1e-5) {
+    for (double z = 0; z <= 1; z += LOOP_LESS_OR_MORE(0.1, 1e-5)) {
         double x = digest.quantile(z);
         EXPECT_GE(x, lastX);
         lastX = x;
@@ -242,9 +237,4 @@ TEST_F(TDigestTest, Montonicity) {
     }
 }
 
-}  // namespace stesting
-
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}
+} // namespace doris

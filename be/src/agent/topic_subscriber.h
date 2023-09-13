@@ -15,20 +15,19 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_SRC_AGENT_TOPIC_SUBSCRIBER_H
-#define DORIS_BE_SRC_AGENT_TOPIC_SUBSCRIBER_H
+#pragma once
+
+#include <gen_cpp/AgentService_types.h>
 
 #include <map>
-#include <boost/thread.hpp>
-#include "agent/topic_listener.h"
-#include "gen_cpp/AgentService_types.h"
+#include <shared_mutex>
+#include <vector>
 
 namespace doris {
+class TopicListener;
 
 class TopicSubscriber {
-
 public:
-    
     TopicSubscriber();
     ~TopicSubscriber();
     // Put the topic type and listener to the map
@@ -37,8 +36,7 @@ public:
     void handle_updates(const TAgentPublishRequest& agent_publish_request);
 
 private:
-    std::map<TTopicType::type, std::vector<TopicListener*>> _registed_listeners;
-    boost::shared_mutex _listener_mtx;
+    std::map<TTopicType::type, std::vector<TopicListener*>> _registered_listeners;
+    std::shared_mutex _listener_mtx;
 };
 } // namespace doris
-#endif

@@ -14,25 +14,24 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/be/src/util/static-asserts.cpp
+// and modified by Doris
 
-#include <boost/static_assert.hpp>
+#include <stddef.h>
 
-#include "runtime/decimal_value.h"
-#include "runtime/string_value.h"
-#include "runtime/datetime_value.h"
+#include "vec/common/string_ref.h"
+#include "vec/runtime/vdatetime_value.h"
 
 namespace doris {
 // This class is unused.  It contains static (compile time) asserts.
 // This is useful to validate struct sizes and other similar things
-// at compile time.  If these asserts fail, the compile will fail.
+// at compile time.  If these assertions fail, the compiling will fail.
 class UnusedClass {
 private:
-    BOOST_STATIC_ASSERT(sizeof(StringValue) == 16);
-    BOOST_STATIC_ASSERT(offsetof(StringValue, len) == 8);
-    // Datetime value
-    BOOST_STATIC_ASSERT(sizeof(DateTimeValue) == 16);
-    // BOOST_STATIC_ASSERT(offsetof(DateTimeValue, _year) == 8);
-    BOOST_STATIC_ASSERT(sizeof(DecimalValue) == 40);
+    static_assert(sizeof(StringRef) == 16);
+    static_assert(offsetof(StringRef, size) == 8);
+    static_assert(sizeof(doris::vectorized::VecDateTimeValue) == 8);
 };
 
-}
+} // namespace doris

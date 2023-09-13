@@ -20,6 +20,28 @@ namespace java org.apache.doris.thrift
 
 include "Types.thrift"
 include "Exprs.thrift"
+include "Partitions.thrift"
+
+struct TColumn {
+    1: required string column_name
+    2: required Types.TColumnType column_type
+    3: optional Types.TAggregationType aggregation_type
+    4: optional bool is_key
+    5: optional bool is_allow_null
+    6: optional string default_value
+    7: optional bool is_bloom_filter_column
+    8: optional Exprs.TExpr define_expr
+    9: optional bool visible = true
+    10: optional list<TColumn> children_column
+    11: optional i32 col_unique_id  = -1
+    12: optional bool has_bitmap_index = false
+    13: optional bool has_ngram_bf_index = false
+    14: optional i32 gram_size
+    15: optional i32 gram_bf_size
+    16: optional string aggregation
+    17: optional bool result_is_nullable
+    18: optional bool is_auto_increment = false;
+}
 
 struct TSlotDescriptor {
   1: required Types.TSlotId id
@@ -32,6 +54,12 @@ struct TSlotDescriptor {
   8: required string colName;
   9: required i32 slotIdx
   10: required bool isMaterialized
+  11: optional i32 col_unique_id = -1
+  12: optional bool is_key = false
+  // If set to false, then such slots will be ignored during
+  // materialize them.Used to optmize to read less data and less memory usage
+  13: optional bool need_materialize = true
+  14: optional bool is_auto_increment = false;
 }
 
 struct TTupleDescriptor {
@@ -86,7 +114,13 @@ enum TSchemaTableType {
     SCH_USER_PRIVILEGES,
     SCH_VARIABLES,
     SCH_VIEWS,
-    SCH_INVALID
+    SCH_INVALID,
+    SCH_ROWSETS,
+    SCH_BACKENDS,
+    SCH_COLUMN_STATISTICS,
+    SCH_PARAMETERS,
+    SCH_METADATA_NAME_IDS,
+    SCH_PROFILING;
 }
 
 enum THdfsCompression {
@@ -97,6 +131,13 @@ enum THdfsCompression {
   BZIP2,
   SNAPPY,
   SNAPPY_BLOCKED // Used by sequence and rc files but not stored in the metadata.
+}
+
+enum TIndexType {
+  BITMAP,
+  INVERTED,
+  BLOOMFILTER,
+  NGRAM_BF
 }
 
 // Mapping from names defined by Avro to the enum.
@@ -129,6 +170,10 @@ struct TOlapTablePartition {
 
     6: optional list<Exprs.TExprNode> start_keys
     7: optional list<Exprs.TExprNode> end_keys
+    8: optional list<list<Exprs.TExprNode>> in_keys
+    9: optional bool is_mutable = true
+    // only used in List Partition
+    10: optional bool is_default_partition;
 }
 
 struct TOlapTablePartitionParam {
@@ -147,12 +192,27 @@ struct TOlapTablePartitionParam {
     6: required list<TOlapTablePartition> partitions
 
     7: optional list<string> partition_columns
+    8: optional list<Exprs.TExpr> partition_function_exprs
+    9: optional bool enable_automatic_partition
+    10: optional Partitions.TPartitionType partition_type
+}
+
+struct TOlapTableIndex {
+  1: optional string index_name
+  2: optional list<string> columns
+  3: optional TIndexType index_type
+  4: optional string comment
+  5: optional i64 index_id
+  6: optional map<string, string> properties
 }
 
 struct TOlapTableIndexSchema {
     1: required i64 id
     2: required list<string> columns
     3: required i32 schema_hash
+    4: optional list<TColumn> columns_desc
+    5: optional list<TOlapTableIndex> indexes_desc
+    6: optional Exprs.TExpr where_clause
 }
 
 struct TOlapTableSchemaParam {
@@ -164,6 +224,10 @@ struct TOlapTableSchemaParam {
     4: required list<TSlotDescriptor> slot_descs
     5: required TTupleDescriptor tuple_desc
     6: required list<TOlapTableIndexSchema> indexes
+    7: optional bool is_dynamic_schema // deprecated
+    8: optional bool is_partial_update
+    9: optional list<string> partial_update_input_columns
+    10: optional bool is_strict_mode = false;
 }
 
 struct TTabletLocation {
@@ -202,45 +266,18 @@ struct TMySQLTable {
   4: required string passwd
   5: required string db
   6: required string table
+  7: required string charset
 }
 
-// Parameters needed for hash partitioning
-struct TKuduPartitionByHashParam {
-  1: required list<string> columns
-  2: required i32 num_partitions
-}
-
-struct TKuduRangePartition {
-  1: optional list<Exprs.TExpr> lower_bound_values
-  2: optional bool is_lower_bound_inclusive
-  3: optional list<Exprs.TExpr> upper_bound_values
-  4: optional bool is_upper_bound_inclusive
-}
-
-// A range partitioning is identified by a list of columns and a list of range partitions.
-struct TKuduPartitionByRangeParam {
-  1: required list<string> columns
-  2: optional list<TKuduRangePartition> range_partitions
-}
-
-// Parameters for the PARTITION BY clause.
-struct TKuduPartitionParam {
-  1: optional TKuduPartitionByHashParam by_hash_param;
-  2: optional TKuduPartitionByRangeParam by_range_param;
-}
-
-// Represents a Kudu table
-struct TKuduTable {
-  1: required string table_name
-
-  // Network address of a master host in the form of 0.0.0.0:port
-  2: required list<string> master_addresses
-
-  // Name of the key columns
-  3: required list<string> key_columns
-
-  // Partitioning
-  4: required list<TKuduPartitionParam> partition_by
+struct TOdbcTable {
+  1: optional string host
+  2: optional string port
+  3: optional string user
+  4: optional string passwd
+  5: optional string db
+  6: optional string table
+  7: optional string driver
+  8: optional Types.TOdbcTableType type
 }
 
 struct TEsTable {
@@ -251,6 +288,45 @@ struct TSchemaTable {
 }
 
 struct TBrokerTable {
+}
+
+struct THiveTable {
+  1: required string db_name
+  2: required string table_name
+  3: required map<string, string> properties
+}
+
+struct TIcebergTable {
+  1: required string db_name
+  2: required string table_name
+  3: required map<string, string> properties
+}
+
+struct THudiTable {
+  1: optional string dbName
+  2: optional string tableName
+  3: optional map<string, string> properties
+}
+
+struct TJdbcTable {
+  1: optional string jdbc_url
+  2: optional string jdbc_table_name
+  3: optional string jdbc_user
+  4: optional string jdbc_password
+  5: optional string jdbc_driver_url
+  6: optional string jdbc_resource_name
+  7: optional string jdbc_driver_class
+  8: optional string jdbc_driver_checksum
+  
+}
+
+struct TMCTable {
+  1: optional string region
+  2: optional string project
+  3: optional string table
+  4: optional string access_key
+  5: optional string secret_key
+  6: optional string public_access
 }
 
 // "Union" of all table types.
@@ -268,9 +344,14 @@ struct TTableDescriptor {
   10: optional TMySQLTable mysqlTable
   11: optional TOlapTable olapTable
   12: optional TSchemaTable schemaTable
-  13: optional TKuduTable kuduTable
   14: optional TBrokerTable BrokerTable
   15: optional TEsTable esTable
+  16: optional TOdbcTable odbcTable
+  17: optional THiveTable hiveTable
+  18: optional TIcebergTable icebergTable
+  19: optional THudiTable hudiTable
+  20: optional TJdbcTable jdbcTable
+  21: optional TMCTable mcTable
 }
 
 struct TDescriptorTable {

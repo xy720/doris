@@ -17,44 +17,55 @@
 
 #pragma once
 
+#include <gen_cpp/BackendService_types.h>
+#include <gen_cpp/FrontendService_types.h>
+#include <gen_cpp/PlanNodes_types.h>
+#include <gen_cpp/Types_types.h>
+#include <stddef.h>
+#include <stdint.h>
+
 #include <future>
-#include <sstream>
-#include <rapidjson/prettywriter.h>
+#include <map>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
 
-#include "gen_cpp/BackendService_types.h"
-#include "gen_cpp/FrontendService_types.h"
-
-#include "common/status.h"
+#include "common/config.h"
 #include "common/logging.h"
+#include "common/status.h"
 #include "common/utils.h"
 #include "runtime/exec_env.h"
-#include "runtime/stream_load/load_stream_mgr.h"
 #include "runtime/stream_load/stream_load_executor.h"
-#include "service/backend_options.h"
-#include "util/string_util.h"
+#include "util/byte_buffer.h"
 #include "util/time.h"
 #include "util/uid_util.h"
 
 namespace doris {
+namespace io {
+class StreamLoadPipe;
+} // namespace io
 
 // kafka related info
 class KafkaLoadInfo {
 public:
-    KafkaLoadInfo(const TKafkaLoadInfo& t_info):
-        brokers(t_info.brokers),
-        topic(t_info.topic),
-        begin_offset(t_info.partition_begin_offset),
-        properties(t_info.properties) {
-
+    KafkaLoadInfo(const TKafkaLoadInfo& t_info)
+            : brokers(t_info.brokers),
+              topic(t_info.topic),
+              begin_offset(t_info.partition_begin_offset),
+              properties(t_info.properties) {
+        // The offset(begin_offset) sent from FE is the starting offset,
+        // and the offset(cmt_offset) reported by BE to FE is the consumed offset,
+        // so we need to minus 1 here.
         for (auto& p : t_info.partition_begin_offset) {
-            cmt_offset[p.first] = p.second -1;
+            cmt_offset[p.first] = p.second - 1;
         }
     }
 
     void reset_offset() {
         // reset the commit offset
         for (auto& p : begin_offset) {
-            cmt_offset[p.first] = p.second -1;
+            cmt_offset[p.first] = p.second - 1;
         }
     }
 
@@ -70,7 +81,7 @@ public:
 
     // partition -> begin offset, inclusive.
     std::map<int32_t, int64_t> begin_offset;
-    // partiton -> commit offset, inclusive.
+    // partition -> commit offset, inclusive.
     std::map<int32_t, int64_t> cmt_offset;
     //custom kafka property key -> value
     std::map<std::string, std::string> properties;
@@ -79,12 +90,11 @@ public:
 class MessageBodySink;
 
 class StreamLoadContext {
+    ENABLE_FACTORY_CREATOR(StreamLoadContext);
+
 public:
-    StreamLoadContext(ExecEnv* exec_env) :
-        id(UniqueId::gen_uid()),
-        _exec_env(exec_env),
-        _refs(0) {
-        start_nanos = MonotonicNanos();
+    StreamLoadContext(ExecEnv* exec_env) : id(UniqueId::gen_uid()), _exec_env(exec_env) {
+        start_millis = UnixMillis();
     }
 
     ~StreamLoadContext() {
@@ -92,16 +102,14 @@ public:
             _exec_env->stream_load_executor()->rollback_txn(this);
             need_rollback = false;
         }
-
-        _exec_env->load_stream_mgr()->remove(id);
-
-        if (kafka_info != nullptr) {
-            delete kafka_info;
-            kafka_info = nullptr;
-        }
     }
 
     std::string to_json() const;
+
+    std::string prepare_stream_load_record(const std::string& stream_load_record);
+    static void parse_stream_load_record(const std::string& stream_load_record,
+                                         TStreamLoadRecord& stream_load_item);
+
     // the old mini load result format is not same as stream load.
     // add this function for compatible with old mini load result format.
     std::string to_json_for_mini_load() const;
@@ -110,12 +118,8 @@ public:
     // also print the load source info if detail is set to true
     std::string brief(bool detail = false) const;
 
-    void ref() { _refs.fetch_add(1); }
-    // If unref() returns true, this object should be delete
-    bool unref() { return _refs.fetch_sub(1) == 1; }
-
 public:
-    // load type, eg: ROUTINE LOAD/MANUL LOAD
+    // load type, eg: ROUTINE LOAD/MANUAL LOAD
     TLoadType::type load_type;
     // load data source: eg: KAFKA/RAW
     TLoadSourceType::type load_src_type;
@@ -128,6 +132,7 @@ public:
     UniqueId id;
 
     std::string db;
+    int64_t db_id = -1;
     std::string table;
     std::string label;
     // optional
@@ -135,6 +140,8 @@ public:
     double max_filter_ratio = 0.0;
     int32_t timeout_second = -1;
     AuthInfo auth;
+    bool two_phase_commit = false;
+    std::string load_comment;
 
     // the following members control the max progress of a consuming
     // process. if any of them reach, the consuming will finish.
@@ -142,21 +149,37 @@ public:
     int64_t max_batch_rows = 100000;
     int64_t max_batch_size = 100 * 1024 * 1024; // 100MB
 
+    // for parse json-data
+    std::string data_format = "";
+    std::string jsonpath_file = "";
+    std::string jsonpath = "";
+
     // only used to check if we receive whole body
     size_t body_bytes = 0;
     size_t receive_bytes = 0;
 
     int64_t txn_id = -1;
 
+    // http stream
+    bool need_schema = false;
+    bool is_read_schema = true;
+
+    std::string txn_operation = "";
+
     bool need_rollback = false;
     // when use_streaming is true, we use stream_pipe to send source data,
     // otherwise we save source data to file first, then process it.
     bool use_streaming = false;
     TFileFormatType::type format = TFileFormatType::FORMAT_CSV_PLAIN;
+    TFileCompressType::type compress_type = TFileCompressType::UNKNOWN;
 
     std::shared_ptr<MessageBodySink> body_sink;
+    std::shared_ptr<io::StreamLoadPipe> pipe;
+
+    ByteBufferPtr schema_buffer = ByteBuffer::allocate(config::stream_tvf_buffer_size);
 
     TStreamLoadPutResult put_result;
+    TStreamLoadMultiTablePutResult multi_table_put_result;
 
     std::vector<TTabletCommitInfo> commit_infos;
 
@@ -170,25 +193,44 @@ public:
     int64_t number_filtered_rows = 0;
     int64_t number_unselected_rows = 0;
     int64_t loaded_bytes = 0;
-    int64_t start_nanos = 0;
-    int64_t load_cost_nanos = 0;
+    int64_t start_millis = 0;
+    int64_t start_write_data_nanos = 0;
+    int64_t load_cost_millis = 0;
+    int64_t begin_txn_cost_nanos = 0;
+    int64_t stream_load_put_cost_nanos = 0;
+    int64_t commit_and_publish_txn_cost_nanos = 0;
+    int64_t pre_commit_txn_cost_nanos = 0;
+    int64_t read_data_cost_nanos = 0;
+    int64_t write_data_cost_nanos = 0;
+
     std::string error_url = "";
     // if label already be used, set existing job's status here
     // should be RUNNING or FINISHED
     std::string existing_job_status = "";
 
-    KafkaLoadInfo* kafka_info = nullptr;
+    std::unique_ptr<KafkaLoadInfo> kafka_info;
 
     // consumer_id is used for data consumer cache key.
     // to identified a specified data consumer.
     int64_t consumer_id;
+
+    // If this is an transactional insert operation, this will be true
+    bool need_commit_self = false;
+
+    // csv with header type
+    std::string header_type = "";
+
+    // is this load single-stream-multi-table?
+    bool is_multi_table = false;
+
+    // for single-stream-multi-table, we have table list
+    std::vector<std::string> table_list;
 
 public:
     ExecEnv* exec_env() { return _exec_env; }
 
 private:
     ExecEnv* _exec_env;
-    std::atomic<int> _refs;
 };
 
-} // end namespace
+} // namespace doris

@@ -21,8 +21,7 @@
 //   (including numerical values greater than 127)
 //   then the output is the same as the input.
 
-#ifndef STRINGS_ASCII_CTYPE_H_
-#define STRINGS_ASCII_CTYPE_H_
+#pragma once
 
 // Array of character information.  This is an implementation detail.
 // The individual bits do not have names because the array definition is
@@ -34,42 +33,58 @@ extern const unsigned char kAsciiPropertyBits[256];
 
 // Public functions.
 
-static inline bool ascii_isalpha(unsigned char c) { return kApb[c] & 0x01; }
-static inline bool ascii_isalnum(unsigned char c) { return kApb[c] & 0x04; }
-static inline bool ascii_isspace(unsigned char c) { return kApb[c] & 0x08; }
-static inline bool ascii_ispunct(unsigned char c) { return kApb[c] & 0x10; }
-static inline bool ascii_isblank(unsigned char c) { return kApb[c] & 0x20; }
-static inline bool ascii_iscntrl(unsigned char c) { return kApb[c] & 0x40; }
-static inline bool ascii_isxdigit(unsigned char c) { return kApb[c] & 0x80; }
+static inline bool ascii_isalpha(unsigned char c) {
+    return kApb[c] & 0x01;
+}
+static inline bool ascii_isalnum(unsigned char c) {
+    return kApb[c] & 0x04;
+}
+static inline bool ascii_isspace(unsigned char c) {
+    return kApb[c] & 0x08;
+}
+static inline bool ascii_ispunct(unsigned char c) {
+    return kApb[c] & 0x10;
+}
+static inline bool ascii_isblank(unsigned char c) {
+    return kApb[c] & 0x20;
+}
+static inline bool ascii_iscntrl(unsigned char c) {
+    return kApb[c] & 0x40;
+}
+static inline bool ascii_isxdigit(unsigned char c) {
+    return kApb[c] & 0x80;
+}
 
 static inline bool ascii_isdigit(unsigned char c) {
-  return c >= '0' && c <= '9';
+    return c >= '0' && c <= '9';
 }
 
 static inline bool ascii_isprint(unsigned char c) {
-  return c >= 32 && c < 127;
+    return c >= 32 && c < 127;
 }
 
 static inline bool ascii_isgraph(unsigned char c) {
-  return c >  32 && c < 127;
+    return c > 32 && c < 127;
 }
 
 static inline bool ascii_isupper(unsigned char c) {
-  return c >= 'A' && c <= 'Z';
+    return c >= 'A' && c <= 'Z';
 }
 
 static inline bool ascii_islower(unsigned char c) {
-  return c >= 'a' && c <= 'z';
+    return c >= 'a' && c <= 'z';
 }
 
 static inline bool ascii_isascii(unsigned char c) {
-  return c < 128;
+    return c < 128;
 }
 #undef kApb
 
 extern const unsigned char kAsciiToLower[256];
-static inline char ascii_tolower(unsigned char c) { return kAsciiToLower[c]; }
+static inline char ascii_tolower(unsigned char c) {
+    return kAsciiToLower[c];
+}
 extern const unsigned char kAsciiToUpper[256];
-static inline char ascii_toupper(unsigned char c) { return kAsciiToUpper[c]; }
-
-#endif  // STRINGS_ASCII_CTYPE_H_
+static inline char ascii_toupper(unsigned char c) {
+    return kAsciiToUpper[c];
+}

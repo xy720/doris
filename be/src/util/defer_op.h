@@ -15,27 +15,34 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_UTIL_DEFER_OP_H
-#define DORIS_BE_UTIL_DEFER_OP_H
+#pragma once
 
 #include <functional>
 
 namespace doris {
 
 // This class is used to defer a function when this object is deconstruct
-class DeferOp {
+// A Better Defer operator #5576
+// for C++17
+// Defer defer {[]{ call something }};
+//
+// for C++11
+// auto op = [] {};
+// Defer<decltype<op>> (op);
+template <class T>
+class Defer {
 public:
-    typedef std::function<void ()> DeferFunction;
-    DeferOp(const DeferFunction& func) : _func(func) {
-    }
+    Defer(T& closure) : _closure(closure) {}
+    Defer(T&& closure) : _closure(std::move(closure)) {}
+    ~Defer() { _closure(); }
 
-    ~DeferOp() {
-        _func();
-    };
 private:
-    DeferFunction _func;
+    T _closure;
 };
 
-}
+// Nested use Defer, variable name concat line number
+#define DEFER_CONCAT(n, ...) const auto defer##n = doris::Defer([&]() { __VA_ARGS__; })
+#define DEFER_FWD(n, ...) DEFER_CONCAT(n, __VA_ARGS__)
+#define DEFER(...) DEFER_FWD(__LINE__, __VA_ARGS__)
 
-#endif
+} // namespace doris

@@ -52,8 +52,8 @@ decltype(&bshuf_decompress_lz4) g_bshuf_decompress_lz4;
 //
 // This avoids an expensive 'cpuid' call in the hot path, and also avoids
 // the cost of a 'std::once' call.
-__attribute__((constructor))
-void SelectBitshuffleFunctions() {
+__attribute__((constructor)) void SelectBitshuffleFunctions() {
+#if (defined(__i386) || defined(__x86_64__))
     if (CPU().has_avx2()) {
         g_bshuf_compress_lz4_bound = bshuf_compress_lz4_bound_avx2;
         g_bshuf_compress_lz4 = bshuf_compress_lz4_avx2;
@@ -63,14 +63,17 @@ void SelectBitshuffleFunctions() {
         g_bshuf_compress_lz4 = bshuf_compress_lz4;
         g_bshuf_decompress_lz4 = bshuf_decompress_lz4;
     }
+#else
+    g_bshuf_compress_lz4_bound = bshuf_compress_lz4_bound;
+    g_bshuf_compress_lz4 = bshuf_compress_lz4;
+    g_bshuf_decompress_lz4 = bshuf_decompress_lz4;
+#endif
 }
 
-int64_t compress_lz4(void* in, void* out, size_t size,
-                     size_t elem_size, size_t block_size) {
+int64_t compress_lz4(void* in, void* out, size_t size, size_t elem_size, size_t block_size) {
     return g_bshuf_compress_lz4(in, out, size, elem_size, block_size);
 }
-int64_t decompress_lz4(void* in, void* out, size_t size,
-                       size_t elem_size, size_t block_size) {
+int64_t decompress_lz4(void* in, void* out, size_t size, size_t elem_size, size_t block_size) {
     return g_bshuf_decompress_lz4(in, out, size, elem_size, block_size);
 }
 size_t compress_lz4_bound(size_t size, size_t elem_size, size_t block_size) {

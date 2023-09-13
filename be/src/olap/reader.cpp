@@ -17,512 +17,191 @@
 
 #include "olap/reader.h"
 
-#include "olap/rowset/column_data.h"
-#include "olap/tablet.h"
-#include "olap/row_block.h"
+#include <gen_cpp/olap_file.pb.h>
+#include <gen_cpp/segment_v2.pb.h>
+#include <thrift/protocol/TDebugProtocol.h>
+
+#include <algorithm>
+#include <functional>
+#include <iterator>
+#include <numeric>
+#include <ostream>
+#include <shared_mutex>
+
+// IWYU pragma: no_include <opentelemetry/common/threadlocal.h>
+#include "common/compiler_util.h" // IWYU pragma: keep
+#include "common/config.h"
+#include "common/logging.h"
+#include "common/status.h"
+#include "exprs/bitmapfilter_predicate.h"
+#include "exprs/bloom_filter_func.h"
+#include "exprs/create_predicate_function.h"
+#include "exprs/hybrid_set.h"
+#include "olap/column_predicate.h"
+#include "olap/itoken_extractor.h"
+#include "olap/like_column_predicate.h"
+#include "olap/olap_common.h"
+#include "olap/olap_define.h"
+#include "olap/predicate_creator.h"
 #include "olap/row_cursor.h"
-#include "util/date_func.h"
-#include "util/mem_util.hpp"
-#include "runtime/mem_tracker.h"
-#include "runtime/mem_pool.h"
-#include <sstream>
-
-#include "olap/comparison_predicate.h"
-#include "olap/in_list_predicate.h"
-#include "olap/null_predicate.h"
-#include "olap/storage_engine.h"
-#include "olap/row.h"
-
-using std::nothrow;
-using std::set;
-using std::vector;
+#include "olap/rowset/segment_v2/bloom_filter.h"
+#include "olap/schema.h"
+#include "olap/tablet.h"
+#include "olap/tablet_meta.h"
+#include "runtime/query_context.h"
+#include "runtime/runtime_predicate.h"
+#include "runtime/runtime_state.h"
+#include "vec/common/arena.h"
+#include "vec/core/block.h"
 
 namespace doris {
+using namespace ErrorCode;
 
-class CollectIterator {
-public:
-    ~CollectIterator();
-
-    // Hold reader point to get reader params,
-    // set reverse to true if need read in reverse order.
-    OLAPStatus init(Reader* reader);
-
-    OLAPStatus add_child(RowsetReaderSharedPtr rs_reader);
-
-    // Get top row of the heap, NULL if reach end.
-    const RowCursor* current_row(bool* delete_flag) const {
-        if (_cur_child != nullptr) {
-            return _cur_child->current_row(delete_flag);
-        }
-        return nullptr;
-    }
-
-    // Read next row into *row.
-    // Returns
-    //      OLAP_SUCCESS when read successfully.
-    //      OLAP_ERR_DATA_EOF and set *row to nullptr when EOF is reached.
-    //      Others when error happens
-    OLAPStatus next(const RowCursor** row, bool* delete_flag) {
-        DCHECK(_cur_child != nullptr);
-        if (_merge) {
-            return _merge_next(row, delete_flag);
-        } else {
-            return _normal_next(row, delete_flag);
-        }
-    }
-
-    // Clear the MergeSet element and reset state.
-    void clear();
-
-private:
-    class ChildCtx {
-    public:
-        ChildCtx(RowsetReaderSharedPtr rs_reader, Reader* reader)
-                : _rs_reader(rs_reader),
-                  _is_delete(rs_reader->delete_flag()),
-                  _reader(reader) { }
-
-        OLAPStatus init() {
-            auto res = _row_cursor.init(_reader->_tablet->tablet_schema(), _reader->_seek_columns);
-            if (res != OLAP_SUCCESS) {
-                LOG(WARNING) << "failed to init row cursor, res=" << res;
-                return res;
-            }
-            RETURN_NOT_OK(_refresh_current_row());
-            return OLAP_SUCCESS;
-        }
-
-        const RowCursor* current_row(bool* delete_flag) const {
-            *delete_flag = _is_delete;
-            return _current_row;
-        }
-
-        const RowCursor* current_row() const {
-            return _current_row;
-        }
-
-        int32_t version() const {
-            return _rs_reader->version().second;
-        }
-
-        OLAPStatus next(const RowCursor** row, bool* delete_flag) {
-            _row_block->pos_inc();
-            auto res = _refresh_current_row();
-            *row = _current_row;
-            *delete_flag = _is_delete;
-            return res;
-        }
-
-    private:
-        // refresh_current_row
-        OLAPStatus _refresh_current_row() {
-            do {
-                if (_row_block != nullptr && _row_block->has_remaining()) {
-                    size_t pos = _row_block->pos();
-                    _row_block->get_row(pos, &_row_cursor);
-                    if (_row_block->block_status() == DEL_PARTIAL_SATISFIED &&
-                        _reader->_delete_handler.is_filter_data(_rs_reader->version().second, _row_cursor)) {
-                        _reader->_stats.rows_del_filtered++;
-                        _row_block->pos_inc();
-                        continue;
-                    }
-                    _current_row = &_row_cursor;
-                    return OLAP_SUCCESS;
-                } else {
-                    auto res = _rs_reader->next_block(&_row_block);
-                    if (res != OLAP_SUCCESS) {
-                        _current_row = nullptr;
-                        return res;
-                    }
-                }
-            } while (_row_block != nullptr);
-            _current_row = nullptr;
-            return OLAP_ERR_DATA_EOF;
-        }
-
-        RowsetReaderSharedPtr _rs_reader;
-        const RowCursor* _current_row = nullptr;
-        bool _is_delete = false;
-        Reader* _reader;
-
-        RowCursor _row_cursor; // point to rows inside `_row_block`
-        RowBlock* _row_block = nullptr;
-    };
-
-    // Compare row cursors between multiple merge elements,
-    // if row cursors equal, compare data version.
-    class ChildCtxComparator {
-    public:
-        bool operator()(const ChildCtx* a, const ChildCtx* b);
-    };
-
-    inline OLAPStatus _merge_next(const RowCursor** row, bool* delete_flag);
-    inline OLAPStatus _normal_next(const RowCursor** row, bool* delete_flag);
-
-    // each ChildCtx corresponds to a rowset reader
-    std::vector<ChildCtx*> _children;
-    // point to the ChildCtx containing the next output row.
-    // null when CollectIterator hasn't been initialized or reaches EOF.
-    ChildCtx* _cur_child = nullptr;
-
-    // when `_merge == true`, rowset reader returns ordered rows and CollectIterator uses a priority queue to merge
-    // sort them. The output of CollectIterator is also ordered.
-    // When `_merge == false`, rowset reader returns *partial* ordered rows. CollectIterator simply returns all rows
-    // from the first rowset, the second rowset, .., the last rowset. The output of CollectorIterator is also
-    // *partially* ordered.
-    bool _merge = true;
-    // used when `_merge == true`
-    typedef std::priority_queue<ChildCtx*, std::vector<ChildCtx*>, ChildCtxComparator> MergeHeap;
-    MergeHeap _heap;
-    // used when `_merge == false`
-    int _child_idx = 0;
-
-    // Hold reader point to access read params, such as fetch conditions.
-    Reader* _reader = nullptr;
-};
-
-
-CollectIterator::~CollectIterator() {
-    for (auto child : _children) {
-        delete child;
+void TabletReader::ReaderParams::check_validation() const {
+    if (UNLIKELY(version.first == -1 && is_segcompaction == false)) {
+        LOG(FATAL) << "version is not set. tablet=" << tablet->full_name();
     }
 }
 
-OLAPStatus CollectIterator::init(Reader* reader) {
-    _reader = reader;
-    // when aggregate is enabled or key_type is DUP_KEYS, we don't merge
-    // multiple data to aggregate for performance in user fetch
-    if (_reader->_reader_type == READER_QUERY &&
-            (_reader->_aggregation ||
-             _reader->_tablet->keys_type() == KeysType::DUP_KEYS)) {
-        _merge = false;
+std::string TabletReader::ReaderParams::to_string() const {
+    std::stringstream ss;
+    ss << "tablet=" << tablet->full_name() << " reader_type=" << int(reader_type)
+       << " aggregation=" << aggregation << " version=" << version
+       << " start_key_include=" << start_key_include << " end_key_include=" << end_key_include;
+
+    for (const auto& key : start_key) {
+        ss << " keys=" << key;
     }
-    return OLAP_SUCCESS;
+
+    for (const auto& key : end_key) {
+        ss << " end_keys=" << key;
+    }
+
+    for (auto& condition : conditions) {
+        ss << " conditions=" << apache::thrift::ThriftDebugString(condition);
+    }
+
+    return ss.str();
 }
 
-OLAPStatus CollectIterator::add_child(RowsetReaderSharedPtr rs_reader) {
-    std::unique_ptr<ChildCtx> child(new ChildCtx(rs_reader, _reader));
-    RETURN_NOT_OK(child->init());
-    if (child->current_row() == nullptr) {
-        return OLAP_SUCCESS;
+std::string TabletReader::KeysParam::to_string() const {
+    std::stringstream ss;
+    ss << "start_key_include=" << start_key_include << " end_key_include=" << end_key_include;
+
+    for (auto& start_key : start_keys) {
+        ss << " keys=" << start_key.to_string();
+    }
+    for (auto& end_key : end_keys) {
+        ss << " end_keys=" << end_key.to_string();
     }
 
-    ChildCtx* child_ptr = child.release();
-    _children.push_back(child_ptr);
-    if (_merge) {
-        _heap.push(child_ptr);
-        _cur_child = _heap.top();
-    } else {
-        if (_cur_child == nullptr) {
-            _cur_child = _children[_child_idx];
-        }
-    }
-    return OLAP_SUCCESS;
+    return ss.str();
 }
 
-inline OLAPStatus CollectIterator::_merge_next(const RowCursor** row, bool* delete_flag) {
-    _heap.pop();
-    auto res = _cur_child->next(row, delete_flag);
-    if (res == OLAP_SUCCESS) {
-        _heap.push(_cur_child);
-        _cur_child = _heap.top();
-    } else if (res == OLAP_ERR_DATA_EOF) {
-        if (_heap.size() > 0) {
-            _cur_child = _heap.top();
-        } else {
-            _cur_child = nullptr;
-            return OLAP_ERR_DATA_EOF;
-        }
-    } else {
-        LOG(WARNING) << "failed to get next from child, res=" << res;
-        return res;
-    }
-    *row = _cur_child->current_row(delete_flag);
-    return OLAP_SUCCESS;
-}
-
-inline OLAPStatus CollectIterator::_normal_next(const RowCursor** row, bool* delete_flag) {
-    auto res = _cur_child->next(row, delete_flag);
-    if (LIKELY(res == OLAP_SUCCESS)) {
-        return OLAP_SUCCESS;
-    } else if (res == OLAP_ERR_DATA_EOF) {
-        // this child has been read, to read next
-        _child_idx++;
-        if (_child_idx < _children.size()) {
-            _cur_child = _children[_child_idx];
-            *row = _cur_child->current_row(delete_flag);
-            return OLAP_SUCCESS;
-        } else {
-            _cur_child = nullptr;
-            return OLAP_ERR_DATA_EOF;
-        }
-    } else {
-        LOG(WARNING) << "failed to get next from child, res=" << res;
-        return res;
-    }
-}
-
-bool CollectIterator::ChildCtxComparator::operator()(const ChildCtx* a, const ChildCtx* b) {
-    // First compare row cursor.
-    const RowCursor* first = a->current_row();
-    const RowCursor* second = b->current_row();
-    int cmp_res = compare_row(*first, *second);
-    if (cmp_res != 0) {
-        return cmp_res > 0;
-    }
-    // if row cursors equal, compare data version.
-    return a->version() > b->version();
-}
-
-void CollectIterator::clear() {
-    while (_heap.size() > 0) {
-        _heap.pop();
-    }
-    for (auto child : _children) {
-        delete child;
-    }
-    // _children.swap(std::vector<ChildCtx*>());
-    _children.clear();
-    _cur_child = nullptr;
-    _child_idx = 0;
-}
-
-Reader::Reader()
-        : _next_key_index(0),
-        _aggregation(false),
-        _version_locked(false),
-        _reader_type(READER_QUERY),
-        _next_delete_flag(false),
-        _next_key(NULL),
-        _merged_rows(0) {
-    _tracker.reset(new MemTracker(-1));
-    _predicate_mem_pool.reset(new MemPool(_tracker.get()));
-}
-
-Reader::~Reader() {
-    close();
-}
-
-OLAPStatus Reader::init(const ReaderParams& read_params) {
-    OLAPStatus res = OLAP_SUCCESS;
-
-    res = _init_params(read_params);
-    if (res != OLAP_SUCCESS) {
-        LOG(WARNING) << "fail to init reader when init params.res" << res
-                     << ", tablet_id :" << read_params.tablet->tablet_id()
-                     << ", schema_hash:" << read_params.tablet->schema_hash()
-                     << ", reader type:" << read_params.reader_type
-                     << ", version:" << read_params.version.first << "-" << read_params.version.second;
-        return res;
-    }
-
-    res = _capture_rs_readers(read_params);
-    if (res != OLAP_SUCCESS) {
-        LOG(WARNING) << "fail to init reader when _capture_rs_readers.res" << res
-                     << ", tablet_id :" << read_params.tablet->tablet_id()
-                     << ", schema_hash:" << read_params.tablet->schema_hash()
-                     << ", reader_type:" << read_params.reader_type
-                     << ", version:" << read_params.version.first << "-" << read_params.version.second;
-        return res;
-    }
-
-    switch (_tablet->keys_type()) {
-    case KeysType::DUP_KEYS:
-        _next_row_func = &Reader::_dup_key_next_row;
-        break;
-    case KeysType::UNIQUE_KEYS:
-        _next_row_func = &Reader::_unique_key_next_row;
-        break;
-    case KeysType::AGG_KEYS:
-        _next_row_func = &Reader::_agg_key_next_row;
-        break;
-    default:
-        break;
-    }
-    DCHECK(_next_row_func != nullptr) << "No next row function for type:"
-        << _tablet->keys_type();
-
-    return OLAP_SUCCESS;
-}
-
-OLAPStatus Reader::_dup_key_next_row(RowCursor* row_cursor, MemPool* mem_pool, ObjectPool* agg_pool, bool* eof) {
-    if (UNLIKELY(_next_key == nullptr)) {
-        *eof = true;
-        return OLAP_SUCCESS;
-    }
-    direct_copy_row(row_cursor, *_next_key);
-    auto res = _collect_iter->next(&_next_key, &_next_delete_flag);
-    if (res != OLAP_SUCCESS) {
-        if (res != OLAP_ERR_DATA_EOF) {
-            return res;
-        }
-    }
-    return OLAP_SUCCESS;
-}
-
-OLAPStatus Reader::_agg_key_next_row(RowCursor* row_cursor, MemPool* mem_pool, ObjectPool* agg_pool, bool* eof) {
-    if (UNLIKELY(_next_key == nullptr)) {
-        *eof = true;
-        return OLAP_SUCCESS;
-    }
-    init_row_with_others(row_cursor, *_next_key, mem_pool, agg_pool);
-    int64_t merged_count = 0;
-    do {
-        auto res = _collect_iter->next(&_next_key, &_next_delete_flag);
-        if (res != OLAP_SUCCESS) {
-            if (res != OLAP_ERR_DATA_EOF) {
-                LOG(WARNING) << "next failed:" << res;
-                return res;
-            }
-            break;
-        }
-
-        if (_aggregation && merged_count > config::doris_scanner_row_num) {
-            break;
-        }
-
-        // break while can NOT doing aggregation
-        if (!equal_row(_key_cids, *row_cursor, *_next_key)) {
-            break;
-        }
-        agg_update_row(_value_cids, row_cursor, *_next_key);
-        ++merged_count;
-    } while (true);
-    _merged_rows += merged_count;
-    // For agg query, we don't need finalize agg object and directly pass agg object to agg node
-    if (_need_agg_finalize) {
-        agg_finalize_row(_value_cids, row_cursor, mem_pool);
-    }
-
-    return OLAP_SUCCESS;
-}
-
-OLAPStatus Reader::_unique_key_next_row(RowCursor* row_cursor, MemPool* mem_pool, ObjectPool* agg_pool, bool* eof) {
-    *eof = false;
-    bool cur_delete_flag = false;
-    do {
-        if (UNLIKELY(_next_key == nullptr)) {
-            *eof = true;
-            return OLAP_SUCCESS;
-        }
-    
-        cur_delete_flag = _next_delete_flag;
-        init_row_with_others(row_cursor, *_next_key, mem_pool, agg_pool);
-
-        int64_t merged_count = 0;
-        while (NULL != _next_key) {
-            auto res = _collect_iter->next(&_next_key, &_next_delete_flag);
-            if (res != OLAP_SUCCESS) {
-                if (res != OLAP_ERR_DATA_EOF) {
-                    return res;
-                }
-                break;
-            }
-    
-            // we will not do aggregation in two case:
-            //   1. DUP_KEYS keys type has no semantic to aggregate,
-            //   2. to make cost of  each scan round reasonable, we will control merged_count.
-            if (_aggregation && merged_count > config::doris_scanner_row_num) {
-                agg_finalize_row(_value_cids, row_cursor, mem_pool);
-                break;
-            }
-            // break while can NOT doing aggregation
-            if (!equal_row(_key_cids, *row_cursor, *_next_key)) {
-                agg_finalize_row(_value_cids, row_cursor, mem_pool);
-                break;
-            }
-
-            cur_delete_flag = _next_delete_flag;
-            agg_update_row(_value_cids, row_cursor, *_next_key);
-            ++merged_count;
-        }
-    
-        _merged_rows += merged_count;
-    
-        if (!cur_delete_flag) {
-            return OLAP_SUCCESS;
-        }
-    
-        _stats.rows_del_filtered++;
-    } while (cur_delete_flag);
-
-    return OLAP_SUCCESS;
-}
-
-void Reader::close() {
-    VLOG(3) << "merged rows:" << _merged_rows;
-    _conditions.finalize();
+TabletReader::~TabletReader() {
+    VLOG_NOTICE << "merged rows:" << _merged_rows;
     _delete_handler.finalize();
 
     for (auto pred : _col_predicates) {
         delete pred;
     }
-
-    delete _collect_iter;
+    for (auto pred : _value_col_predicates) {
+        delete pred;
+    }
+    for (auto pred : _col_preds_except_leafnode_of_andnode) {
+        delete pred;
+    }
 }
 
-OLAPStatus Reader::_capture_rs_readers(const ReaderParams& read_params) {
-    const std::vector<RowsetReaderSharedPtr>* rs_readers = &read_params.rs_readers;
-    if (rs_readers->size() < 1) {
-        LOG(WARNING) << "fail to acquire data sources. tablet=" << _tablet->full_name()
-                        << ", version=" << _version.first << "-" << _version.second;
-        return OLAP_ERR_VERSION_NOT_EXIST;
+Status TabletReader::init(const ReaderParams& read_params) {
+    _predicate_arena.reset(new vectorized::Arena());
+
+    Status res = _init_params(read_params);
+    if (!res.ok()) {
+        LOG(WARNING) << "fail to init reader when init params. res:" << res
+                     << ", tablet_id:" << read_params.tablet->tablet_id()
+                     << ", schema_hash:" << read_params.tablet->schema_hash()
+                     << ", reader type:" << int(read_params.reader_type)
+                     << ", version:" << read_params.version;
+    }
+    return res;
+}
+
+// When only one rowset has data, and this rowset is nonoverlapping, we can read directly without aggregation
+bool TabletReader::_optimize_for_single_rowset(
+        const std::vector<RowsetReaderSharedPtr>& rs_readers) {
+    bool has_delete_rowset = false;
+    bool has_overlapping = false;
+    int nonoverlapping_count = 0;
+    for (const auto& rs_reader : rs_readers) {
+        if (rs_reader->rowset()->rowset_meta()->delete_flag()) {
+            has_delete_rowset = true;
+            break;
+        }
+        if (rs_reader->rowset()->rowset_meta()->num_rows() > 0) {
+            if (rs_reader->rowset()->rowset_meta()->is_segments_overlapping()) {
+                // when there are overlapping segments, can not do directly read
+                has_overlapping = true;
+                break;
+            } else if (++nonoverlapping_count > 1) {
+                break;
+            }
+        }
+    }
+
+    return !has_overlapping && nonoverlapping_count == 1 && !has_delete_rowset;
+}
+
+Status TabletReader::_capture_rs_readers(const ReaderParams& read_params) {
+    if (read_params.rs_splits.empty()) {
+        return Status::InternalError("fail to acquire data sources. tablet={}",
+                                     _tablet->full_name());
     }
 
     bool eof = false;
-    RowCursor* start_key = nullptr;
-    RowCursor* end_key = nullptr;
-    bool is_lower_key_included = false;
-    bool is_upper_key_included = false;
+    bool is_lower_key_included = _keys_param.start_key_include;
+    bool is_upper_key_included = _keys_param.end_key_include;
+
     for (int i = 0; i < _keys_param.start_keys.size(); ++i) {
-        start_key = _keys_param.start_keys[i];
-        end_key = _keys_param.end_keys[i];
-        if (_keys_param.end_range.compare("lt") == 0) {
-            is_upper_key_included = false;
-        } else if (_keys_param.end_range.compare("le") == 0) {
-            is_upper_key_included = true;
+        // lower bound
+        RowCursor& start_key = _keys_param.start_keys[i];
+        RowCursor& end_key = _keys_param.end_keys[i];
+
+        if (!is_lower_key_included) {
+            if (compare_row_key(start_key, end_key) >= 0) {
+                VLOG_NOTICE << "return EOF when lower key not include"
+                            << ", start_key=" << start_key.to_string()
+                            << ", end_key=" << end_key.to_string();
+                eof = true;
+                break;
+            }
         } else {
-            LOG(WARNING) << "reader params end_range is error. "
-                         << "range=" << _keys_param.to_string();
-            return OLAP_ERR_READER_GET_ITERATOR_ERROR;
+            if (compare_row_key(start_key, end_key) > 0) {
+                VLOG_NOTICE << "return EOF when lower key include="
+                            << ", start_key=" << start_key.to_string()
+                            << ", end_key=" << end_key.to_string();
+                eof = true;
+                break;
+            }
         }
 
-        if (_keys_param.range.compare("gt") == 0) {
-            if (end_key != nullptr && compare_row_key(*start_key, *end_key) >= 0) {
-                VLOG(3) << "return EOF when range=" << _keys_param.range
-                        << ", start_key=" << start_key->to_string()
-                        << ", end_key=" << end_key->to_string();
-                eof = true;
-                break;
-            }
-            is_lower_key_included = false;
-        } else if (_keys_param.range.compare("ge") == 0) {
-            if (end_key != nullptr && compare_row_key(*start_key, *end_key) > 0) {
-                VLOG(3) << "return EOF when range=" << _keys_param.range
-                        << ", start_key=" << start_key->to_string()
-                        << ", end_key=" << end_key->to_string();
-                eof = true;
-                break;
-            }
-            is_lower_key_included = true;
-        } else if (_keys_param.range.compare("eq") == 0) {
-            is_lower_key_included = true;
-            is_upper_key_included = true;
-        } else {
-            LOG(WARNING) << "reader params range is error. "
-                         << "range=" << _keys_param.to_string();
-            return OLAP_ERR_READER_GET_ITERATOR_ERROR;
-        }
         _is_lower_keys_included.push_back(is_lower_key_included);
         _is_upper_keys_included.push_back(is_upper_key_included);
     }
 
-    if (eof) { return OLAP_SUCCESS; }
+    if (eof) {
+        return Status::OK();
+    }
 
     bool need_ordered_result = true;
-    if (read_params.reader_type == READER_QUERY) {
-        if (_tablet->tablet_schema().keys_type() == DUP_KEYS) {
+    if (read_params.reader_type == ReaderType::READER_QUERY) {
+        if (_tablet_schema->keys_type() == DUP_KEYS) {
             // duplicated keys are allowed, no need to merge sort keys in rowset
+            need_ordered_result = false;
+        }
+        if (_tablet_schema->keys_type() == UNIQUE_KEYS &&
+            _tablet->enable_unique_key_merge_on_write()) {
+            // unique keys with merge on write, no need to merge sort keys in rowset
             need_ordered_result = false;
         }
         if (_aggregation) {
@@ -530,559 +209,470 @@ OLAPStatus Reader::_capture_rs_readers(const ReaderParams& read_params) {
             // it's ok for rowset to return unordered result
             need_ordered_result = false;
         }
+
+        if (read_params.read_orderby_key) {
+            need_ordered_result = true;
+        }
     }
 
     _reader_context.reader_type = read_params.reader_type;
-    _reader_context.tablet_schema = &_tablet->tablet_schema();
+    _reader_context.version = read_params.version;
+    _reader_context.tablet_schema = _tablet_schema;
     _reader_context.need_ordered_result = need_ordered_result;
+    _reader_context.use_topn_opt = read_params.use_topn_opt;
+    _reader_context.read_orderby_key_reverse = read_params.read_orderby_key_reverse;
+    _reader_context.read_orderby_key_limit = read_params.read_orderby_key_limit;
+    _reader_context.filter_block_conjuncts = read_params.filter_block_conjuncts;
     _reader_context.return_columns = &_return_columns;
-    _reader_context.seek_columns = &_seek_columns;
-    _reader_context.load_bf_columns = &_load_bf_columns;
-    _reader_context.conditions = &_conditions;
+    _reader_context.read_orderby_key_columns =
+            _orderby_key_columns.size() > 0 ? &_orderby_key_columns : nullptr;
     _reader_context.predicates = &_col_predicates;
+    _reader_context.predicates_except_leafnode_of_andnode = &_col_preds_except_leafnode_of_andnode;
+    _reader_context.value_predicates = &_value_col_predicates;
     _reader_context.lower_bound_keys = &_keys_param.start_keys;
     _reader_context.is_lower_keys_included = &_is_lower_keys_included;
     _reader_context.upper_bound_keys = &_keys_param.end_keys;
     _reader_context.is_upper_keys_included = &_is_upper_keys_included;
     _reader_context.delete_handler = &_delete_handler;
     _reader_context.stats = &_stats;
-    _reader_context.runtime_state = read_params.runtime_state;
-    for (auto& rs_reader : *rs_readers) {
-        rs_reader->init(&_reader_context);
-        _rs_readers.push_back(rs_reader);
-    }
+    _reader_context.use_page_cache = read_params.use_page_cache;
+    _reader_context.sequence_id_idx = _sequence_col_idx;
+    _reader_context.is_unique = tablet()->keys_type() == UNIQUE_KEYS;
+    _reader_context.merged_rows = &_merged_rows;
+    _reader_context.delete_bitmap = read_params.delete_bitmap;
+    _reader_context.enable_unique_key_merge_on_write = tablet()->enable_unique_key_merge_on_write();
+    _reader_context.record_rowids = read_params.record_rowids;
+    _reader_context.is_key_column_group = read_params.is_key_column_group;
+    _reader_context.remaining_conjunct_roots = read_params.remaining_conjunct_roots;
+    _reader_context.common_expr_ctxs_push_down = read_params.common_expr_ctxs_push_down;
+    _reader_context.output_columns = &read_params.output_columns;
 
-    for (auto& rs_reader : _rs_readers) {
-        OLAPStatus res = _collect_iter->add_child(rs_reader);
-        if (res != OLAP_SUCCESS && res != OLAP_ERR_DATA_EOF) {
-            LOG(WARNING) << "failed to add child to iterator";
-            return res;
-        }
-    }
-
-    _next_key = _collect_iter->current_row(&_next_delete_flag);
-    return OLAP_SUCCESS;
+    return Status::OK();
 }
 
-OLAPStatus Reader::_init_params(const ReaderParams& read_params) {
+Status TabletReader::_init_params(const ReaderParams& read_params) {
     read_params.check_validation();
-    OLAPStatus res = OLAP_SUCCESS;
+
+    _direct_mode = read_params.direct_mode;
     _aggregation = read_params.aggregation;
-    _need_agg_finalize = read_params.need_agg_finalize;
     _reader_type = read_params.reader_type;
     _tablet = read_params.tablet;
-    _version = read_params.version;
+    _tablet_schema = read_params.tablet_schema;
+    _reader_context.runtime_state = read_params.runtime_state;
 
-    res = _init_conditions_param(read_params);
-    if (res != OLAP_SUCCESS) {
-        OLAP_LOG_WARNING("fail to init conditions param. [res=%d]", res);
-        return res;
-    }
+    RETURN_IF_ERROR(_init_conditions_param(read_params));
+    _init_conditions_param_except_leafnode_of_andnode(read_params);
 
-    res = _init_load_bf_columns(read_params);
-    if (res != OLAP_SUCCESS) {
-        OLAP_LOG_WARNING("fail to init load bloom filter columns. [res=%d]", res);
-        return res;
-    }
-
-    res = _init_delete_condition(read_params);
-    if (res != OLAP_SUCCESS) {
-        OLAP_LOG_WARNING("fail to init delete param. [res=%d]", res);
+    Status res = _init_delete_condition(read_params);
+    if (!res.ok()) {
+        LOG(WARNING) << "fail to init delete param. res = " << res;
         return res;
     }
 
     res = _init_return_columns(read_params);
-    if (res != OLAP_SUCCESS) {
-        OLAP_LOG_WARNING("fail to init return columns. [res=%d]", res);
+    if (!res.ok()) {
+        LOG(WARNING) << "fail to init return columns. res = " << res;
         return res;
     }
 
     res = _init_keys_param(read_params);
-    if (res != OLAP_SUCCESS) {
+    if (!res.ok()) {
         LOG(WARNING) << "fail to init keys param. res=" << res;
         return res;
     }
-
-    res = _init_seek_columns();
-    if (res != OLAP_SUCCESS) {
-        OLAP_LOG_WARNING("fail to init seek columns. [res=%d]", res);
+    res = _init_orderby_keys_param(read_params);
+    if (!res.ok()) {
+        LOG(WARNING) << "fail to init orderby keys param. res=" << res;
         return res;
     }
-
-    _collect_iter = new CollectIterator();
-    _collect_iter->init(this);
+    if (_tablet_schema->has_sequence_col()) {
+        auto sequence_col_idx = _tablet_schema->sequence_col_idx();
+        DCHECK_NE(sequence_col_idx, -1);
+        for (auto col : _return_columns) {
+            // query has sequence col
+            if (col == sequence_col_idx) {
+                _sequence_col_idx = sequence_col_idx;
+                break;
+            }
+        }
+    }
 
     return res;
 }
 
-OLAPStatus Reader::_init_return_columns(const ReaderParams& read_params) {
-    if (read_params.reader_type == READER_QUERY) {
+Status TabletReader::_init_return_columns(const ReaderParams& read_params) {
+    if (read_params.reader_type == ReaderType::READER_QUERY) {
         _return_columns = read_params.return_columns;
-        if (_delete_handler.conditions_num() != 0 && read_params.aggregation) {
-            set<uint32_t> column_set(_return_columns.begin(), _return_columns.end());
-
-            for (auto conds : _delete_handler.get_delete_conditions()) {
-                for (auto cond_column : conds.del_cond->columns()) {
-                    if (column_set.find(cond_column.first) == column_set.end()) {
-                        column_set.insert(cond_column.first);
-                        _return_columns.push_back(cond_column.first);
-                    }
-                }
-            }
-        }
+        _tablet_columns_convert_to_null_set = read_params.tablet_columns_convert_to_null_set;
         for (auto id : read_params.return_columns) {
-            if (_tablet->tablet_schema().column(id).is_key()) {
+            if (_tablet_schema->column(id).is_key()) {
                 _key_cids.push_back(id);
             } else {
                 _value_cids.push_back(id);
             }
         }
-    } else if (read_params.return_columns.size() == 0) {
-        for (size_t i = 0; i < _tablet->tablet_schema().num_columns(); ++i) {
+    } else if (read_params.return_columns.empty()) {
+        for (size_t i = 0; i < _tablet_schema->num_columns(); ++i) {
             _return_columns.push_back(i);
-            if (_tablet->tablet_schema().column(i).is_key()) {
+            if (_tablet_schema->column(i).is_key()) {
                 _key_cids.push_back(i);
             } else {
                 _value_cids.push_back(i);
             }
         }
-        VLOG(3) << "return column is empty, using full column as defaut.";
-    } else if (read_params.reader_type == READER_CHECKSUM) {
+        VLOG_NOTICE << "return column is empty, using full column as default.";
+    } else if ((read_params.reader_type == ReaderType::READER_CUMULATIVE_COMPACTION ||
+                read_params.reader_type == ReaderType::READER_SEGMENT_COMPACTION ||
+                read_params.reader_type == ReaderType::READER_BASE_COMPACTION ||
+                read_params.reader_type == ReaderType::READER_FULL_COMPACTION ||
+                read_params.reader_type == ReaderType::READER_COLD_DATA_COMPACTION ||
+                read_params.reader_type == ReaderType::READER_ALTER_TABLE) &&
+               !read_params.return_columns.empty()) {
         _return_columns = read_params.return_columns;
         for (auto id : read_params.return_columns) {
-            if (_tablet->tablet_schema().column(id).is_key()) {
+            if (_tablet_schema->column(id).is_key()) {
+                _key_cids.push_back(id);
+            } else {
+                _value_cids.push_back(id);
+            }
+        }
+    } else if (read_params.reader_type == ReaderType::READER_CHECKSUM) {
+        _return_columns = read_params.return_columns;
+        for (auto id : read_params.return_columns) {
+            if (_tablet_schema->column(id).is_key()) {
                 _key_cids.push_back(id);
             } else {
                 _value_cids.push_back(id);
             }
         }
     } else {
-        OLAP_LOG_WARNING("fail to init return columns. [reader_type=%d return_columns_size=%u]",
-                         read_params.reader_type, read_params.return_columns.size());
-        return OLAP_ERR_INPUT_PARAMETER_ERROR;
+        return Status::Error<INVALID_ARGUMENT>(
+                "fail to init return columns. reader_type={}, return_columns_size={}",
+                int(read_params.reader_type), read_params.return_columns.size());
     }
 
     std::sort(_key_cids.begin(), _key_cids.end(), std::greater<uint32_t>());
 
-    return OLAP_SUCCESS;
+    return Status::OK();
 }
 
-
-OLAPStatus Reader::_init_seek_columns() {
-    std::unordered_set<uint32_t> column_set(_return_columns.begin(), _return_columns.end());
-    for (auto& it : _conditions.columns()) {
-        column_set.insert(it.first);
-    }
-    uint32_t max_key_column_count = 0;
-    for (auto key : _keys_param.start_keys) {
-        if (key->field_count() > max_key_column_count) {
-            max_key_column_count = key->field_count();
-        }
-    }
-    for (auto key : _keys_param.end_keys) {
-        if (key->field_count() > max_key_column_count) {
-            max_key_column_count = key->field_count();
-        }
-    }
-    for (uint32_t i = 0; i < _tablet->tablet_schema().num_columns(); i++) {
-        if (i < max_key_column_count || column_set.find(i) != column_set.end()) {
-            _seek_columns.push_back(i);
-        }
-    }
-    return OLAP_SUCCESS;
-}
-
-OLAPStatus Reader::_init_keys_param(const ReaderParams& read_params) {
-    OLAPStatus res = OLAP_SUCCESS;
-
-    _next_key_index = 0;
-
-    if (read_params.start_key.size() == 0) {
-        return OLAP_SUCCESS;
+Status TabletReader::_init_keys_param(const ReaderParams& read_params) {
+    if (read_params.start_key.empty()) {
+        return Status::OK();
     }
 
-    _keys_param.range = read_params.range;
-    _keys_param.end_range = read_params.end_range;
+    _keys_param.start_key_include = read_params.start_key_include;
+    _keys_param.end_key_include = read_params.end_key_include;
 
     size_t start_key_size = read_params.start_key.size();
-    _keys_param.start_keys.resize(start_key_size, NULL);
+    //_keys_param.start_keys.resize(start_key_size);
+    std::vector<RowCursor>(start_key_size).swap(_keys_param.start_keys);
+
+    size_t scan_key_size = read_params.start_key.front().size();
+    if (scan_key_size > _tablet_schema->num_columns()) {
+        return Status::Error<INVALID_ARGUMENT>(
+                "Input param are invalid. Column count is bigger than num_columns of schema. "
+                "column_count={}, schema.num_columns={}",
+                scan_key_size, _tablet_schema->num_columns());
+    }
+
+    std::vector<uint32_t> columns(scan_key_size);
+    std::iota(columns.begin(), columns.end(), 0);
+
+    std::shared_ptr<Schema> schema = std::make_shared<Schema>(_tablet_schema->columns(), columns);
+
     for (size_t i = 0; i < start_key_size; ++i) {
-        if ((_keys_param.start_keys[i] = new(nothrow) RowCursor()) == NULL) {
-            OLAP_LOG_WARNING("fail to new RowCursor!");
-            return OLAP_ERR_MALLOC_ERROR;
+        if (read_params.start_key[i].size() != scan_key_size) {
+            return Status::Error<INVALID_ARGUMENT>(
+                    "The start_key.at({}).size={}, not equals the scan_key_size={}", i,
+                    read_params.start_key[i].size(), scan_key_size);
         }
-        
-        res = _keys_param.start_keys[i]->init_scan_key(_tablet->tablet_schema(),
-                                                       read_params.start_key[i].values());
-        if (res != OLAP_SUCCESS) {
-            OLAP_LOG_WARNING("fail to init row cursor. [res=%d]", res);
+
+        Status res = _keys_param.start_keys[i].init_scan_key(
+                _tablet_schema, read_params.start_key[i].values(), schema);
+        if (!res.ok()) {
+            LOG(WARNING) << "fail to init row cursor. res = " << res;
             return res;
         }
-        
-        res = _keys_param.start_keys[i]->from_tuple(read_params.start_key[i]);
-        if (res != OLAP_SUCCESS) {
-            OLAP_LOG_WARNING("fail to init row cursor from Keys. [res=%d key_index=%ld]", res, i);
+        res = _keys_param.start_keys[i].from_tuple(read_params.start_key[i]);
+        if (!res.ok()) {
+            LOG(WARNING) << "fail to init row cursor from Keys. res=" << res << "key_index=" << i;
             return res;
         }
     }
 
     size_t end_key_size = read_params.end_key.size();
-    _keys_param.end_keys.resize(end_key_size, NULL);
+    //_keys_param.end_keys.resize(end_key_size);
+    std::vector<RowCursor>(end_key_size).swap(_keys_param.end_keys);
     for (size_t i = 0; i < end_key_size; ++i) {
-        if ((_keys_param.end_keys[i] = new(nothrow) RowCursor()) == NULL) {
-            OLAP_LOG_WARNING("fail to new RowCursor!");
-            return OLAP_ERR_MALLOC_ERROR;
+        if (read_params.end_key[i].size() != scan_key_size) {
+            return Status::Error<INVALID_ARGUMENT>(
+                    "The end_key.at({}).size={}, not equals the scan_key_size={}", i,
+                    read_params.end_key[i].size(), scan_key_size);
         }
-        
-        res = _keys_param.end_keys[i]->init_scan_key(_tablet->tablet_schema(),
-                                                     read_params.end_key[i].values());
-        if (res != OLAP_SUCCESS) {
-            OLAP_LOG_WARNING("fail to init row cursor. [res=%d]", res);
+
+        Status res = _keys_param.end_keys[i].init_scan_key(_tablet_schema,
+                                                           read_params.end_key[i].values(), schema);
+        if (!res.ok()) {
+            LOG(WARNING) << "fail to init row cursor. res = " << res;
             return res;
         }
-        
-        res = _keys_param.end_keys[i]->from_tuple(read_params.end_key[i]);
-        if (res != OLAP_SUCCESS) {
-            OLAP_LOG_WARNING("fail to init row cursor from Keys. [res=%d key_index=%ld]", res, i);
+
+        res = _keys_param.end_keys[i].from_tuple(read_params.end_key[i]);
+        if (!res.ok()) {
+            LOG(WARNING) << "fail to init row cursor from Keys. res=" << res << " key_index=" << i;
             return res;
         }
     }
 
     //TODO:check the valid of start_key and end_key.(eg. start_key <= end_key)
 
-    return OLAP_SUCCESS;
+    return Status::OK();
 }
 
-OLAPStatus Reader::_init_conditions_param(const ReaderParams& read_params) {
-    OLAPStatus res = OLAP_SUCCESS;
-
-    _conditions.set_tablet_schema(&_tablet->tablet_schema());
-    for (int i = 0; i < read_params.conditions.size(); ++i) {
-        _conditions.append_condition(read_params.conditions[i]);
-        ColumnPredicate* predicate = _parse_to_predicate(read_params.conditions[i]);
-        if (predicate != NULL) {
-            _col_predicates.push_back(predicate);
+Status TabletReader::_init_orderby_keys_param(const ReaderParams& read_params) {
+    // UNIQUE_KEYS will compare all keys as before
+    if (_tablet_schema->keys_type() == DUP_KEYS || (_tablet_schema->keys_type() == UNIQUE_KEYS &&
+                                                    _tablet->enable_unique_key_merge_on_write())) {
+        // find index in vector _return_columns
+        //   for the read_orderby_key_num_prefix_columns orderby keys
+        for (uint32_t i = 0; i < read_params.read_orderby_key_num_prefix_columns; i++) {
+            for (uint32_t idx = 0; idx < _return_columns.size(); idx++) {
+                if (_return_columns[idx] == i) {
+                    _orderby_key_columns.push_back(idx);
+                    break;
+                }
+            }
+        }
+        if (read_params.read_orderby_key_num_prefix_columns != _orderby_key_columns.size()) {
+            return Status::Error<ErrorCode::INTERNAL_ERROR>(
+                    "read_orderby_key_num_prefix_columns != _orderby_key_columns.size, "
+                    "read_params.read_orderby_key_num_prefix_columns={}, "
+                    "_orderby_key_columns.size()={}",
+                    read_params.read_orderby_key_num_prefix_columns, _orderby_key_columns.size());
         }
     }
 
-    return res;
+    return Status::OK();
 }
 
-#define COMPARISON_PREDICATE_CONDITION_VALUE(NAME, PREDICATE) \
-ColumnPredicate* Reader::_new_##NAME##_pred(const TabletColumn& column, int index, const std::string& cond) { \
-    ColumnPredicate* predicate = NULL; \
-    switch (column.type()) { \
-        case OLAP_FIELD_TYPE_TINYINT: { \
-            std::stringstream ss(cond); \
-            int32_t value = 0; \
-            ss >> value; \
-            predicate = new PREDICATE<int8_t>(index, value); \
-            break; \
-        } \
-        case OLAP_FIELD_TYPE_SMALLINT: { \
-            std::stringstream ss(cond); \
-            int16_t value = 0; \
-            ss >> value; \
-            predicate = new PREDICATE<int16_t>(index, value); \
-            break; \
-        } \
-        case OLAP_FIELD_TYPE_INT: { \
-            std::stringstream ss(cond); \
-            int32_t value = 0; \
-            ss >> value; \
-            predicate = new PREDICATE<int32_t>(index, value); \
-            break; \
-        } \
-        case OLAP_FIELD_TYPE_BIGINT: { \
-            std::stringstream ss(cond); \
-            int64_t value = 0; \
-            ss >> value; \
-            predicate = new PREDICATE<int64_t>(index, value); \
-            break; \
-        } \
-        case OLAP_FIELD_TYPE_LARGEINT: { \
-            std::stringstream ss(cond); \
-            int128_t value = 0; \
-            ss >> value; \
-            predicate = new PREDICATE<int128_t>(index, value); \
-            break; \
-        } \
-        case OLAP_FIELD_TYPE_DECIMAL: { \
-            decimal12_t value(0, 0); \
-            value.from_string(cond); \
-            predicate = new PREDICATE<decimal12_t>(index, value); \
-            break; \
-        } \
-        case OLAP_FIELD_TYPE_CHAR: {\
-            StringValue value; \
-            size_t length = std::max(static_cast<size_t>(column.length()), cond.length());\
-            char* buffer = reinterpret_cast<char*>(_predicate_mem_pool->allocate(length)); \
-            memset(buffer, 0, length); \
-            memory_copy(buffer, cond.c_str(), cond.length()); \
-            value.len = length; \
-            value.ptr = buffer; \
-            predicate = new PREDICATE<StringValue>(index, value); \
-            break; \
-        } \
-        case OLAP_FIELD_TYPE_VARCHAR: { \
-            StringValue value; \
-            int32_t length = cond.length(); \
-            char* buffer = reinterpret_cast<char*>(_predicate_mem_pool->allocate(length)); \
-            memory_copy(buffer, cond.c_str(), length); \
-            value.len = length; \
-            value.ptr = buffer; \
-            predicate = new PREDICATE<StringValue>(index, value); \
-            break; \
-        } \
-        case OLAP_FIELD_TYPE_DATE: { \
-            uint24_t value = timestamp_from_date(cond); \
-            predicate = new PREDICATE<uint24_t>(index, value); \
-            break; \
-        } \
-        case OLAP_FIELD_TYPE_DATETIME: { \
-            uint64_t value = timestamp_from_datetime(cond); \
-            predicate = new PREDICATE<uint64_t>(index, value); \
-            break; \
-        } \
-        default: break; \
-    } \
- \
-    return predicate; \
-} \
+Status TabletReader::_init_conditions_param(const ReaderParams& read_params) {
+    for (auto& condition : read_params.conditions) {
+        TCondition tmp_cond = condition;
+        RETURN_IF_ERROR(_tablet_schema->have_column(tmp_cond.column_name));
+        // The "column" parameter might represent a column resulting from the decomposition of a variant column.
+        // Instead of using a "unique_id" for identification, we are utilizing a "path" to denote this column.
+        const auto& column = _tablet_schema->column(tmp_cond.column_name);
+        uint32_t index = _tablet_schema->field_index(tmp_cond.column_name);
+        ColumnPredicate* predicate =
+                parse_to_predicate(column, index, tmp_cond, _predicate_arena.get());
+        if (predicate != nullptr) {
+            // record condition value into predicate_params in order to pushdown segment_iterator,
+            // _gen_predicate_result_sign will build predicate result unique sign with condition value
+            auto predicate_params = predicate->predicate_params();
+            predicate_params->value = condition.condition_values[0];
+            predicate_params->marked_by_runtime_filter = condition.marked_by_runtime_filter;
+            if (column.aggregation() != FieldAggregationMethod::OLAP_FIELD_AGGREGATION_NONE) {
+                _value_col_predicates.push_back(predicate);
+            } else {
+                _col_predicates.push_back(predicate);
+            }
+        }
+    }
 
-COMPARISON_PREDICATE_CONDITION_VALUE(eq, EqualPredicate)
-COMPARISON_PREDICATE_CONDITION_VALUE(ne, NotEqualPredicate)
-COMPARISON_PREDICATE_CONDITION_VALUE(lt, LessPredicate)
-COMPARISON_PREDICATE_CONDITION_VALUE(le, LessEqualPredicate)
-COMPARISON_PREDICATE_CONDITION_VALUE(gt, GreaterPredicate)
-COMPARISON_PREDICATE_CONDITION_VALUE(ge, GreaterEqualPredicate)
+    // Only key column bloom filter will push down to storage engine
+    for (const auto& filter : read_params.bloom_filters) {
+        _col_predicates.emplace_back(_parse_to_predicate(filter));
+    }
 
-ColumnPredicate* Reader::_parse_to_predicate(const TCondition& condition) {
-    // TODO: not equal and not in predicate is not pushed down
-    int index = _tablet->field_index(condition.column_name);
-    const TabletColumn& column = _tablet->tablet_schema().column(index);
-    if (column.aggregation() != FieldAggregationMethod::OLAP_FIELD_AGGREGATION_NONE) {
+    for (const auto& filter : read_params.bitmap_filters) {
+        _col_predicates.emplace_back(_parse_to_predicate(filter));
+    }
+
+    for (const auto& filter : read_params.in_filters) {
+        ColumnPredicate* predicate = _parse_to_predicate(filter);
+        if (predicate != nullptr) {
+            // in_filters from runtime filter predicates which pushed down to data source.
+            auto predicate_params = predicate->predicate_params();
+            predicate_params->marked_by_runtime_filter = true;
+        }
+        _col_predicates.emplace_back(predicate);
+    }
+
+    // Function filter push down to storage engine
+    auto is_like_predicate = [](ColumnPredicate* _pred) {
+        if (dynamic_cast<LikeColumnPredicate<TYPE_CHAR>*>(_pred) != nullptr ||
+            dynamic_cast<LikeColumnPredicate<TYPE_STRING>*>(_pred) != nullptr) {
+            return true;
+        }
+
+        return false;
+    };
+
+    for (const auto& filter : read_params.function_filters) {
+        _col_predicates.emplace_back(_parse_to_predicate(filter));
+        auto* pred = _col_predicates.back();
+        const auto& col = _tablet->tablet_schema()->column(pred->column_id());
+        auto is_like = is_like_predicate(pred);
+        auto* tablet_index = _tablet->tablet_schema()->get_ngram_bf_index(col.unique_id());
+
+        if (is_like && tablet_index && config::enable_query_like_bloom_filter) {
+            std::unique_ptr<segment_v2::BloomFilter> ng_bf;
+            std::string pattern = pred->get_search_str();
+            auto gram_bf_size = tablet_index->get_gram_bf_size();
+            auto gram_size = tablet_index->get_gram_size();
+
+            segment_v2::BloomFilter::create(segment_v2::NGRAM_BLOOM_FILTER, &ng_bf, gram_bf_size);
+            NgramTokenExtractor _token_extractor(gram_size);
+
+            if (_token_extractor.string_like_to_bloom_filter(pattern.data(), pattern.length(),
+                                                             *ng_bf)) {
+                pred->set_page_ng_bf(std::move(ng_bf));
+            }
+        }
+    }
+    return Status::OK();
+}
+
+void TabletReader::_init_conditions_param_except_leafnode_of_andnode(
+        const ReaderParams& read_params) {
+    for (const auto& condition : read_params.conditions_except_leafnode_of_andnode) {
+        TCondition tmp_cond = condition;
+        const auto& column = _tablet_schema->column(tmp_cond.column_name);
+        uint32_t index = _tablet_schema->field_index(tmp_cond.column_name);
+        ColumnPredicate* predicate =
+                parse_to_predicate(column, index, tmp_cond, _predicate_arena.get());
+        if (predicate != nullptr) {
+            auto predicate_params = predicate->predicate_params();
+            predicate_params->marked_by_runtime_filter = condition.marked_by_runtime_filter;
+            predicate_params->value = condition.condition_values[0];
+            _col_preds_except_leafnode_of_andnode.push_back(predicate);
+        }
+    }
+
+    if (read_params.use_topn_opt) {
+        auto& runtime_predicate =
+                read_params.runtime_state->get_query_ctx()->get_runtime_predicate();
+        runtime_predicate.set_tablet_schema(_tablet_schema);
+    }
+}
+
+ColumnPredicate* TabletReader::_parse_to_predicate(
+        const std::pair<std::string, std::shared_ptr<BloomFilterFuncBase>>& bloom_filter) {
+    int32_t index = _tablet_schema->field_index(bloom_filter.first);
+    if (index < 0) {
         return nullptr;
     }
-    ColumnPredicate* predicate = NULL;
-    if (condition.condition_op == "*="
-            && condition.condition_values.size() == 1) {
-        predicate = _new_eq_pred(column, index, condition.condition_values[0]);
-    } else if (condition.condition_op == "<<") {
-        predicate = _new_lt_pred(column, index, condition.condition_values[0]);
-    } else if (condition.condition_op == "<=") {
-        predicate = _new_le_pred(column, index, condition.condition_values[0]);
-    } else if (condition.condition_op == ">>") {
-        predicate = _new_gt_pred(column, index, condition.condition_values[0]);
-    } else if (condition.condition_op == ">=") {
-        predicate = _new_ge_pred(column, index, condition.condition_values[0]);
-    } else if (condition.condition_op == "*="
-            && condition.condition_values.size() > 1) {
-        switch (column.type()) {
-            case OLAP_FIELD_TYPE_TINYINT: {
-                std::set<int8_t> values;
-                for (auto& cond_val : condition.condition_values) {
-                    int32_t value = 0;
-                    std::stringstream ss(cond_val);
-                    ss >> value;
-                    values.insert(value);
-                }
-                predicate = new InListPredicate<int8_t>(index, std::move(values));
-                break;
-            }
-            case OLAP_FIELD_TYPE_SMALLINT: {
-                std::set<int16_t> values;
-                for (auto& cond_val : condition.condition_values) {
-                    int16_t value = 0;
-                    std::stringstream ss(cond_val);
-                    ss >> value;
-                    values.insert(value);
-                }
-                predicate = new InListPredicate<int16_t>(index, std::move(values));
-                break;
-            }
-            case OLAP_FIELD_TYPE_INT: {
-                std::set<int32_t> values;
-                for (auto& cond_val : condition.condition_values) {
-                    int32_t value = 0;
-                    std::stringstream ss(cond_val);
-                    ss >> value;
-                    values.insert(value);
-                }
-                predicate = new InListPredicate<int32_t>(index, std::move(values));
-                break;
-            }
-            case OLAP_FIELD_TYPE_BIGINT: {
-                std::set<int64_t> values;
-                for (auto& cond_val : condition.condition_values) {
-                    int64_t value = 0;
-                    std::stringstream ss(cond_val);
-                    ss >> value;
-                    values.insert(value);
-                }
-                predicate = new InListPredicate<int64_t>(index, std::move(values));
-                break;
-            }
-            case OLAP_FIELD_TYPE_LARGEINT: {
-                std::set<int128_t> values;
-                for (auto& cond_val : condition.condition_values) {
-                    int128_t value = 0;
-                    std::stringstream ss(cond_val);
-                    ss >> value;
-                    values.insert(value);
-                }
-                predicate = new InListPredicate<int128_t>(index, std::move(values));
-                break;
-            }
-            case OLAP_FIELD_TYPE_DECIMAL: {
-                std::set<decimal12_t> values;
-                for (auto& cond_val : condition.condition_values) {
-                    decimal12_t value;
-                    value.from_string(cond_val);
-                    values.insert(value);
-                }
-                predicate = new InListPredicate<decimal12_t>(index, std::move(values));
-                break;
-            }
-            case OLAP_FIELD_TYPE_CHAR: {
-                std::set<StringValue> values;
-                for (auto& cond_val : condition.condition_values) {
-                    StringValue value;
-                    size_t length = std::max(static_cast<size_t>(column.length()), cond_val.length());
-                    char* buffer = reinterpret_cast<char*>(_predicate_mem_pool->allocate(length));
-                    memset(buffer, 0, length);
-                    memory_copy(buffer, cond_val.c_str(), cond_val.length());
-                    value.len = length;
-                    value.ptr = buffer;
-                    values.insert(value);
-                }
-                predicate = new InListPredicate<StringValue>(index, std::move(values));
-                break;
-            }
-            case OLAP_FIELD_TYPE_VARCHAR: {
-                std::set<StringValue> values;
-                for (auto& cond_val : condition.condition_values) {
-                    StringValue value;
-                    int32_t length = cond_val.length();
-                    char* buffer = reinterpret_cast<char*>(_predicate_mem_pool->allocate(length));
-                    memory_copy(buffer, cond_val.c_str(), length);
-                    value.len = length;
-                    value.ptr = buffer;
-                    values.insert(value);
-                }
-                predicate = new InListPredicate<StringValue>(index, std::move(values));
-                break;
-            }
-            case OLAP_FIELD_TYPE_DATE: {
-                std::set<uint24_t> values;
-                for (auto& cond_val : condition.condition_values) {
-                    uint24_t value = timestamp_from_date(cond_val);
-                    values.insert(value);
-                }
-                predicate = new InListPredicate<uint24_t>(index, std::move(values));
-                break;
-            }
-            case OLAP_FIELD_TYPE_DATETIME: {
-                std::set<uint64_t> values;
-                for (auto& cond_val : condition.condition_values) {
-                    uint64_t value = timestamp_from_datetime(cond_val);
-                    values.insert(value);
-                }
-                predicate = new InListPredicate<uint64_t>(index, std::move(values));
-                break;
-            }
-            default: break;
-        }
-    } else if (condition.condition_op == "is") {
-        bool is_null = false;
-        if (condition.condition_values[0] == "null") {
-            is_null = true;
-        } else {
-            is_null = false;
-        }
-        predicate = new NullPredicate(index, is_null);
-    }
-    return predicate;
+    const TabletColumn& column = _tablet_schema->column(index);
+    return create_column_predicate(index, bloom_filter.second, column.type(),
+                                   _reader_context.runtime_state->be_exec_version(), &column);
 }
 
-OLAPStatus Reader::_init_load_bf_columns(const ReaderParams& read_params) {
-    OLAPStatus res = OLAP_SUCCESS;
-
-    // add all columns with condition to _load_bf_columns
-    for (const auto& cond_column : _conditions.columns()) {
-        for (const Cond* cond : cond_column.second->conds()) {
-            if (cond->op == OP_EQ
-                    || (cond->op == OP_IN && cond->operand_set.size() < MAX_OP_IN_FIELD_NUM)) {
-                _load_bf_columns.insert(cond_column.first);
-            }
-        }
+ColumnPredicate* TabletReader::_parse_to_predicate(
+        const std::pair<std::string, std::shared_ptr<HybridSetBase>>& in_filter) {
+    int32_t index = _tablet_schema->field_index(in_filter.first);
+    if (index < 0) {
+        return nullptr;
     }
-
-    // remove columns which have no bf stream
-    for (int i = 0; i < _tablet->tablet_schema().num_columns(); ++i) {
-        if (!_tablet->tablet_schema().column(i).is_bf_column()) {
-            _load_bf_columns.erase(i);
-        }
-    }
-
-    // remove columns which have same value between start_key and end_key
-    int min_scan_key_len = _tablet->tablet_schema().num_columns();
-    for (int i = 0; i < read_params.start_key.size(); ++i) {
-        if (read_params.start_key[i].size() < min_scan_key_len) {
-            min_scan_key_len = read_params.start_key[i].size();
-        }
-    }
-
-    for (int i = 0; i < read_params.end_key.size(); ++i) {
-        if (read_params.end_key[i].size() < min_scan_key_len) {
-            min_scan_key_len = read_params.end_key[i].size();
-        }
-    }
-
-    int max_equal_index = -1;
-    for (int i = 0; i < read_params.start_key.size(); ++i) {
-        int j = 0;
-        for (; j < min_scan_key_len; ++j) {
-            if (read_params.start_key[i].get_value(j) != read_params.end_key[i].get_value(j)) {
-                break;
-            }
-        }
-
-        if (max_equal_index < j - 1) {
-            max_equal_index = j - 1;
-        }
-    }
-
-    for (int i = 0; i < max_equal_index; ++i) {
-        _load_bf_columns.erase(i);
-    }
-
-    // remove the max_equal_index column when it's not varchar
-    // or longer than number of short key fields
-    FieldType type = OLAP_FIELD_TYPE_NONE;
-    if (max_equal_index == -1) {
-        return res;
-    }
-    type = _tablet->tablet_schema().column(max_equal_index).type();
-    if (type != OLAP_FIELD_TYPE_VARCHAR || max_equal_index + 1 > _tablet->num_short_key_columns()) {
-        _load_bf_columns.erase(max_equal_index);
-    }
-
-    return res;
+    const TabletColumn& column = _tablet_schema->column(index);
+    return create_column_predicate(index, in_filter.second, column.type(),
+                                   _reader_context.runtime_state->be_exec_version(), &column);
 }
 
-OLAPStatus Reader::_init_delete_condition(const ReaderParams& read_params) {
-    if (read_params.reader_type != READER_CUMULATIVE_COMPACTION) {
-        _tablet->obtain_header_rdlock();
-        OLAPStatus ret = _delete_handler.init(_tablet->tablet_schema(),
-                                              _tablet->delete_predicates(),
-                                              read_params.version.second);
-        _tablet->release_header_lock();
-
-        return ret;
-    } else {
-        return OLAP_SUCCESS;
+ColumnPredicate* TabletReader::_parse_to_predicate(
+        const std::pair<std::string, std::shared_ptr<BitmapFilterFuncBase>>& bitmap_filter) {
+    int32_t index = _tablet_schema->field_index(bitmap_filter.first);
+    if (index < 0) {
+        return nullptr;
     }
+    const TabletColumn& column = _tablet_schema->column(index);
+    return create_column_predicate(index, bitmap_filter.second, column.type(),
+                                   _reader_context.runtime_state->be_exec_version(), &column);
 }
 
-}  // namespace doris
+ColumnPredicate* TabletReader::_parse_to_predicate(const FunctionFilter& function_filter) {
+    int32_t index = _tablet_schema->field_index(function_filter._col_name);
+    if (index < 0) {
+        return nullptr;
+    }
+    const TabletColumn& column = _tablet_schema->column(index);
+    return create_column_predicate(index, std::make_shared<FunctionFilter>(function_filter),
+                                   column.type(), _reader_context.runtime_state->be_exec_version(),
+                                   &column);
+}
+
+Status TabletReader::_init_delete_condition(const ReaderParams& read_params) {
+    // If it's cumu and not allow do delete when cumu
+    if (read_params.reader_type == ReaderType::READER_SEGMENT_COMPACTION ||
+        (read_params.reader_type == ReaderType::READER_CUMULATIVE_COMPACTION &&
+         !config::enable_delete_when_cumu_compaction)) {
+        return Status::OK();
+    }
+    // Only BASE_COMPACTION and COLD_DATA_COMPACTION and CUMULATIVE_COMPACTION need set filter_delete = true
+    // other reader type:
+    // QUERY will filter the row in query layer to keep right result use where clause.
+    _filter_delete = (read_params.reader_type == ReaderType::READER_BASE_COMPACTION ||
+                      read_params.reader_type == ReaderType::READER_COLD_DATA_COMPACTION ||
+                      ((read_params.reader_type == ReaderType::READER_CUMULATIVE_COMPACTION &&
+                        config::enable_delete_when_cumu_compaction)) ||
+                      read_params.reader_type == ReaderType::READER_CHECKSUM);
+    if (_filter_delete) {
+        // note(tsy): for compaction, keep delete sub pred v1 temporarily
+        return _delete_handler.init(_tablet_schema, read_params.delete_predicates,
+                                    read_params.version.second, false);
+    }
+    auto* runtime_state = read_params.runtime_state;
+    // note(tsy): for query, use session var to enable delete sub pred v2, for schema change, use v2 directly
+    bool enable_sub_pred_v2 =
+            runtime_state == nullptr ? true : runtime_state->enable_delete_sub_pred_v2();
+    return _delete_handler.init(_tablet_schema, read_params.delete_predicates,
+                                read_params.version.second, enable_sub_pred_v2);
+}
+
+Status TabletReader::init_reader_params_and_create_block(
+        TabletSharedPtr tablet, ReaderType reader_type,
+        const std::vector<RowsetSharedPtr>& input_rowsets,
+        TabletReader::ReaderParams* reader_params, vectorized::Block* block) {
+    reader_params->tablet = tablet;
+    reader_params->reader_type = reader_type;
+    reader_params->version =
+            Version(input_rowsets.front()->start_version(), input_rowsets.back()->end_version());
+
+    for (auto& rowset : input_rowsets) {
+        RowsetReaderSharedPtr rs_reader;
+        RETURN_IF_ERROR(rowset->create_reader(&rs_reader));
+        reader_params->rs_splits.push_back(RowSetSplits(std::move(rs_reader)));
+    }
+
+    std::vector<RowsetMetaSharedPtr> rowset_metas(input_rowsets.size());
+    std::transform(input_rowsets.begin(), input_rowsets.end(), rowset_metas.begin(),
+                   [](const RowsetSharedPtr& rowset) { return rowset->rowset_meta(); });
+    TabletSchemaSPtr read_tablet_schema =
+            tablet->rowset_meta_with_max_schema_version(rowset_metas)->tablet_schema();
+    TabletSchemaSPtr merge_tablet_schema = std::make_shared<TabletSchema>();
+    merge_tablet_schema->copy_from(*read_tablet_schema);
+
+    auto& delete_preds = tablet->delete_predicates();
+    std::copy(delete_preds.cbegin(), delete_preds.cend(),
+              std::inserter(reader_params->delete_predicates,
+                            reader_params->delete_predicates.begin()));
+
+    // Merge the columns in delete predicate that not in latest schema in to current tablet schema
+    for (auto& del_pred_pb : reader_params->delete_predicates) {
+        merge_tablet_schema->merge_dropped_columns(tablet->tablet_schema(del_pred_pb->version()));
+    }
+    reader_params->tablet_schema = merge_tablet_schema;
+    if (tablet->enable_unique_key_merge_on_write()) {
+        reader_params->delete_bitmap = &tablet->tablet_meta()->delete_bitmap();
+    }
+
+    reader_params->return_columns.resize(read_tablet_schema->num_columns());
+    std::iota(reader_params->return_columns.begin(), reader_params->return_columns.end(), 0);
+    reader_params->origin_return_columns = &reader_params->return_columns;
+
+    *block = read_tablet_schema->create_block();
+
+    return Status::OK();
+}
+
+} // namespace doris

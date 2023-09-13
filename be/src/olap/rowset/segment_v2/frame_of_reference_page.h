@@ -17,35 +17,37 @@
 
 #pragma once
 
+#include "olap/rowset/segment_v2/options.h"      // for PageBuilderOptions/PageDecoderOptions
 #include "olap/rowset/segment_v2/page_builder.h" // for PageBuilder
 #include "olap/rowset/segment_v2/page_decoder.h" // for PageDecoder
-#include "olap/rowset/segment_v2/options.h" // for PageBuilderOptions/PageDecoderOptions
-#include "olap/rowset/segment_v2/common.h" // for rowid_t
 #include "util/frame_of_reference_coding.h"
 
 namespace doris {
 namespace segment_v2 {
 
 // Encode page use frame-of-reference coding
-template<FieldType Type>
+template <FieldType Type>
 class FrameOfReferencePageBuilder : public PageBuilder {
 public:
-    explicit FrameOfReferencePageBuilder(const PageBuilderOptions& options) :
-        _options(options),
-        _count(0),
-        _finished(false) {
+    explicit FrameOfReferencePageBuilder(const PageBuilderOptions& options)
+            : _options(options), _count(0), _finished(false) {
         _encoder.reset(new ForEncoder<CppType>(&_buf));
     }
 
-    bool is_page_full() override {
-        return _encoder->len() >= _options.data_page_size;
-    }
+    bool is_page_full() override { return _encoder->len() >= _options.data_page_size; }
 
     Status add(const uint8_t* vals, size_t* count) override {
         DCHECK(!_finished);
+        if (*count == 0) {
+            return Status::OK();
+        }
         auto new_vals = reinterpret_cast<const CppType*>(vals);
+        if (_count == 0) {
+            _first_val = *new_vals;
+        }
         _encoder->put_batch(new_vals, *count);
         _count += *count;
+        _last_val = new_vals[*count - 1];
         return Status::OK();
     }
 
@@ -62,12 +64,24 @@ public:
         _encoder->clear();
     }
 
-    size_t count() const override {
-        return _count;
+    size_t count() const override { return _count; }
+
+    uint64_t size() const override { return _buf.size(); }
+
+    Status get_first_value(void* value) const override {
+        if (_count == 0) {
+            return Status::Error<ErrorCode::ENTRY_NOT_FOUND>("page is empty");
+        }
+        memcpy(value, &_first_val, sizeof(CppType));
+        return Status::OK();
     }
 
-    uint64_t size() const override {
-        return _buf.size();
+    Status get_last_value(void* value) const override {
+        if (_count == 0) {
+            return Status::Error<ErrorCode::ENTRY_NOT_FOUND>("page is empty");
+        }
+        memcpy(value, &_last_val, sizeof(CppType));
+        return Status::OK();
     }
 
 private:
@@ -77,16 +91,15 @@ private:
     bool _finished;
     std::unique_ptr<ForEncoder<CppType>> _encoder;
     faststring _buf;
+    CppType _first_val;
+    CppType _last_val;
 };
 
-template<FieldType Type>
+template <FieldType Type>
 class FrameOfReferencePageDecoder : public PageDecoder {
 public:
-    FrameOfReferencePageDecoder(Slice slice, const PageDecoderOptions& options) :
-        _parsed(false),
-        _data(slice),
-        _num_elements(0),
-        _cur_index(0){
+    FrameOfReferencePageDecoder(Slice slice, const PageDecoderOptions& options)
+            : _parsed(false), _data(slice), _num_elements(0), _cur_index(0) {
         _decoder.reset(new ForDecoder<CppType>((uint8_t*)_data.data, _data.size));
     }
 
@@ -104,8 +117,9 @@ public:
 
     Status seek_to_position_in_page(size_t pos) override {
         DCHECK(_parsed) << "Must call init() firstly";
-        DCHECK_LE(pos, _num_elements) << "Tried to seek to " << pos << " which is > number of elements ("
-                                      << _num_elements << ") in the block!";
+        DCHECK_LE(pos, _num_elements)
+                << "Tried to seek to " << pos << " which is > number of elements (" << _num_elements
+                << ") in the block!";
         // If the block is empty (e.g. the column is filled with nulls), there is no data to seek.
         if (PREDICT_FALSE(_num_elements == 0)) {
             return Status::OK();
@@ -117,28 +131,27 @@ public:
         return Status::OK();
     }
 
-    Status next_batch(size_t* n, ColumnBlockView* dst) override {
+    Status seek_at_or_after_value(const void* value, bool* exact_match) override {
         DCHECK(_parsed) << "Must call init() firstly";
-        if (PREDICT_FALSE(*n == 0 || _cur_index >= _num_elements)) {
-            *n = 0;
-            return Status::OK();
+        bool found = _decoder->seek_at_or_after_value(value, exact_match);
+        if (!found) {
+            return Status::Error<ErrorCode::ENTRY_NOT_FOUND>("not found");
         }
-
-        size_t to_fetch = std::min(*n, static_cast<size_t>(_num_elements - _cur_index));
-        uint8_t* data_ptr = dst->data();
-        _decoder->get_batch(reinterpret_cast<CppType*>(data_ptr), to_fetch);
-        _cur_index += to_fetch;
-        *n = to_fetch;
+        _cur_index = _decoder->current_index();
         return Status::OK();
     }
 
-    size_t count() const override {
-        return _num_elements;
+    Status next_batch(size_t* n, vectorized::MutableColumnPtr& dst) override {
+        return Status::NotSupported("frame page not implement vec op now");
     }
 
-    size_t current_index() const override {
-        return _cur_index;
+    Status peek_next_batch(size_t* n, vectorized::MutableColumnPtr& dst) override {
+        return Status::NotSupported("frame page not implement vec op now");
     }
+
+    size_t count() const override { return _num_elements; }
+
+    size_t current_index() const override { return _cur_index; }
 
 private:
     typedef typename TypeTraits<Type>::CppType CppType;

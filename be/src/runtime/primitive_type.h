@@ -15,70 +15,63 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_RUNTIME_PRIMITIVE_TYPE_H
-#define DORIS_BE_RUNTIME_PRIMITIVE_TYPE_H
+#pragma once
+
+#include <gen_cpp/Opcodes_types.h>
+#include <gen_cpp/Types_types.h>
+#include <glog/logging.h>
+#include <stdint.h>
 
 #include <string>
+#include <type_traits>
 
-#include "common/logging.h"
-#include "gen_cpp/Types_types.h"
-#include "gen_cpp/Opcodes_types.h"
-#include "runtime/decimal_value.h"
-#include "runtime/decimalv2_value.h"
-#include "runtime/datetime_value.h"
-#include "runtime/large_int_value.h"
-#include "runtime/string_value.h"
+#include "olap/decimal12.h"
+#include "runtime/define_primitive_type.h"
+#include "vec/columns/column_decimal.h"
+#include "vec/columns/column_vector.h"
+#include "vec/columns/columns_number.h"
+#include "vec/core/types.h"
+#include "vec/runtime/vdatetime_value.h"
+#include "vec/utils/template_helpers.hpp"
 
 namespace doris {
 
-enum PrimitiveType {
-    INVALID_TYPE = 0,
-    TYPE_NULL,    /* 1 */
-    TYPE_BOOLEAN, /* 2 */
-    TYPE_TINYINT, /* 3 */
-    TYPE_SMALLINT, /* 4 */
-    TYPE_INT, /* 5 */
-    TYPE_BIGINT, /* 6 */
-    TYPE_LARGEINT, /* 7 */
-    TYPE_FLOAT, /* 8 */
-    TYPE_DOUBLE, /* 9 */
-    TYPE_VARCHAR, /* 10 */
-    TYPE_DATE, /* 11 */
-    TYPE_DATETIME, /* 12 */
-    TYPE_BINARY,   /* 13 */   // Not implemented
-    TYPE_DECIMAL,  /* 14 */
-    TYPE_CHAR, /* 15 */
+namespace vectorized {
+class ColumnString;
+} // namespace vectorized
 
-    TYPE_STRUCT, /* 16 */
-    TYPE_ARRAY, /* 17 */
-    TYPE_MAP, /* 18 */
-    TYPE_HLL, /* 19 */
-    TYPE_DECIMALV2,  /* 20 */
+class DecimalV2Value;
+struct StringRef;
+struct JsonBinaryValue;
 
-    TYPE_TIME, /* 21 */
-    TYPE_OBJECT,
-};
-
-inline bool is_enumeration_type(PrimitiveType type) {
+constexpr bool is_enumeration_type(PrimitiveType type) {
     switch (type) {
     case TYPE_FLOAT:
     case TYPE_DOUBLE:
     case TYPE_NULL:
     case TYPE_CHAR:
     case TYPE_VARCHAR:
+    case TYPE_STRING:
     case TYPE_DATETIME:
-    case TYPE_DECIMAL:
+    case TYPE_DATETIMEV2:
+    case TYPE_TIMEV2:
     case TYPE_DECIMALV2:
+    case TYPE_DECIMAL32:
+    case TYPE_DECIMAL64:
+    case TYPE_DECIMAL128I:
     case TYPE_BOOLEAN:
+    case TYPE_ARRAY:
+    case TYPE_STRUCT:
+    case TYPE_MAP:
     case TYPE_HLL:
         return false;
-
     case TYPE_TINYINT:
     case TYPE_SMALLINT:
     case TYPE_INT:
     case TYPE_BIGINT:
     case TYPE_LARGEINT:
     case TYPE_DATE:
+    case TYPE_DATEV2:
         return true;
 
     case INVALID_TYPE:
@@ -89,171 +82,215 @@ inline bool is_enumeration_type(PrimitiveType type) {
     return false;
 }
 
-// inline bool is_date_type(PrimitiveType type) {
-//     return type == TYPE_DATETIME || type == TYPE_DATE;
-// }
-// 
-// inline bool is_string_type(PrimitiveType type) {
-//     return type == TYPE_CHAR || type == TYPE_VARCHAR;
-// }
-
-// Returns the byte size of 'type'  Returns 0 for variable length types.
-inline int get_byte_size(PrimitiveType type) {
-    switch (type) {
-    case TYPE_OBJECT:
-    case TYPE_HLL:
-    case TYPE_VARCHAR:
-        return 0;
-
-    case TYPE_NULL:
-    case TYPE_BOOLEAN:
-    case TYPE_TINYINT:
-        return 1;
-
-    case TYPE_SMALLINT:
-        return 2;
-
-    case TYPE_INT:
-    case TYPE_FLOAT:
-        return 4;
-
-    case TYPE_BIGINT:
-    case TYPE_TIME:
-    case TYPE_DOUBLE:
-        return 8;
-
-    case TYPE_LARGEINT:
-    case TYPE_DATETIME:
-    case TYPE_DATE:
-    case TYPE_DECIMALV2:
-        return 16;
-
-    case TYPE_DECIMAL:
-        return 40;
-
-    case INVALID_TYPE:
-    default:
-        DCHECK(false);
-    }
-
-    return 0;
+constexpr bool is_date_type(PrimitiveType type) {
+    return type == TYPE_DATETIME || type == TYPE_DATE || type == TYPE_DATETIMEV2 ||
+           type == TYPE_DATEV2;
 }
 
-inline int get_real_byte_size(PrimitiveType type) {
-    switch (type) {
-    case TYPE_OBJECT:
-    case TYPE_HLL:
-    case TYPE_VARCHAR:
-        return 0;
-
-    case TYPE_NULL:
-    case TYPE_BOOLEAN:
-    case TYPE_TINYINT:
-        return 1;
-
-    case TYPE_SMALLINT:
-        return 2;
-
-    case TYPE_INT:
-    case TYPE_FLOAT:
-        return 4;
-
-    case TYPE_BIGINT:
-    case TYPE_TIME:
-    case TYPE_DOUBLE:
-        return 8;
-
-    case TYPE_DATETIME:
-    case TYPE_DATE:
-    case TYPE_DECIMALV2:
-        return 16;
-
-    case TYPE_DECIMAL:
-        return 40;
-
-    case TYPE_LARGEINT:
-        return 16;
-
-    case INVALID_TYPE:
-    default:
-        DCHECK(false);
-    }
-
-    return 0;
-}
-// Returns the byte size of type when in a tuple
-inline int get_slot_size(PrimitiveType type) {
-    switch (type) {
-    case TYPE_OBJECT:
-    case TYPE_HLL:
-    case TYPE_CHAR:
-    case TYPE_VARCHAR:
-        return sizeof(StringValue);
-
-    case TYPE_NULL:
-    case TYPE_BOOLEAN:
-    case TYPE_TINYINT:
-        return 1;
-
-    case TYPE_SMALLINT:
-        return 2;
-
-    case TYPE_INT:
-    case TYPE_FLOAT:
-        return 4;
-
-    case TYPE_BIGINT:
-    case TYPE_DOUBLE:
-        return 8;
-
-    case TYPE_LARGEINT:
-        return sizeof(__int128);
-
-    case TYPE_DATE:
-    case TYPE_DATETIME:
-        // This is the size of the slot, the actual size of the data is 12.
-        return 16;
-
-    case TYPE_DECIMAL:
-        return sizeof(DecimalValue);
-
-    case TYPE_DECIMALV2:
-        return 16;
-
-    case INVALID_TYPE:
-    default:
-        DCHECK(false);
-    }
-
-    return 0;
+constexpr bool is_string_type(PrimitiveType type) {
+    return type == TYPE_CHAR || type == TYPE_VARCHAR || type == TYPE_STRING;
 }
 
-inline bool is_type_compatible(PrimitiveType lhs, PrimitiveType rhs) {
-    if (lhs == TYPE_VARCHAR) {
-        return  rhs == TYPE_CHAR || rhs == TYPE_VARCHAR
-                || rhs == TYPE_HLL || rhs == TYPE_OBJECT;
-    }
-
-    if (lhs == TYPE_OBJECT) {
-        return rhs == TYPE_VARCHAR || rhs == TYPE_OBJECT;
-    }
-
-    if (lhs == TYPE_CHAR || lhs == TYPE_HLL) {
-        return rhs == TYPE_CHAR || rhs == TYPE_VARCHAR || rhs == TYPE_HLL;
-    }
-
-    return lhs == rhs;
+constexpr bool is_variant_string_type(PrimitiveType type) {
+    return type == TYPE_VARCHAR || type == TYPE_STRING;
 }
 
-TExprOpcode::type to_in_opcode(PrimitiveType t);
+constexpr bool is_float_or_double(PrimitiveType type) {
+    return type == TYPE_FLOAT || type == TYPE_DOUBLE;
+}
+
+constexpr bool is_int_or_bool(PrimitiveType type) {
+    return type == TYPE_BOOLEAN || type == TYPE_TINYINT || type == TYPE_SMALLINT ||
+           type == TYPE_INT || type == TYPE_BIGINT || type == TYPE_LARGEINT;
+}
+
+bool is_type_compatible(PrimitiveType lhs, PrimitiveType rhs);
+
 PrimitiveType thrift_to_type(TPrimitiveType::type ttype);
 TPrimitiveType::type to_thrift(PrimitiveType ptype);
-TColumnType to_tcolumn_type_thrift(TPrimitiveType::type ttype);
 std::string type_to_string(PrimitiveType t);
 std::string type_to_odbc_string(PrimitiveType t);
 TTypeDesc gen_type_desc(const TPrimitiveType::type val);
 TTypeDesc gen_type_desc(const TPrimitiveType::type val, const std::string& name);
 
+template <PrimitiveType type>
+constexpr PrimitiveType PredicateEvaluateType = is_variant_string_type(type) ? TYPE_STRING : type;
+
+template <PrimitiveType type>
+struct PrimitiveTypeTraits;
+
+template <>
+struct PrimitiveTypeTraits<TYPE_BOOLEAN> {
+    using CppType = bool;
+    using ColumnType = vectorized::ColumnUInt8;
+};
+template <>
+struct PrimitiveTypeTraits<TYPE_TINYINT> {
+    using CppType = int8_t;
+    using ColumnType = vectorized::ColumnInt8;
+};
+template <>
+struct PrimitiveTypeTraits<TYPE_SMALLINT> {
+    using CppType = int16_t;
+    using ColumnType = vectorized::ColumnInt16;
+};
+template <>
+struct PrimitiveTypeTraits<TYPE_INT> {
+    using CppType = int32_t;
+    using ColumnType = vectorized::ColumnInt32;
+};
+template <>
+struct PrimitiveTypeTraits<TYPE_BIGINT> {
+    using CppType = int64_t;
+    using ColumnType = vectorized::ColumnInt64;
+};
+template <>
+struct PrimitiveTypeTraits<TYPE_FLOAT> {
+    using CppType = float;
+    using ColumnType = vectorized::ColumnFloat32;
+};
+template <>
+struct PrimitiveTypeTraits<TYPE_TIME> {
+    using CppType = double;
+    using ColumnType = vectorized::ColumnFloat64;
+};
+template <>
+struct PrimitiveTypeTraits<TYPE_TIMEV2> {
+    using CppType = double;
+    using ColumnType = vectorized::ColumnFloat64;
+};
+template <>
+struct PrimitiveTypeTraits<TYPE_DOUBLE> {
+    using CppType = double;
+    using ColumnType = vectorized::ColumnFloat64;
+};
+template <>
+struct PrimitiveTypeTraits<TYPE_DATE> {
+    using CppType = doris::vectorized::VecDateTimeValue;
+    using ColumnType = vectorized::ColumnVector<vectorized::DateTime>;
+};
+template <>
+struct PrimitiveTypeTraits<TYPE_DATETIME> {
+    using CppType = doris::vectorized::VecDateTimeValue;
+    using ColumnType = vectorized::ColumnVector<vectorized::DateTime>;
+};
+template <>
+struct PrimitiveTypeTraits<TYPE_DATETIMEV2> {
+    using CppType = doris::vectorized::DateV2Value<doris::vectorized::DateTimeV2ValueType>;
+    using ColumnType = vectorized::ColumnVector<vectorized::DateTimeV2>;
+};
+template <>
+struct PrimitiveTypeTraits<TYPE_DATEV2> {
+    using CppType = doris::vectorized::DateV2Value<doris::vectorized::DateV2ValueType>;
+    using ColumnType = vectorized::ColumnVector<vectorized::DateV2>;
+};
+template <>
+struct PrimitiveTypeTraits<TYPE_DECIMALV2> {
+    using CppType = DecimalV2Value;
+    using ColumnType = vectorized::ColumnDecimal<vectorized::Decimal128>;
+};
+template <>
+struct PrimitiveTypeTraits<TYPE_DECIMAL32> {
+    using CppType = vectorized::Decimal32;
+    using ColumnType = vectorized::ColumnDecimal<vectorized::Decimal32>;
+};
+template <>
+struct PrimitiveTypeTraits<TYPE_DECIMAL64> {
+    using CppType = vectorized::Decimal64;
+    using ColumnType = vectorized::ColumnDecimal<vectorized::Decimal64>;
+};
+template <>
+struct PrimitiveTypeTraits<TYPE_DECIMAL128I> {
+    using CppType = vectorized::Decimal128I;
+    using ColumnType = vectorized::ColumnDecimal<vectorized::Decimal128I>;
+};
+template <>
+struct PrimitiveTypeTraits<TYPE_LARGEINT> {
+    using CppType = __int128_t;
+    using ColumnType = vectorized::ColumnInt128;
+};
+template <>
+struct PrimitiveTypeTraits<TYPE_CHAR> {
+    using CppType = StringRef;
+    using ColumnType = vectorized::ColumnString;
+};
+template <>
+struct PrimitiveTypeTraits<TYPE_VARCHAR> {
+    using CppType = StringRef;
+    using ColumnType = vectorized::ColumnString;
+};
+
+template <>
+struct PrimitiveTypeTraits<TYPE_STRING> {
+    using CppType = StringRef;
+    using ColumnType = vectorized::ColumnString;
+};
+
+template <>
+struct PrimitiveTypeTraits<TYPE_HLL> {
+    using CppType = StringRef;
+    using ColumnType = vectorized::ColumnString;
+};
+
+template <>
+struct PrimitiveTypeTraits<TYPE_JSONB> {
+    using CppType = JsonBinaryValue;
+    using ColumnType = vectorized::ColumnString;
+};
+
+// only for adapt get_predicate_column_ptr
+template <PrimitiveType type>
+struct PredicatePrimitiveTypeTraits {
+    using PredicateFieldType = typename PrimitiveTypeTraits<type>::CppType;
+};
+
+template <>
+struct PredicatePrimitiveTypeTraits<TYPE_DECIMALV2> {
+    using PredicateFieldType = decimal12_t;
+};
+
+template <>
+struct PredicatePrimitiveTypeTraits<TYPE_DATE> {
+    using PredicateFieldType = uint32_t;
+};
+
+template <>
+struct PredicatePrimitiveTypeTraits<TYPE_DATETIME> {
+    using PredicateFieldType = uint64_t;
+};
+
+template <>
+struct PredicatePrimitiveTypeTraits<TYPE_DATEV2> {
+    using PredicateFieldType = uint32_t;
+};
+
+template <>
+struct PredicatePrimitiveTypeTraits<TYPE_DATETIMEV2> {
+    using PredicateFieldType = uint64_t;
+};
+
+template <typename Traits>
+concept HaveCppType = requires() { sizeof(typename Traits::CppType); };
+
+template <PrimitiveNative type>
+struct PrimitiveTypeSizeReducer {
+    template <HaveCppType Traits>
+    static size_t get_size() {
+        return sizeof(typename Traits::CppType);
+    }
+    template <typename Traits>
+    static size_t get_size() {
+        return 0;
+    }
+
+    static void run(size_t& size) { size = get_size<PrimitiveTypeTraits<PrimitiveType(type)>>(); }
+};
+
+inline size_t get_primitive_type_size(PrimitiveType t) {
+    size_t size = 0;
+    vectorized::constexpr_loop_match<PrimitiveNative, BEGIN_OF_PRIMITIVE_TYPE,
+                                     END_OF_PRIMITIVE_TYPE, PrimitiveTypeSizeReducer>::run(t, size);
+    return size;
 }
 
-#endif
+} // namespace doris

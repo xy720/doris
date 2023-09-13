@@ -15,40 +15,41 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include <arrow/array.h>
-#include <arrow/builder.h>
-#include <arrow/type.h>
-#include <arrow/record_batch.h>
-#include <gtest/gtest.h>
-#include <memory>
-
-#include "gen_cpp/DorisExternalService_types.h"
 #include "runtime/result_queue_mgr.h"
-#include "util/blocking_queue.hpp"
+
+#include <arrow/array/builder_primitive.h>
+#include <arrow/record_batch.h>
+#include <arrow/status.h>
+#include <arrow/type.h>
+#include <gen_cpp/Types_types.h>
+#include <glog/logging.h>
+#include <gtest/gtest-message.h>
+#include <gtest/gtest-test-part.h>
+
+#include <memory>
+#include <ostream>
+#include <utility>
+#include <vector>
+
+#include "gtest/gtest_pred_impl.h"
+#include "runtime/record_batch_queue.h"
+
+namespace arrow {
+class Array;
+} // namespace arrow
 
 namespace doris {
 
-class ResultQueueMgrTest : public testing::Test {
-public:
-    ResultQueueMgrTest() {
-    }
-    virtual ~ResultQueueMgrTest() {
-    }
-
-protected:
-    virtual void SetUp() {
-    }
-
-};
+class ResultQueueMgrTest : public testing::Test {};
 
 TEST_F(ResultQueueMgrTest, create_normal) {
-    shared_block_queue_t block_queue_t;
+    BlockQueueSharedPtr block_queue_t;
     TUniqueId query_id;
     query_id.lo = 10;
     query_id.hi = 100;
     ResultQueueMgr queue_mgr;
     queue_mgr.create_queue(query_id, &block_queue_t);
-    ASSERT_TRUE(block_queue_t != nullptr);
+    EXPECT_TRUE(block_queue_t != nullptr);
 }
 
 TEST_F(ResultQueueMgrTest, create_same_queue) {
@@ -57,15 +58,15 @@ TEST_F(ResultQueueMgrTest, create_same_queue) {
     query_id.lo = 10;
     query_id.hi = 100;
 
-    shared_block_queue_t block_queue_t_1;
+    BlockQueueSharedPtr block_queue_t_1;
     queue_mgr.create_queue(query_id, &block_queue_t_1);
-    ASSERT_TRUE(block_queue_t_1 != nullptr);
+    EXPECT_TRUE(block_queue_t_1 != nullptr);
 
-    shared_block_queue_t block_queue_t_2;
+    BlockQueueSharedPtr block_queue_t_2;
     queue_mgr.create_queue(query_id, &block_queue_t_2);
-    ASSERT_TRUE(block_queue_t_2 != nullptr);
+    EXPECT_TRUE(block_queue_t_2 != nullptr);
 
-    ASSERT_EQ(block_queue_t_1.get(), block_queue_t_2.get());
+    EXPECT_EQ(block_queue_t_1.get(), block_queue_t_2.get());
 }
 
 TEST_F(ResultQueueMgrTest, fetch_result_normal) {
@@ -74,9 +75,9 @@ TEST_F(ResultQueueMgrTest, fetch_result_normal) {
     query_id.hi = 100;
     ResultQueueMgr queue_mgr;
 
-    shared_block_queue_t block_queue_t;
+    BlockQueueSharedPtr block_queue_t;
     queue_mgr.create_queue(query_id, &block_queue_t);
-    ASSERT_TRUE(block_queue_t != nullptr);
+    EXPECT_TRUE(block_queue_t != nullptr);
 
     std::shared_ptr<arrow::Field> field = arrow::field("k1", arrow::int32(), true);
     std::vector<std::shared_ptr<arrow::Field>> fields;
@@ -85,23 +86,34 @@ TEST_F(ResultQueueMgrTest, fetch_result_normal) {
 
     std::shared_ptr<arrow::Array> k1_col;
     arrow::NumericBuilder<arrow::Int32Type> builder;
-    builder.Reserve(1);
-    builder.Append(20);
-    builder.Finish(&k1_col);
+
+    auto st = builder.Reserve(1);
+    if (!st.ok()) {
+        LOG(WARNING) << "Reserve error";
+    }
+    st = builder.Append(20);
+    if (!st.ok()) {
+        LOG(WARNING) << "Append error";
+    }
+    st = builder.Finish(&k1_col);
+    if (!st.ok()) {
+        LOG(WARNING) << "Finish error";
+    }
 
     std::vector<std::shared_ptr<arrow::Array>> arrays;
     arrays.push_back(k1_col);
-    std::shared_ptr<arrow::RecordBatch> record_batch = arrow::RecordBatch::Make(schema, 1, std::move(arrays));
+    std::shared_ptr<arrow::RecordBatch> record_batch =
+            arrow::RecordBatch::Make(schema, 1, std::move(arrays));
     block_queue_t->blocking_put(record_batch);
     // sentinel
     block_queue_t->blocking_put(nullptr);
 
     std::shared_ptr<arrow::RecordBatch> result;
     bool eos;
-    ASSERT_TRUE(queue_mgr.fetch_result(query_id, &result, &eos).ok());
-    ASSERT_FALSE(eos);
-    ASSERT_EQ(1, result->num_rows());
-    ASSERT_EQ(1, result->num_columns());
+    EXPECT_TRUE(queue_mgr.fetch_result(query_id, &result, &eos).ok());
+    EXPECT_FALSE(eos);
+    EXPECT_EQ(1, result->num_rows());
+    EXPECT_EQ(1, result->num_columns());
 }
 
 TEST_F(ResultQueueMgrTest, fetch_result_end) {
@@ -110,16 +122,16 @@ TEST_F(ResultQueueMgrTest, fetch_result_end) {
     query_id.lo = 10;
     query_id.hi = 100;
 
-    shared_block_queue_t block_queue_t;
+    BlockQueueSharedPtr block_queue_t;
     queue_mgr.create_queue(query_id, &block_queue_t);
-    ASSERT_TRUE(block_queue_t != nullptr);
+    EXPECT_TRUE(block_queue_t != nullptr);
     block_queue_t->blocking_put(nullptr);
 
     std::shared_ptr<arrow::RecordBatch> result;
     bool eos;
-    ASSERT_TRUE(queue_mgr.fetch_result(query_id, &result, &eos).ok());
-    ASSERT_TRUE(eos);
-    ASSERT_TRUE(result == nullptr);
+    EXPECT_TRUE(queue_mgr.fetch_result(query_id, &result, &eos).ok());
+    EXPECT_TRUE(eos);
+    EXPECT_TRUE(result == nullptr);
 }
 
 TEST_F(ResultQueueMgrTest, normal_cancel) {
@@ -127,10 +139,10 @@ TEST_F(ResultQueueMgrTest, normal_cancel) {
     query_id.lo = 10;
     query_id.hi = 100;
     ResultQueueMgr queue_mgr;
-    shared_block_queue_t block_queue_t;    
+    BlockQueueSharedPtr block_queue_t;
     queue_mgr.create_queue(query_id, &block_queue_t);
-    ASSERT_TRUE(block_queue_t != nullptr);
-    ASSERT_TRUE(queue_mgr.cancel(query_id).ok());
+    EXPECT_TRUE(block_queue_t != nullptr);
+    EXPECT_TRUE(queue_mgr.cancel(query_id).ok());
 }
 
 TEST_F(ResultQueueMgrTest, cancel_no_block) {
@@ -138,21 +150,9 @@ TEST_F(ResultQueueMgrTest, cancel_no_block) {
     query_id.lo = 10;
     query_id.hi = 100;
     ResultQueueMgr queue_mgr;
-    shared_block_queue_t block_queue_t;    
+    BlockQueueSharedPtr block_queue_t;
     queue_mgr.create_queue(query_id, &block_queue_t);
-    ASSERT_TRUE(block_queue_t != nullptr);
-    ASSERT_TRUE(queue_mgr.cancel(query_id).ok());
+    EXPECT_TRUE(block_queue_t != nullptr);
+    EXPECT_TRUE(queue_mgr.cancel(query_id).ok());
 }
-}
-
-int main(int argc, char** argv) {
-    std::string conffile = std::string(getenv("DORIS_HOME")) + "/conf/be.conf";
-    if (!doris::config::init(conffile.c_str(), false)) {
-        fprintf(stderr, "error read config file. \n");
-        return -1;
-    }
-    // doris::init_glog("be-test");
-    ::testing::InitGoogleTest(&argc, argv);
-    doris::CpuInfo::init();
-    return RUN_ALL_TESTS();
-}
+} // namespace doris

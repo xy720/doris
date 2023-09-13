@@ -17,93 +17,139 @@
 
 #include "olap/rowset/segment_v2/ordinal_page_index.h"
 
-#include <gtest/gtest.h>
-#include <iostream>
+#include <gen_cpp/segment_v2.pb.h>
+#include <gtest/gtest-message.h>
+#include <gtest/gtest-test-part.h>
 
-#include "common/logging.h"
+#include <iostream>
+#include <memory>
+#include <string>
+
+#include "gtest/gtest_pred_impl.h"
+#include "io/fs/file_writer.h"
+#include "io/fs/local_file_system.h"
 
 namespace doris {
 namespace segment_v2 {
 
 class OrdinalPageIndexTest : public testing::Test {
 public:
-    OrdinalPageIndexTest() { }
-    virtual ~OrdinalPageIndexTest() {
+    const std::string kTestDir = "./ut_dir/ordinal_page_index_test";
+
+    void SetUp() override {
+        EXPECT_TRUE(io::global_local_filesystem()->delete_and_create_directory(kTestDir).ok());
+    }
+    void TearDown() override {
+        EXPECT_TRUE(io::global_local_filesystem()->delete_directory(kTestDir).ok());
     }
 };
 
 TEST_F(OrdinalPageIndexTest, normal) {
-    //    rowid, page pointer
-    //        1, (0, 4096)
-    // 1 + 4096, (1 * 4096, 4096)
-    // a page have 16KB, and have 4096 rows
-    OrdinalPageIndexBuilder builder;
+    std::string filename = kTestDir + "/normal.idx";
+    auto fs = io::global_local_filesystem();
 
-    // we test a 16KB page
+    OrdinalIndexWriter builder;
+    // generate ordinal index for 16K data pages,
+    // each data page is 16KB in size and contains 4096 values,
+    // ordinal starts at 1 instead of 0
     for (uint64_t i = 0; i < 16 * 1024; ++i) {
         builder.append_entry(1 + 4096 * i, {16 * 1024 * i, 16 * 1024});
     }
+    ColumnIndexMetaPB index_meta;
+    {
+        io::FileWriterPtr file_writer;
+        EXPECT_TRUE(fs->create_file(filename, &file_writer).ok());
 
-    auto slice = builder.finish();
-    LOG(INFO) << "index block's size=" << slice.size;
+        EXPECT_TRUE(builder.finish(file_writer.get(), &index_meta).ok());
+        EXPECT_EQ(ORDINAL_INDEX, index_meta.type());
+        EXPECT_FALSE(index_meta.ordinal_index().root_page().is_root_data_page());
+        EXPECT_TRUE(file_writer->close().ok());
+        LOG(INFO) << "index page size="
+                  << index_meta.ordinal_index().root_page().root_page().size();
+    }
 
-    OrdinalPageIndex index(slice, 16 * 1024 * 4096 + 1);
-    auto st = index.load();
-    ASSERT_TRUE(st.ok());
-    ASSERT_EQ(1, index.get_first_row_id(0));
-    ASSERT_EQ(4096, index.get_last_row_id(0));
-    ASSERT_EQ((16 * 1024 - 1) * 4096 + 1, index.get_first_row_id(16 * 1024 - 1));
-    ASSERT_EQ(16 * 1024 * 4096, index.get_last_row_id(16 * 1024 - 1));
+    io::FileReaderSPtr file_reader;
+    EXPECT_TRUE(fs->open_file(filename, &file_reader).ok());
+    OrdinalIndexReader index(file_reader, 16 * 1024 * 4096 + 1, index_meta.ordinal_index());
+    EXPECT_TRUE(index.load(true, false).ok());
+    EXPECT_EQ(16 * 1024, index.num_data_pages());
+    EXPECT_EQ(1, index.get_first_ordinal(0));
+    EXPECT_EQ(4096, index.get_last_ordinal(0));
+    EXPECT_EQ((16 * 1024 - 1) * 4096 + 1, index.get_first_ordinal(16 * 1024 - 1));
+    EXPECT_EQ(16 * 1024 * 4096, index.get_last_ordinal(16 * 1024 - 1));
 
-    PagePointer page;
     {
         auto iter = index.seek_at_or_before(1);
-        ASSERT_TRUE(iter.valid());
-        ASSERT_EQ(1, iter.rowid());
-        ASSERT_EQ(PagePointer(0, 16 * 1024), iter.page());
+        EXPECT_TRUE(iter.valid());
+        EXPECT_EQ(1, iter.first_ordinal());
+        EXPECT_EQ(PagePointer(0, 16 * 1024), iter.page());
     }
     {
         auto iter = index.seek_at_or_before(4095);
-        ASSERT_TRUE(iter.valid());
-        ASSERT_EQ(1, iter.rowid());
-        ASSERT_EQ(PagePointer(0, 16 * 1024), iter.page());
+        EXPECT_TRUE(iter.valid());
+        EXPECT_EQ(1, iter.first_ordinal());
+        EXPECT_EQ(PagePointer(0, 16 * 1024), iter.page());
     }
     {
         auto iter = index.seek_at_or_before(4098);
-        ASSERT_TRUE(iter.valid());
-        ASSERT_EQ(4097, iter.rowid());
-        ASSERT_EQ(PagePointer(1 * 16 * 1024, 16 * 1024), iter.page());
+        EXPECT_TRUE(iter.valid());
+        EXPECT_EQ(4097, iter.first_ordinal());
+        EXPECT_EQ(PagePointer(1 * 16 * 1024, 16 * 1024), iter.page());
 
         iter.next();
-        ASSERT_TRUE(iter.valid());
-        ASSERT_EQ(4097 + 4096, iter.rowid());
-        ASSERT_EQ(PagePointer(2 * 16 * 1024, 16 * 1024), iter.page());
-
+        EXPECT_TRUE(iter.valid());
+        EXPECT_EQ(4097 + 4096, iter.first_ordinal());
+        EXPECT_EQ(PagePointer(2 * 16 * 1024, 16 * 1024), iter.page());
     }
+    {
+        auto iter = index.seek_at_or_before(0);
+        EXPECT_FALSE(iter.valid());
+    }
+}
+
+TEST_F(OrdinalPageIndexTest, one_data_page) {
+    // index one data page with 1024 values
+    int num_values = 1024;
+    PagePointer data_page_pointer(0, 4096);
+
+    OrdinalIndexWriter builder;
+    builder.append_entry(0, data_page_pointer); // add only one entry
+    ColumnIndexMetaPB index_meta;
+    {
+        // in this case, no index page is written, thus file could be null
+        EXPECT_TRUE(builder.finish(nullptr, &index_meta).ok());
+        EXPECT_EQ(ORDINAL_INDEX, index_meta.type());
+        EXPECT_TRUE(index_meta.ordinal_index().root_page().is_root_data_page());
+        PagePointer root_page_pointer(index_meta.ordinal_index().root_page().root_page());
+        EXPECT_EQ(data_page_pointer, root_page_pointer);
+    }
+
+    OrdinalIndexReader index(nullptr, num_values, index_meta.ordinal_index());
+    EXPECT_TRUE(index.load(true, false).ok());
+    EXPECT_EQ(1, index.num_data_pages());
+    EXPECT_EQ(0, index.get_first_ordinal(0));
+    EXPECT_EQ(num_values - 1, index.get_last_ordinal(0));
 
     {
         auto iter = index.seek_at_or_before(0);
-        ASSERT_FALSE(iter.valid());
+        EXPECT_TRUE(iter.valid());
+        EXPECT_EQ(0, iter.first_ordinal());
+        EXPECT_EQ(num_values - 1, iter.last_ordinal());
+        EXPECT_EQ(data_page_pointer, iter.page());
+    }
+    {
+        auto iter = index.seek_at_or_before(num_values - 1);
+        EXPECT_TRUE(iter.valid());
+        EXPECT_EQ(0, iter.first_ordinal());
+        EXPECT_EQ(data_page_pointer, iter.page());
+    }
+    {
+        auto iter = index.seek_at_or_before(num_values);
+        EXPECT_TRUE(iter.valid());
+        EXPECT_EQ(0, iter.first_ordinal());
+        EXPECT_EQ(data_page_pointer, iter.page());
     }
 }
 
-TEST_F(OrdinalPageIndexTest, corrupt) {
-    std::string str;
-    str.resize(4);
-
-    encode_fixed32_le((uint8_t*)str.data(), 1);
-
-    Slice slice(str);
-    OrdinalPageIndex index(slice, 10);
-    auto st = index.load();
-    ASSERT_FALSE(st.ok());
-}
-
-}
-}
-
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}
-
+} // namespace segment_v2
+} // namespace doris

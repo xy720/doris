@@ -40,22 +40,22 @@
 // https://github.com/tdunning/t-digest/blob/07b8f2ca2be8d0a9f04df2feadad5ddc1bb73c88/docs/t-digest-paper/histo.pdf.
 // https://github.com/derrickburns/tdigest
 
-#ifndef TDIGEST2_TDIGEST_H_
-#define TDIGEST2_TDIGEST_H_
+#pragma once
 
-#include <iostream>
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
+#include <iostream>
+#include <memory>
 #include <queue>
 #include <utility>
 #include <vector>
-#include <memory>
 
+#include "common/factory_creator.h"
 #include "common/logging.h"
+#include "udf/udf.h"
 #include "util/debug_util.h"
 #include "util/radix_sort.h"
-#include "udf/udf.h"
 
 namespace doris {
 
@@ -71,15 +71,15 @@ public:
 
     Centroid(Value mean, Weight weight) : _mean(mean), _weight(weight) {}
 
-    inline Value mean() const noexcept { return _mean; }
+    Value mean() const noexcept { return _mean; }
 
-    inline Weight weight() const noexcept { return _weight; }
+    Weight weight() const noexcept { return _weight; }
 
-    inline Value& mean() noexcept { return _mean; }
+    Value& mean() noexcept { return _mean; }
 
-    inline Weight& weight() noexcept { return _weight; }
+    Weight& weight() noexcept { return _weight; }
 
-    inline void add(const Centroid &c) {
+    void add(const Centroid& c) {
         DCHECK_GT(c._weight, 0);
         if (_weight != 0.0) {
             _weight += c._weight;
@@ -96,32 +96,32 @@ private:
 };
 
 struct CentroidList {
-        CentroidList(const std::vector<Centroid>& s) : iter(s.cbegin()), end(s.cend()) {}
-        std::vector<Centroid>::const_iterator iter;
-        std::vector<Centroid>::const_iterator end;
+    CentroidList(const std::vector<Centroid>& s) : iter(s.cbegin()), end(s.cend()) {}
+    std::vector<Centroid>::const_iterator iter;
+    std::vector<Centroid>::const_iterator end;
 
-        bool advance() { return ++iter != end; }
+    bool advance() { return ++iter != end; }
 };
 
 class CentroidListComparator {
 public:
     CentroidListComparator() {}
 
-    bool operator()(const CentroidList &left, const CentroidList &right) const {
+    bool operator()(const CentroidList& left, const CentroidList& right) const {
         return left.iter->mean() > right.iter->mean();
     }
 };
 
-using CentroidListQueue = std::priority_queue<CentroidList, std::vector<CentroidList>, CentroidListComparator>;
+using CentroidListQueue =
+        std::priority_queue<CentroidList, std::vector<CentroidList>, CentroidListComparator>;
 
 struct CentroidComparator {
-    bool operator()(const Centroid &a, const Centroid &b) const { return a.mean() < b.mean(); }
+    bool operator()(const Centroid& a, const Centroid& b) const { return a.mean() < b.mean(); }
 };
 
 class TDigest {
-
-    struct TDigestRadixSortTraits
-    {
+    ENABLE_FACTORY_CREATOR(TDigest);
+    struct TDigestRadixSortTraits {
         using Element = Centroid;
         using Key = Value;
         using CountType = uint32_t;
@@ -132,19 +132,19 @@ class TDigest {
         using Transform = RadixSortFloatTransform<KeyBits>;
         using Allocator = RadixSortMallocAllocator;
 
-        static Key & extractKey(Element& elem) { return elem.mean();   }
-
+        static Key& extractKey(Element& elem) { return elem.mean(); }
     };
 
     class TDigestComparator {
     public:
         TDigestComparator() {}
 
-        bool operator()(const TDigest *left, const TDigest *right) const {
+        bool operator()(const TDigest* left, const TDigest* right) const {
             return left->totalSize() > right->totalSize();
         }
     };
-    using TDigestQueue = std::priority_queue<const TDigest*, std::vector<const TDigest*>, TDigestComparator>;
+    using TDigestQueue =
+            std::priority_queue<const TDigest*, std::vector<const TDigest*>, TDigestComparator>;
 
 public:
     TDigest() : TDigest(10000) {}
@@ -154,16 +154,16 @@ public:
     TDigest(Value compression, Index bufferSize) : TDigest(compression, bufferSize, 0) {}
 
     TDigest(Value compression, Index unmergedSize, Index mergedSize)
-                : _compression(compression),
-                  _max_processed(processedSize(mergedSize, compression)),
-                  _max_unprocessed(unprocessedSize(unmergedSize, compression)) {
+            : _compression(compression),
+              _max_processed(processedSize(mergedSize, compression)),
+              _max_unprocessed(unprocessedSize(unmergedSize, compression)) {
         _processed.reserve(_max_processed);
         _unprocessed.reserve(_max_unprocessed + 1);
     }
 
-    TDigest(std::vector<Centroid>&& processed, std::vector<Centroid>&& unprocessed, Value compression,
-                Index unmergedSize, Index mergedSize)
-                : TDigest(compression, unmergedSize, mergedSize) {
+    TDigest(std::vector<Centroid>&& processed, std::vector<Centroid>&& unprocessed,
+            Value compression, Index unmergedSize, Index mergedSize)
+            : TDigest(compression, unmergedSize, mergedSize) {
         _processed = std::move(processed);
         _unprocessed = std::move(unprocessed);
 
@@ -199,8 +199,8 @@ public:
     }
 
     TDigest(TDigest&& o)
-        : TDigest(std::move(o._processed), std::move(o._unprocessed), o._compression, o._max_unprocessed,
-                o._max_processed) {}
+            : TDigest(std::move(o._processed), std::move(o._unprocessed), o._compression,
+                      o._max_unprocessed, o._max_processed) {}
 
     static inline Index processedSize(Index size, Value compression) noexcept {
         return (size == 0) ? static_cast<Index>(2 * std::ceil(compression)) : size;
@@ -211,8 +211,8 @@ public:
     }
 
     // merge in another t-digest
-    inline void merge(const TDigest* other) {
-        std::vector<const TDigest *> others{other};
+    void merge(const TDigest* other) {
+        std::vector<const TDigest*> others {other};
         add(others.cbegin(), others.cend());
     }
 
@@ -224,15 +224,16 @@ public:
 
     Index maxProcessed() const { return _max_processed; }
 
-    inline void add(std::vector<const TDigest*> digests) { add(digests.cbegin(), digests.cend()); }
+    void add(std::vector<const TDigest*> digests) { add(digests.cbegin(), digests.cend()); }
 
     // merge in a vector of tdigests in the most efficient manner possible
     // in constant space
     // works for any value of kHighWater
-    void add(std::vector<const TDigest*>::const_iterator iter, std::vector<const TDigest*>::const_iterator end) {
+    void add(std::vector<const TDigest*>::const_iterator iter,
+             std::vector<const TDigest*>::const_iterator end) {
         if (iter != end) {
             auto size = std::distance(iter, end);
-            TDigestQueue pq(TDigestComparator{});
+            TDigestQueue pq(TDigestComparator {});
             for (; iter != end; iter++) {
                 pq.push((*iter));
             }
@@ -273,20 +274,22 @@ public:
         return cdfProcessed(x);
     }
 
-    bool isDirty() { return _processed.size() > _max_processed || _unprocessed.size() > _max_unprocessed; }
+    bool isDirty() {
+        return _processed.size() > _max_processed || _unprocessed.size() > _max_unprocessed;
+    }
 
     // return the cdf on the processed values
     Value cdfProcessed(Value x) const {
-        VLOG(1) << "cdf value " << x;
-        VLOG(1) << "processed size " << _processed.size();
+        VLOG_CRITICAL << "cdf value " << x;
+        VLOG_CRITICAL << "processed size " << _processed.size();
         if (_processed.size() == 0) {
-            // no data to examin_e
-            VLOG(1) << "no processed values";
+            // no data to examine
+            VLOG_CRITICAL << "no processed values";
 
             return 0.0;
         } else if (_processed.size() == 1) {
-            VLOG(1) << "one processed value "
-                    << " _min " << _min << " _max " << _max;
+            VLOG_CRITICAL << "one processed value "
+                          << " _min " << _min << " _max " << _max;
             // exactly one centroid, should have _max==_min
             auto width = _max - _min;
             if (x < _min) {
@@ -303,21 +306,21 @@ public:
         } else {
             auto n = _processed.size();
             if (x <= _min) {
-                VLOG(1) << "below _min "
-                        << " _min " << _min << " x " << x;
+                VLOG_CRITICAL << "below _min "
+                              << " _min " << _min << " x " << x;
                 return 0;
             }
 
             if (x >= _max) {
-                VLOG(1) << "above _max "
-                        << " _max " << _max << " x " << x;
+                VLOG_CRITICAL << "above _max "
+                              << " _max " << _max << " x " << x;
                 return 1;
             }
 
             // check for the left tail
             if (x <= mean(0)) {
-                VLOG(1) << "left tail "
-                        << " _min " << _min << " mean(0) " << mean(0) << " x " << x;
+                VLOG_CRITICAL << "left tail "
+                              << " _min " << _min << " mean(0) " << mean(0) << " x " << x;
 
                 // note that this is different than mean(0) > _min ... this guarantees interpolation works
                 if (mean(0) - _min > 0) {
@@ -329,26 +332,28 @@ public:
 
             // and the right tail
             if (x >= mean(n - 1)) {
-                VLOG(1) << "right tail"
-                        << " _max " << _max << " mean(n - 1) " << mean(n - 1) << " x " << x;
+                VLOG_CRITICAL << "right tail"
+                              << " _max " << _max << " mean(n - 1) " << mean(n - 1) << " x " << x;
 
                 if (_max - mean(n - 1) > 0) {
-                    return 1.0 - (_max - x) / (_max - mean(n - 1)) * weight(n - 1) / _processed_weight / 2.0;
+                    return 1.0 - (_max - x) / (_max - mean(n - 1)) * weight(n - 1) /
+                                         _processed_weight / 2.0;
                 } else {
                     return 1;
                 }
             }
 
             CentroidComparator cc;
-            auto iter = std::upper_bound(_processed.cbegin(), _processed.cend(), Centroid(x, 0), cc);
+            auto iter =
+                    std::upper_bound(_processed.cbegin(), _processed.cend(), Centroid(x, 0), cc);
 
             auto i = std::distance(_processed.cbegin(), iter);
             auto z1 = x - (iter - 1)->mean();
             auto z2 = (iter)->mean() - x;
             DCHECK_LE(0.0, z1);
             DCHECK_LE(0.0, z2);
-            VLOG(1) << "middle "
-                    << " z1 " << z1 << " z2 " << z2 << " x " << x;
+            VLOG_CRITICAL << "middle "
+                          << " z1 " << z1 << " z2 " << z2 << " x " << x;
 
             return weightedAverage(_cumulative[i - 1], z2, _cumulative[i], z1) / _processed_weight;
         }
@@ -364,7 +369,7 @@ public:
     // the value will not represent the unprocessed values
     Value quantileProcessed(Value q) const {
         if (q < 0 || q > 1) {
-            VLOG(1) << "q should be in [0,1], got " << q;
+            VLOG_CRITICAL << "q should be in [0,1], got " << q;
             return NAN;
         }
 
@@ -394,8 +399,8 @@ public:
         if (iter + 1 != _cumulative.cend()) {
             auto i = std::distance(_cumulative.cbegin(), iter);
             auto z1 = index - *(iter - 1);
-            auto z2 = *(iter) - index;
-            // VLOG(1) << "z2 " << z2 << " index " << index << " z1 " << z1;
+            auto z2 = *(iter)-index;
+            // VLOG_CRITICAL << "z2 " << z2 << " index " << index << " z1 " << z1;
             return weightedAverage(mean(i - 1), z2, mean(i), z1);
         }
 
@@ -411,11 +416,11 @@ public:
 
     void add(Value x) { add(x, 1); }
 
-    inline void compress() { process(); }
+    void compress() { process(); }
 
     // add a single centroid to the unprocessed vector, processing previously unprocessed sorted if our limit has
     // been reached.
-    inline bool add(Value x, Weight w) {
+    bool add(Value x, Weight w) {
         if (std::isnan(x)) {
             return false;
         }
@@ -425,7 +430,8 @@ public:
         return true;
     }
 
-    inline void add(std::vector<Centroid>::const_iterator iter, std::vector<Centroid>::const_iterator end) {
+    void add(std::vector<Centroid>::const_iterator iter,
+             std::vector<Centroid>::const_iterator end) {
         while (iter != end) {
             const size_t diff = std::distance(iter, end);
             const size_t room = _max_unprocessed - _unprocessed.size();
@@ -438,13 +444,16 @@ public:
     }
 
     uint32_t serialized_size() {
-        return sizeof(Value) * 5 + sizeof(Index) * 2 + sizeof(size_t) * 3
-               + _processed.size() * sizeof(Centroid)
-               + _unprocessed.size() * sizeof(Centroid)
-               + _cumulative.size() * sizeof(Weight);
+        return sizeof(uint32_t) + sizeof(Value) * 5 + sizeof(Index) * 2 + sizeof(uint32_t) * 3 +
+               _processed.size() * sizeof(Centroid) + _unprocessed.size() * sizeof(Centroid) +
+               _cumulative.size() * sizeof(Weight);
     }
 
-    void serialize(uint8_t* writer) {
+    size_t serialize(uint8_t* writer) {
+        uint8_t* dst = writer;
+        uint32_t total_size = serialized_size();
+        memcpy(writer, &total_size, sizeof(uint32_t));
+        writer += sizeof(uint32_t);
         memcpy(writer, &_compression, sizeof(Value));
         writer += sizeof(Value);
         memcpy(writer, &_min, sizeof(Value));
@@ -471,6 +480,7 @@ public:
         size = _unprocessed.size();
         memcpy(writer, &size, sizeof(uint32_t));
         writer += sizeof(uint32_t);
+        //TODO(weixiang): may be once memcpy is enough!
         for (int i = 0; i < size; i++) {
             memcpy(writer, &_unprocessed[i], sizeof(Centroid));
             writer += sizeof(Centroid);
@@ -483,9 +493,13 @@ public:
             memcpy(writer, &_cumulative[i], sizeof(Weight));
             writer += sizeof(Weight);
         }
+        return writer - dst;
     }
 
     void unserialize(const uint8_t* type_reader) {
+        uint32_t total_length = 0;
+        memcpy(&total_length, type_reader, sizeof(uint32_t));
+        type_reader += sizeof(uint32_t);
         memcpy(&_compression, type_reader, sizeof(Value));
         type_reader += sizeof(Value);
         memcpy(&_min, type_reader, sizeof(Value));
@@ -548,10 +562,10 @@ private:
     std::vector<Weight> _cumulative;
 
     // return mean of i-th centroid
-    inline Value mean(int i) const noexcept { return _processed[i].mean(); }
+    Value mean(int i) const noexcept { return _processed[i].mean(); }
 
     // return weight of i-th centroid
-    inline Weight weight(int i) const noexcept { return _processed[i].weight(); }
+    Weight weight(int i) const noexcept { return _processed[i].weight(); }
 
     // append all unprocessed centroids into current unprocessed vector
     void mergeUnprocessed(const std::vector<const TDigest*>& tdigests) {
@@ -564,8 +578,9 @@ private:
 
         _unprocessed.reserve(total);
         for (auto& td : tdigests) {
-                _unprocessed.insert(_unprocessed.end(), td->_unprocessed.cbegin(), td->_unprocessed.cend());
-                _unprocessed_weight += td->_unprocessed_weight;
+            _unprocessed.insert(_unprocessed.end(), td->_unprocessed.cbegin(),
+                                td->_unprocessed.cend());
+            _unprocessed_weight += td->_unprocessed_weight;
         }
     }
 
@@ -573,11 +588,10 @@ private:
     void mergeProcessed(const std::vector<const TDigest*>& tdigests) {
         if (tdigests.size() == 0) return;
 
-        size_t
-        total = 0;
-        CentroidListQueue pq(CentroidListComparator{});
-        for (auto &td : tdigests) {
-            auto &sorted = td->_processed;
+        size_t total = 0;
+        CentroidListQueue pq(CentroidListComparator {});
+        for (auto& td : tdigests) {
+            auto& sorted = td->_processed;
             auto size = sorted.size();
             if (size > 0) {
                 pq.push(CentroidList(sorted));
@@ -593,7 +607,7 @@ private:
         }
 
         std::vector<Centroid> sorted;
-        VLOG(1) << "total " << total;
+        VLOG_CRITICAL << "total " << total;
         sorted.reserve(total);
 
         while (!pq.empty()) {
@@ -609,7 +623,7 @@ private:
         }
     }
 
-    inline void processIfNecessary() {
+    void processIfNecessary() {
         if (isDirty()) {
             process();
         }
@@ -631,12 +645,13 @@ private:
 
     // merges _unprocessed centroids and _processed centroids together and processes them
     // when complete, _unprocessed will be empty and _processed will have at most _max_processed centroids
-    inline void process() {
+    void process() {
         CentroidComparator cc;
         RadixSort<TDigestRadixSortTraits>::executeLSD(_unprocessed.data(), _unprocessed.size());
         auto count = _unprocessed.size();
         _unprocessed.insert(_unprocessed.end(), _processed.cbegin(), _processed.cend());
-        std::inplace_merge(_unprocessed.begin(), _unprocessed.begin() + count, _unprocessed.end(), cc);
+        std::inplace_merge(_unprocessed.begin(), _unprocessed.begin() + count, _unprocessed.end(),
+                           cc);
 
         _processed_weight += _unprocessed_weight;
         _unprocessed_weight = 0;
@@ -651,8 +666,8 @@ private:
             auto& centroid = *iter;
             Weight projectedW = wSoFar + centroid.weight();
             if (projectedW <= wLimit) {
-                    wSoFar = projectedW;
-                    (_processed.end() - 1)->add(centroid);
+                wSoFar = projectedW;
+                (_processed.end() - 1)->add(centroid);
             } else {
                 auto k1 = integratedLocation(wSoFar / _processed_weight);
                 wLimit = _processed_weight * integratedQ(k1 + 1.0);
@@ -662,17 +677,16 @@ private:
         }
         _unprocessed.clear();
         _min = std::min(_min, _processed[0].mean());
-        VLOG(1) << "new _min " << _min;
+        VLOG_CRITICAL << "new _min " << _min;
         _max = std::max(_max, (_processed.cend() - 1)->mean());
-        VLOG(1) << "new _max " << _max;
+        VLOG_CRITICAL << "new _max " << _max;
         updateCumulative();
     }
 
-    inline int checkWeights() { return checkWeights(_processed, _processed_weight); }
+    int checkWeights() { return checkWeights(_processed, _processed_weight); }
 
     size_t checkWeights(const std::vector<Centroid>& sorted, Value total) {
-        size_t
-        badWeight = 0;
+        size_t badWeight = 0;
         auto k1 = 0.0;
         auto q = 0.0;
         for (auto iter = sorted.cbegin(); iter != sorted.cend(); iter++) {
@@ -680,14 +694,15 @@ private:
             auto dq = w / total;
             auto k2 = integratedLocation(q + dq);
             if (k2 - k1 > 1 && w != 1) {
-                VLOG(1) << "Oversize centroid at " << std::distance(sorted.cbegin(), iter) << " k1 " << k1 << " k2 "
-                        << k2
-                        << " dk " << (k2 - k1) << " w " << w << " q " << q;
+                VLOG_CRITICAL << "Oversize centroid at " << std::distance(sorted.cbegin(), iter)
+                              << " k1 " << k1 << " k2 " << k2 << " dk " << (k2 - k1) << " w " << w
+                              << " q " << q;
                 badWeight++;
             }
             if (k2 - k1 > 1.5 && w != 1) {
-                VLOG(1) << "Egregiously Oversize centroid at " << std::distance(sorted.cbegin(), iter) << " k1 " << k1
-                        << " k2 " << k2 << " dk " << (k2 - k1) << " w " << w << " q " << q;
+                VLOG_CRITICAL << "Egregiously Oversize centroid at "
+                              << std::distance(sorted.cbegin(), iter) << " k1 " << k1 << " k2 "
+                              << k2 << " dk " << (k2 - k1) << " w " << w << " q " << q;
                 badWeight++;
             }
             q += dq;
@@ -714,11 +729,11 @@ private:
     * @param q The quantile scale value to be mapped.
     * @return The centroid scale value corresponding to q.
     */
-    inline Value integratedLocation(Value q) const {
+    Value integratedLocation(Value q) const {
         return _compression * (std::asin(2.0 * q - 1.0) + M_PI / 2) / M_PI;
     }
 
-    inline Value integratedQ(Value k) const {
+    Value integratedQ(Value k) const {
         return (std::sin(std::min(k, _compression) * M_PI / _compression - M_PI / 2) + 1) / 2;
     }
 
@@ -728,7 +743,8 @@ private:
      * <code>x1</code>.
     */
     static Value weightedAverage(Value x1, Value w1, Value x2, Value w2) {
-        return (x1 <= x2) ? weightedAverageSorted(x1, w1, x2, w2) : weightedAverageSorted(x2, w2, x1, w1);
+        return (x1 <= x2) ? weightedAverageSorted(x1, w1, x2, w2)
+                          : weightedAverageSorted(x2, w2, x1, w1);
     }
 
     /**
@@ -758,7 +774,8 @@ private:
     * @param nextMean           The mean of the following centroid.
     * @return  The interpolated mean.
     */
-    static Value quantile(Value index, Value previousIndex, Value nextIndex, Value previousMean, Value nextMean) {
+    static Value quantile(Value index, Value previousIndex, Value nextIndex, Value previousMean,
+                          Value nextMean) {
         const auto delta = nextIndex - previousIndex;
         const auto previousWeight = (nextIndex - index) / delta;
         const auto nextWeight = (index - previousIndex) / delta;
@@ -766,6 +783,4 @@ private:
     }
 };
 
-}  // namespace doris
-
-#endif  // TDIGEST2_TDIGEST_H_
+} // namespace doris

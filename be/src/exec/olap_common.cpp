@@ -17,46 +17,14 @@
 
 #include "exec/olap_common.h"
 
-#include <boost/lexical_cast.hpp>
-#include <set>
-#include <string>
 #include <utility>
 #include <vector>
-#include <sstream>
 
 #include "exec/olap_utils.h"
 
 namespace doris {
 
-template<>
-std::string cast_to_string(__int128 value) {
-    std::stringstream ss;
-    ss << value;
-    return ss.str();
-}
-
-template<>
-void ColumnValueRange<StringValue>::convert_to_fixed_value() {
-    return;
-}
-
-template<>
-void ColumnValueRange<DecimalValue>::convert_to_fixed_value() {
-    return;
-}
-
-template<>
-void ColumnValueRange<DecimalV2Value>::convert_to_fixed_value() {
-    return;
-}
-
-template<>
-void ColumnValueRange<__int128>::convert_to_fixed_value() {
-    return;
-}
-
-Status OlapScanKeys::get_key_range(
-        std::vector<std::unique_ptr<OlapScanRange>>* key_range) {
+Status OlapScanKeys::get_key_range(std::vector<std::unique_ptr<OlapScanRange>>* key_range) {
     key_range->clear();
 
     for (int i = 0; i < _begin_scan_keys.size(); ++i) {
@@ -71,6 +39,6 @@ Status OlapScanKeys::get_key_range(
     return Status::OK();
 }
 
-}  // namespace doris
+} // namespace doris
 
 /* vim: set expandtab ts=4 sw=4 sts=4 tw=100: */

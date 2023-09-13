@@ -15,16 +15,20 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_SRC_OLAP_STRING_SLICE_H
-#define DORIS_BE_SRC_OLAP_STRING_SLICE_H
+#pragma once
 
 #include <assert.h>
-#include <map>
-#include <vector>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+
+#include <iostream>
+#include <map>
 #include <string>
+#include <utility>
+#include <vector>
+
+#include "vec/common/allocator.h"
 
 namespace doris {
 
@@ -48,31 +52,58 @@ public:
     // Intentionally copyable
 
     /// Create an empty slice.
-    Slice() : data(const_cast<char*>("")), size(0) { }
-
+    Slice() : data(const_cast<char*>("")), size(0) {}
 
     /// Create a slice that refers to a @c char byte array.
-    Slice(const char* d, size_t n) :
-        data(const_cast<char*>(d)), size(n) { }
-    
+    Slice(const char* d, size_t n) : data(const_cast<char*>(d)), size(n) {}
+
     // Create a slice that refers to a @c uint8_t byte array.
     //
     // @param [in] d
     //   The input array.
     // @param [in] n
     //   Number of bytes in the array.
-    Slice(const uint8_t* s, size_t n) :
-       data(const_cast<char*>(reinterpret_cast<const char*>(s))), size(n) { }
+    Slice(const uint8_t* s, size_t n)
+            : data(const_cast<char*>(reinterpret_cast<const char*>(s))), size(n) {}
 
     /// Create a slice that refers to the contents of the given string.
-    Slice(const std::string& s) : // NOLINT(runtime/explicit)
-        data(const_cast<char*>(s.data())), size(s.size()) { }
-    
+    Slice(const std::string& s)
+            : // NOLINT(runtime/explicit)
+              data(const_cast<char*>(s.data())),
+              size(s.size()) {}
+
     Slice(const faststring& s);
 
     /// Create a slice that refers to a C-string s[0,strlen(s)-1].
-    Slice(const char* s) : // NOLINT(runtime/explicit)
-        data(const_cast<char*>(s)), size(strlen(s)) { }
+    Slice(const char* s)
+            : // NOLINT(runtime/explicit)
+              data(const_cast<char*>(s)),
+              size(strlen(s)) {}
+
+    Slice(const Slice& src) : data(src.data), size(src.size) {}
+
+    Slice& operator=(const Slice& src) {
+        if (this != &src) {
+            data = src.data;
+            size = src.size;
+        }
+        return *this;
+    }
+
+    Slice(Slice&& src) : data(src.data), size(src.size) {
+        src.data = nullptr;
+        src.size = 0;
+    }
+
+    Slice& operator=(Slice&& src) {
+        if (this != &src) {
+            data = src.data;
+            size = src.size;
+            src.data = nullptr;
+            src.size = 0;
+        }
+        return *this;
+    }
 
     /// @return A pointer to the beginning of the referenced data.
     const char* get_data() const { return data; }
@@ -113,6 +144,57 @@ public:
         size -= n;
     }
 
+    /// Drop the last "n" bytes from this slice.
+    ///
+    /// @pre n <= size
+    ///
+    /// @note Only the base and bounds of the slice are changed;
+    ///   the data is not modified.
+    ///
+    /// @param [in] n
+    ///   Number of bytes that should be dropped from the last.
+    void remove_suffix(size_t n) {
+        assert(n <= size);
+        size -= n;
+    }
+
+    /// Remove leading spaces.
+    ///
+    /// @pre n <= size
+    ///
+    /// @note Only the base and bounds of the slice are changed;
+    ///   the data is not modified.
+    ///
+    /// @param [in] n
+    ///   Number of bytes of space that should be dropped from the beginning.
+    void trim_prefix() {
+        int32_t begin = 0;
+        while (begin < size && data[begin] == ' ') {
+            data += 1;
+            size -= 1;
+        }
+    }
+
+    /// Remove quote char '"' or ''' which should exist as first and last char.
+    ///
+    /// @pre n <= size
+    ///
+    /// @note Only the base and bounds of the slice are changed;
+    ///   the data is not modified.
+    ///
+    /// @param [in] n
+    ///   Number of bytes of space that should be dropped from the beginning.
+    bool trim_quote() {
+        int32_t begin = 0;
+        bool change = false;
+        if (size > 2 && ((data[begin] == '"' && data[size - 1] == '"') ||
+                         (data[begin] == '\'' && data[size - 1] == '\''))) {
+            data += 1;
+            size -= 2;
+            change = true;
+        }
+        return change;
+    }
     /// Truncate the slice to the given number of bytes.
     ///
     /// @pre n <= size
@@ -135,8 +217,11 @@ public:
 
     /// Check whether the slice starts with the given prefix.
     bool starts_with(const Slice& x) const {
-        return ((size >= x.size) &&
-                (mem_equal(data, x.data, x.size)));
+        return ((size >= x.size) && (mem_equal(data, x.data, x.size)));
+    }
+
+    bool ends_with(const Slice& x) const {
+        return ((size >= x.size) && mem_equal(data + (size - x.size), x.data, x.size));
     }
 
     /// @brief Comparator struct, useful for ordered collections (like STL maps).
@@ -148,9 +233,7 @@ public:
         /// @param [in] b
         ///   The slice to use as a parameter for Slice::compare().
         /// @return @c true iff @c a is less than @c b by Slice::compare().
-        bool operator()(const Slice& a, const Slice& b) const {
-            return a.compare(b) < 0;
-        }
+        bool operator()(const Slice& a, const Slice& b) const { return a.compare(b) < 0; }
     };
 
     /// Relocate/copy the slice's data into a new location.
@@ -168,13 +251,11 @@ public:
 
     friend bool operator==(const Slice& x, const Slice& y);
 
-    static bool mem_equal(const void* a, const void* b, size_t n) {
-        return memcmp(a, b, n) == 0;
-    }
+    friend std::ostream& operator<<(std::ostream& os, const Slice& slice);
 
-    static int mem_compare(const void* a, const void* b, size_t n) {
-        return memcmp(a, b, n);
-    }
+    static bool mem_equal(const void* a, const void* b, size_t n) { return memcmp(a, b, n) == 0; }
+
+    static int mem_compare(const void* a, const void* b, size_t n) { return memcmp(a, b, n); }
 
     static size_t compute_total_size(const std::vector<Slice>& slices) {
         size_t total_size = 0;
@@ -191,13 +272,16 @@ public:
         }
         return buf;
     }
-
 };
+
+inline std::ostream& operator<<(std::ostream& os, const Slice& slice) {
+    os << slice.to_string();
+    return os;
+}
 
 /// Check whether two slices are identical.
 inline bool operator==(const Slice& x, const Slice& y) {
-    return ((x.size == y.size) &&
-            (Slice::mem_equal(x.data, y.data, x.size)));
+    return ((x.size == y.size) && (Slice::mem_equal(x.data, y.data, x.size)));
 }
 
 /// Check whether two slices are not identical.
@@ -209,8 +293,10 @@ inline int Slice::compare(const Slice& b) const {
     const int min_len = (size < b.size) ? size : b.size;
     int r = mem_compare(data, b.data, min_len);
     if (r == 0) {
-        if (size < b.size) r = -1;
-        else if (size > b.size) r = +1;
+        if (size < b.size)
+            r = -1;
+        else if (size > b.size)
+            r = +1;
     }
     return r;
 }
@@ -251,31 +337,33 @@ struct SliceMap {
 //     return page_data; // transfer ownership of buffer into the caller
 //   }
 //
-class OwnedSlice {
+// only receive the memory allocated by Allocator and disables mmap,
+// otherwise the memory may not be freed correctly, currently only be constructed by faststring.
+class OwnedSlice : private Allocator<false, false, false> {
 public:
     OwnedSlice() : _slice((uint8_t*)nullptr, 0) {}
-
-    OwnedSlice(uint8_t* _data, size_t size) :_slice(_data, size) {}
 
     OwnedSlice(OwnedSlice&& src) : _slice(src._slice) {
         src._slice.data = nullptr;
         src._slice.size = 0;
     }
 
-    OwnedSlice& operator= (OwnedSlice&& src) {
+    OwnedSlice& operator=(OwnedSlice&& src) {
         if (this != &src) {
             std::swap(_slice, src._slice);
         }
         return *this;
     }
 
-    ~OwnedSlice(){
-        delete[] _slice.data;
-    }
+    ~OwnedSlice() { Allocator::free(_slice.data); }
 
-    const Slice& slice() const {
-        return _slice;
-    }
+    const Slice& slice() const { return _slice; }
+
+private:
+    // faststring also inherits Allocator and disables mmap.
+    friend class faststring;
+
+    OwnedSlice(uint8_t* _data, size_t size) : _slice(_data, size) {}
 
 private:
     // disable copy constructor and copy assignment
@@ -285,6 +373,4 @@ private:
     Slice _slice;
 };
 
-}  // namespace doris
-
-#endif  // DORIS_BE_SRC_OLAP_STRING_SLICE_H
+} // namespace doris

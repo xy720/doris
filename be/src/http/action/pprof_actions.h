@@ -15,8 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_SRC_HTTP_ACTION_PPROF_ACTIONS_H
-#define DORIS_BE_SRC_HTTP_ACTION_PPROF_ACTIONS_H
+#pragma once
 
 #include "common/status.h"
 
@@ -24,12 +23,11 @@ namespace doris {
 
 class EvHttpServer;
 class ExecEnv;
+class ObjectPool;
 
 class PprofActions {
 public:
-    static Status setup(ExecEnv* exec_env, EvHttpServer* http_server);
+    static Status setup(ExecEnv* exec_env, EvHttpServer* http_server, ObjectPool& pool);
 };
 
-}
-
-#endif
+} // namespace doris

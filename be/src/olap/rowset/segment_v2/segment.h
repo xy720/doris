@@ -17,38 +17,46 @@
 
 #pragma once
 
+#include <butil/macros.h>
+#include <gen_cpp/olap_file.pb.h>
+#include <gen_cpp/segment_v2.pb.h>
+#include <glog/logging.h>
+
 #include <cstdint>
-#include <string>
+#include <map>
 #include <memory> // for unique_ptr
+#include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "common/status.h" // Status
-#include "gen_cpp/segment_v2.pb.h"
-#include "gutil/macros.h"
-#include "olap/iterators.h"
-#include "olap/rowset/segment_v2/common.h" // rowid_t
-#include "olap/short_key_index.h"
+#include "io/fs/file_reader_writer_fwd.h"
+#include "io/fs/file_system.h"
+#include "olap/olap_common.h"
+#include "olap/rowset/segment_v2/column_reader.h" // ColumnReader
+#include "olap/rowset/segment_v2/page_handle.h"
+#include "olap/schema.h"
 #include "olap/tablet_schema.h"
-#include "util/faststring.h"
 #include "util/once.h"
+#include "util/slice.h"
 
 namespace doris {
 
-class RandomAccessFile;
-class SegmentGroup;
-class TabletSchema;
 class ShortKeyIndexDecoder;
 class Schema;
 class StorageReadOptions;
+class MemTracker;
+class PrimaryKeyIndexReader;
+class RowwiseIterator;
+struct RowLocation;
 
 namespace segment_v2 {
 
-class ColumnReader;
-class ColumnIterator;
+class BitmapIndexIterator;
 class Segment;
-class SegmentIterator;
-using SegmentSharedPtr = std::shared_ptr<Segment>;
+class InvertedIndexIterator;
 
+using SegmentSharedPtr = std::shared_ptr<Segment>;
 // A Segment is used to represent a segment in memory format. When segment is
 // generated, it won't be modified, so this struct aimed to help read operation.
 // It will prepare all ColumnReader to create ColumnIterator as needed.
@@ -59,83 +67,107 @@ using SegmentSharedPtr = std::shared_ptr<Segment>;
 // change finished, client should disable all cached Segment for old TabletSchema.
 class Segment : public std::enable_shared_from_this<Segment> {
 public:
-    static Status open(std::string filename,
-                       uint32_t segment_id,
-                       const TabletSchema* tablet_schema,
+    static Status open(io::FileSystemSPtr fs, const std::string& path, uint32_t segment_id,
+                       RowsetId rowset_id, TabletSchemaSPtr tablet_schema,
+                       const io::FileReaderOptions& reader_options,
                        std::shared_ptr<Segment>* output);
 
     ~Segment();
 
-    Status new_iterator(
-            const Schema& schema,
-            const StorageReadOptions& read_options,
-            std::unique_ptr<RowwiseIterator>* iter);
+    Status new_iterator(SchemaSPtr schema, const StorageReadOptions& read_options,
+                        std::unique_ptr<RowwiseIterator>* iter);
 
-    uint64_t id() const { return _segment_id; }
+    uint32_t id() const { return _segment_id; }
 
-    uint32_t num_rows() const { return _footer.num_rows(); }
+    RowsetId rowset_id() const { return _rowset_id; }
 
-    Status new_column_iterator(uint32_t cid, ColumnIterator** iter);
-    size_t num_short_keys() const { return _tablet_schema->num_short_key_columns(); }
+    uint32_t num_rows() const { return _num_rows; }
 
-    uint32_t num_rows_per_block() const {
+    Status new_column_iterator(const TabletColumn& tablet_column,
+                               std::unique_ptr<ColumnIterator>* iter);
+
+    Status new_bitmap_index_iterator(const TabletColumn& tablet_column,
+                                     std::unique_ptr<BitmapIndexIterator>* iter);
+
+    Status new_inverted_index_iterator(const TabletColumn& tablet_column,
+                                       const TabletIndex* index_meta,
+                                       const StorageReadOptions& read_options,
+                                       std::unique_ptr<InvertedIndexIterator>* iter);
+
+    const ShortKeyIndexDecoder* get_short_key_index() const {
         DCHECK(_load_index_once.has_called() && _load_index_once.stored_result().ok());
-        return _sk_index_decoder->num_rows_per_block();
-    }
-    ShortKeyIndexIterator lower_bound(const Slice& key) const {
-        DCHECK(_load_index_once.has_called() && _load_index_once.stored_result().ok());
-        return _sk_index_decoder->lower_bound(key);
-    }
-    ShortKeyIndexIterator upper_bound(const Slice& key) const {
-        DCHECK(_load_index_once.has_called() && _load_index_once.stored_result().ok());
-        return _sk_index_decoder->upper_bound(key);
+        return _sk_index_decoder.get();
     }
 
-    // This will return the last row block in this segment.
-    // NOTE: Before call this function , client should assure that
-    // this segment is not empty.
-    uint32_t last_block() const {
+    const PrimaryKeyIndexReader* get_primary_key_index() const {
         DCHECK(_load_index_once.has_called() && _load_index_once.stored_result().ok());
-        DCHECK(num_rows() > 0);
-        return _sk_index_decoder->num_items() - 1;
+        return _pk_index_reader.get();
     }
+
+    Status lookup_row_key(const Slice& key, bool with_seq_col, RowLocation* row_location);
+
+    Status read_key_by_rowid(uint32_t row_id, std::string* key);
+
+    Status load_index();
+
+    Status load_pk_index_and_bf();
+
+    std::string min_key() {
+        DCHECK(_tablet_schema->keys_type() == UNIQUE_KEYS && _pk_index_meta != nullptr);
+        return _pk_index_meta->min_key();
+    }
+    std::string max_key() {
+        DCHECK(_tablet_schema->keys_type() == UNIQUE_KEYS && _pk_index_meta != nullptr);
+        return _pk_index_meta->max_key();
+    }
+
+    io::FileReaderSPtr file_reader() { return _file_reader; }
+
+    int64_t meta_mem_usage() const { return _meta_mem_usage; }
 
 private:
     DISALLOW_COPY_AND_ASSIGN(Segment);
-    Segment(std::string fname, uint32_t segment_id, const TabletSchema* tablet_schema);
+    Segment(uint32_t segment_id, RowsetId rowset_id, TabletSchemaSPtr tablet_schema);
     // open segment file and read the minimum amount of necessary information (footer)
     Status _open();
-    Status _parse_footer();
-    Status _create_column_readers();
-    // Load and decode short key index.
-    // May be called multiple times, subsequent calls will no op.
-    Status _load_index();
+    Status _parse_footer(SegmentFooterPB* footer);
+    Status _create_column_readers(const SegmentFooterPB& footer);
+    Status _load_pk_bloom_filter();
 
 private:
-    std::string _fname;
+    friend class SegmentIterator;
+    io::FileReaderSPtr _file_reader;
+
     uint32_t _segment_id;
-    const TabletSchema* _tablet_schema;
+    uint32_t _num_rows;
+    int64_t _meta_mem_usage;
 
-    SegmentFooterPB _footer;
-    std::unique_ptr<RandomAccessFile> _input_file;
+    RowsetId _rowset_id;
+    TabletSchemaSPtr _tablet_schema;
 
-    // Map from column unique id to column ordinal in footer's ColumnMetaPB
-    // If we can't find unique id from it, it means this segment is created
-    // with an old schema.
-    std::unordered_map<uint32_t, uint32_t> _column_id_to_footer_ordinal;
+    std::unique_ptr<PrimaryKeyIndexMetaPB> _pk_index_meta;
+    PagePointerPB _sk_index_page;
 
+    // map column unique id ---> column reader
     // ColumnReader for each column in TabletSchema. If ColumnReader is nullptr,
     // This means that this segment has no data for that column, which may be added
     // after this segment is generated.
-    std::vector<std::unique_ptr<ColumnReader>> _column_readers;
+    std::map<int32_t, std::unique_ptr<ColumnReader>> _column_readers;
 
     // used to guarantee that short key index will be loaded at most once in a thread-safe way
     DorisCallOnce<Status> _load_index_once;
-    // used to store short key index
-    faststring _sk_index_buf;
+    // used to guarantee that primary key bloom filter will be loaded at most once in a thread-safe way
+    DorisCallOnce<Status> _load_pk_bf_once;
+    // used to hold short key index page in memory
+    PageHandle _sk_index_handle;
     // short key index decoder
     std::unique_ptr<ShortKeyIndexDecoder> _sk_index_decoder;
+    // primary key index reader
+    std::unique_ptr<PrimaryKeyIndexReader> _pk_index_reader;
+    // Segment may be destructed after StorageEngine, in order to exit gracefully.
+    std::shared_ptr<MemTracker> _segment_meta_mem_tracker;
+    std::mutex _open_lock;
 };
 
-}
-}
+} // namespace segment_v2
+} // namespace doris

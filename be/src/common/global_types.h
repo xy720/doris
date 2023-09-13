@@ -15,8 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_SRC_COMMON_COMMON_GLOBAL_TYPES_H
-#define DORIS_BE_SRC_COMMON_COMMON_GLOBAL_TYPES_H
+#pragma once
 
 namespace doris {
 
@@ -28,6 +27,4 @@ typedef int SlotId;
 typedef int TableId;
 typedef int PlanNodeId;
 
-};
-
-#endif
+}; // namespace doris

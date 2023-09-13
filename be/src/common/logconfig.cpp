@@ -15,14 +15,19 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include <iostream>
+#include <ctype.h>
+#include <stdint.h>
+
 #include <cerrno>
-#include <cstring>
 #include <cstdlib>
+#include <cstring>
+#include <iostream>
 #include <mutex>
-#include <glog/logging.h>
-#include <glog/vlog_is_on.h>
+#include <string>
+#include <vector>
+
 #include "common/config.h"
+#include "common/logging.h"
 
 namespace doris {
 
@@ -30,8 +35,7 @@ static bool logging_initialized = false;
 
 static std::mutex logging_mutex;
 
-static bool iequals(const std::string& a, const std::string& b)
-{
+static bool iequals(const std::string& a, const std::string& b) {
     unsigned int sz = a.size();
     if (b.size() != sz) {
         return false;
@@ -42,31 +46,31 @@ static bool iequals(const std::string& a, const std::string& b)
         }
     }
     return true;
-}       
+}
 
-bool init_glog(const char* basename, bool install_signal_handler) {
-
+bool init_glog(const char* basename) {
     std::lock_guard<std::mutex> logging_lock(logging_mutex);
 
     if (logging_initialized) {
         return true;
     }
 
-    if (install_signal_handler) {
-        google::InstallFailureSignalHandler();
+    if (getenv("DORIS_LOG_TO_STDERR") != nullptr) {
+        FLAGS_alsologtostderr = true;
     }
 
-    // don't log to stderr
-    FLAGS_stderrthreshold = 5;
+    // don't log to stderr except fatal level
+    // so fatal log can output to be.out .
+    FLAGS_stderrthreshold = google::FATAL;
     // set glog log dir
     FLAGS_log_dir = config::sys_log_dir;
     // 0 means buffer INFO only
     FLAGS_logbuflevel = 0;
     // buffer log messages for at most this many seconds
-    FLAGS_logbufsecs = 30;  
+    FLAGS_logbufsecs = 30;
     // set roll num
     FLAGS_log_filenum_quota = config::sys_log_roll_num;
-    
+
     // set log level
     std::string& loglevel = config::sys_log_level;
     if (iequals(loglevel, "INFO")) {
@@ -83,7 +87,7 @@ bool init_glog(const char* basename, bool install_signal_handler) {
     }
 
     // set log buffer level
-    // defalut is 0
+    // default is 0
     std::string& logbuflevel = config::log_buffer_level;
     if (iequals(logbuflevel, "-1")) {
         FLAGS_logbuflevel = -1;
@@ -104,8 +108,8 @@ bool init_glog(const char* basename, bool install_signal_handler) {
     } else if (rollmode.substr(0, sizeflag.length()).compare(sizeflag) == 0) {
         FLAGS_log_split_method = "size";
         std::string sizestr = rollmode.substr(sizeflag.size(), rollmode.size() - sizeflag.size());
-        if (sizestr.size() != 0)  {
-            char* end = NULL;
+        if (sizestr.size() != 0) {
+            char* end = nullptr;
             errno = 0;
             const char* sizecstr = sizestr.c_str();
             int64_t ret64 = strtoll(sizecstr, &end, 10);
@@ -138,9 +142,8 @@ bool init_glog(const char* basename, bool install_signal_handler) {
     google::InitGoogleLogging(basename);
 
     logging_initialized = true;
- 
-    return true;
 
+    return true;
 }
 
 void shutdown_logging() {

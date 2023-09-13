@@ -17,15 +17,17 @@
 
 #include "olap/key_coder.h"
 
+#include <cstddef>
 #include <unordered_map>
+#include <utility>
 
 namespace doris {
 
-template<typename TraitsType>
-KeyCoder::KeyCoder(TraitsType traits) 
-        : _encode_ascending(traits.encode_ascending),
-        _decode_ascending(traits.decode_ascending) {
-}
+template <typename TraitsType>
+KeyCoder::KeyCoder(TraitsType traits)
+        : _full_encode_ascending(traits.full_encode_ascending),
+          _encode_ascending(traits.encode_ascending),
+          _decode_ascending(traits.decode_ascending) {}
 
 struct EnumClassHash {
     template <typename T>
@@ -58,22 +60,29 @@ public:
 
 private:
     KeyCoderResolver() {
-        add_mapping<OLAP_FIELD_TYPE_TINYINT>();
-        add_mapping<OLAP_FIELD_TYPE_SMALLINT>();
-        add_mapping<OLAP_FIELD_TYPE_INT>();
-        add_mapping<OLAP_FIELD_TYPE_UNSIGNED_INT>();
-        add_mapping<OLAP_FIELD_TYPE_BIGINT>();
-        add_mapping<OLAP_FIELD_TYPE_LARGEINT>();
-        add_mapping<OLAP_FIELD_TYPE_DATETIME>();
+        add_mapping<FieldType::OLAP_FIELD_TYPE_TINYINT>();
+        add_mapping<FieldType::OLAP_FIELD_TYPE_SMALLINT>();
+        add_mapping<FieldType::OLAP_FIELD_TYPE_INT>();
+        add_mapping<FieldType::OLAP_FIELD_TYPE_UNSIGNED_INT>();
+        add_mapping<FieldType::OLAP_FIELD_TYPE_BIGINT>();
+        add_mapping<FieldType::OLAP_FIELD_TYPE_UNSIGNED_BIGINT>();
+        add_mapping<FieldType::OLAP_FIELD_TYPE_LARGEINT>();
+        add_mapping<FieldType::OLAP_FIELD_TYPE_DATETIME>();
 
-        add_mapping<OLAP_FIELD_TYPE_DATE>();
-        add_mapping<OLAP_FIELD_TYPE_DECIMAL>();
-        add_mapping<OLAP_FIELD_TYPE_CHAR>();
-        add_mapping<OLAP_FIELD_TYPE_VARCHAR>();
-        add_mapping<OLAP_FIELD_TYPE_BOOL>();
+        add_mapping<FieldType::OLAP_FIELD_TYPE_DATE>();
+        add_mapping<FieldType::OLAP_FIELD_TYPE_DECIMAL>();
+        add_mapping<FieldType::OLAP_FIELD_TYPE_CHAR>();
+        add_mapping<FieldType::OLAP_FIELD_TYPE_VARCHAR>();
+        add_mapping<FieldType::OLAP_FIELD_TYPE_STRING>();
+        add_mapping<FieldType::OLAP_FIELD_TYPE_BOOL>();
+        add_mapping<FieldType::OLAP_FIELD_TYPE_DATEV2>();
+        add_mapping<FieldType::OLAP_FIELD_TYPE_DATETIMEV2>();
+        add_mapping<FieldType::OLAP_FIELD_TYPE_DECIMAL32>();
+        add_mapping<FieldType::OLAP_FIELD_TYPE_DECIMAL64>();
+        add_mapping<FieldType::OLAP_FIELD_TYPE_DECIMAL128I>();
     }
 
-    template<FieldType field_type>
+    template <FieldType field_type>
     void add_mapping() {
         _coder_map.emplace(field_type, new KeyCoder(KeyCoderTraits<field_type>()));
     }
@@ -85,4 +94,4 @@ const KeyCoder* get_key_coder(FieldType type) {
     return KeyCoderResolver::instance()->get_coder(type);
 }
 
-}
+} // namespace doris

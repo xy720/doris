@@ -17,146 +17,131 @@
 
 #pragma once
 
+#include <butil/macros.h>
+#include <glog/logging.h>
+
 #include <cstdint>
-#include <string>
+#include <memory>
+#include <utility>
+#include <vector>
 
 #include "common/status.h"
+#include "io/fs/file_reader_writer_fwd.h"
 #include "olap/rowset/segment_v2/common.h"
+#include "olap/rowset/segment_v2/index_page.h"
 #include "olap/rowset/segment_v2/page_pointer.h"
-#include "util/coding.h"
-#include "util/slice.h"
+#include "util/once.h"
 
 namespace doris {
+
+namespace io {
+class FileWriter;
+}
+
 namespace segment_v2 {
+class ColumnIndexMetaPB;
+class OrdinalIndexPB;
 
-// this class encode ordinal page index
-// the binary format is like that
-// Header | Content
-// Header: 
-//      number of pages (4 Bytes)
-// Content:
-//      array of index_pair
-// index_pair:
-//      Ordinal (4 Bytes)
-//      PagePointer (8 Bytes)
-
-static const uint32_t ORDINAL_PAGE_INDEX_HEADER_SIZE = 4;
-
-class OrdinalPageIndexBuilder {
+// Ordinal index is implemented by one IndexPage that stores the first value ordinal
+// and file pointer for each data page.
+// But if there is only one data page, there is no need for index page. So we store
+// the file pointer to that data page directly in index meta (OrdinalIndexPB).
+class OrdinalIndexWriter {
 public:
-    OrdinalPageIndexBuilder() : _num_pages(0) {
-        _buffer.reserve(4 * 1024);
-        // reserve space for number of pages
-        _buffer.resize(ORDINAL_PAGE_INDEX_HEADER_SIZE);
-    }
+    OrdinalIndexWriter() : _page_builder(new IndexPageBuilder(0, true)) {}
 
-    void append_entry(rowid_t rid, const PagePointer& page) {
-        // rid
-        put_varint32(&_buffer, rid);
-        // page pointer
-        page.encode_to(&_buffer);
-        _num_pages++;
-    }
+    void append_entry(ordinal_t ordinal, const PagePointer& data_pp);
 
-    uint64_t size() {
-        return _buffer.size();
-    }
+    uint64_t size() { return _page_builder->size(); }
 
-    Slice finish() {
-        // encoded number of pages
-        encode_fixed32_le((uint8_t*)_buffer.data(), _num_pages);
-        return Slice(_buffer);
-    }
+    Status finish(io::FileWriter* file_writer, ColumnIndexMetaPB* meta);
 
 private:
-    std::string _buffer;
-    uint32_t _num_pages;
+    DISALLOW_COPY_AND_ASSIGN(OrdinalIndexWriter);
+    std::unique_ptr<IndexPageBuilder> _page_builder;
+    PagePointer _last_pp;
 };
 
-class OrdinalPageIndex;
-class OrdinalPageIndexIterator {
+class OrdinalPageIndexIterator;
+
+class OrdinalIndexReader {
 public:
-    OrdinalPageIndexIterator() : _index(nullptr), _cur_idx(-1) { }
-    OrdinalPageIndexIterator(OrdinalPageIndex* index) : _index(index), _cur_idx(0) { }
-    OrdinalPageIndexIterator(OrdinalPageIndex* index, int cur_idx) : _index(index), _cur_idx(cur_idx) { }
-    inline bool valid() const;
-    inline void next();
-    inline rowid_t rowid() const;
-    inline int32_t cur_idx() const;
-    inline const PagePointer& page() const;
-private:
-    OrdinalPageIndex* _index;
-    int32_t _cur_idx;
-};
-
-// Page index 
-class OrdinalPageIndex {
-public:
-    OrdinalPageIndex(const Slice& data, uint64_t num_rows)
-        : _data(data), _num_rows(num_rows), _num_pages(0), _rowids(nullptr), _pages(nullptr) {
-    }
-    ~OrdinalPageIndex();
-    
-    Status load();
-
-    OrdinalPageIndexIterator seek_at_or_before(rowid_t rid);
-    OrdinalPageIndexIterator begin() {
-        return OrdinalPageIndexIterator(this);
-    }
-    OrdinalPageIndexIterator end() {
-        return OrdinalPageIndexIterator(this, _num_pages);
-    }
-    rowid_t get_first_row_id(int page_index) const {
-        return _rowids[page_index];
+    explicit OrdinalIndexReader(io::FileReaderSPtr file_reader, ordinal_t num_values,
+                                const OrdinalIndexPB& meta_pb)
+            : _file_reader(std::move(file_reader)), _num_values(num_values) {
+        _meta_pb.reset(new OrdinalIndexPB(meta_pb));
     }
 
-    rowid_t get_last_row_id(int page_index) const {
-        // because add additional number of rows as the last rowid
-        // so just return next_page_first_id - 1
-        int next_page_index = page_index + 1;
-        return get_first_row_id(next_page_index) - 1;
+    // load and parse the index page into memory
+    Status load(bool use_page_cache, bool kept_in_memory);
+
+    // the returned iter points to the largest element which is less than `ordinal`,
+    // or points to the first element if all elements are greater than `ordinal`,
+    // or points to "end" if all elements are smaller than `ordinal`.
+    OrdinalPageIndexIterator seek_at_or_before(ordinal_t ordinal);
+    inline OrdinalPageIndexIterator begin();
+    inline OrdinalPageIndexIterator end();
+    ordinal_t get_first_ordinal(int page_index) const { return _ordinals[page_index]; }
+
+    ordinal_t get_last_ordinal(int page_index) const {
+        return get_first_ordinal(page_index + 1) - 1;
     }
 
-    int32_t num_pages() const {
-        return _num_pages;
-    }
+    // for test
+    int32_t num_data_pages() const { return _num_pages; }
 
 private:
-    uint32_t _header_size() const { return ORDINAL_PAGE_INDEX_HEADER_SIZE; }
+    Status _load(bool use_page_cache, bool kept_in_memory,
+                 std::unique_ptr<OrdinalIndexPB> index_meta);
 
 private:
     friend OrdinalPageIndexIterator;
 
-    Slice _data;
-    uint64_t _num_rows;
+    io::FileReaderSPtr _file_reader;
+    DorisCallOnce<Status> _load_once;
 
-    // valid after laod
-    int32_t _num_pages;
-    // the last row id is additional, set to number of rows
-    rowid_t* _rowids;
-    PagePointer* _pages;
+    std::unique_ptr<OrdinalIndexPB> _meta_pb;
+
+    // total number of values (including NULLs) in the indexed column,
+    // equals to 1 + 'last ordinal of last data pages'
+    ordinal_t _num_values;
+
+    // valid after load
+    int _num_pages = 0;
+    // _ordinals[i] = first ordinal of the i-th data page,
+    std::vector<ordinal_t> _ordinals;
+    // _pages[i] = page pointer to the i-th data page
+    std::vector<PagePointer> _pages;
 };
 
-inline bool OrdinalPageIndexIterator::valid() const {
-    return _cur_idx < _index->_num_pages;
+class OrdinalPageIndexIterator {
+public:
+    OrdinalPageIndexIterator() : _index(nullptr), _cur_idx(-1) {}
+    OrdinalPageIndexIterator(OrdinalIndexReader* index) : _index(index), _cur_idx(0) {}
+    OrdinalPageIndexIterator(OrdinalIndexReader* index, int cur_idx)
+            : _index(index), _cur_idx(cur_idx) {}
+    bool valid() const { return _cur_idx < _index->_num_pages; }
+    void next() {
+        DCHECK_LT(_cur_idx, _index->_num_pages);
+        _cur_idx++;
+    }
+    int32_t page_index() const { return _cur_idx; }
+    const PagePointer& page() const { return _index->_pages[_cur_idx]; }
+    ordinal_t first_ordinal() const { return _index->get_first_ordinal(_cur_idx); }
+    ordinal_t last_ordinal() const { return _index->get_last_ordinal(_cur_idx); }
+
+private:
+    OrdinalIndexReader* _index;
+    int32_t _cur_idx;
+};
+
+OrdinalPageIndexIterator OrdinalIndexReader::begin() {
+    return OrdinalPageIndexIterator(this);
 }
 
-inline void OrdinalPageIndexIterator::next() {
-    DCHECK_LT(_cur_idx, _index->_num_pages);
-    _cur_idx++;
+OrdinalPageIndexIterator OrdinalIndexReader::end() {
+    return OrdinalPageIndexIterator(this, _num_pages);
 }
 
-inline rowid_t OrdinalPageIndexIterator::rowid() const {
-    return _index->_rowids[_cur_idx];
-}
-
-int32_t OrdinalPageIndexIterator::cur_idx() const {
-    return _cur_idx;
-}
-
-inline const PagePointer& OrdinalPageIndexIterator::page() const {
-    return _index->_pages[_cur_idx];
-}
-
-}
-}
+} // namespace segment_v2
+} // namespace doris

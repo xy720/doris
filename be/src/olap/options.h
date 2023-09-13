@@ -17,28 +17,52 @@
 
 #pragma once
 
+#include <gen_cpp/Types_types.h>
+#include <stdint.h>
+
 #include <string>
+#include <utility>
 #include <vector>
 
-#include "olap/olap_define.h"
+#include "common/status.h"
+#include "io/cache/block/block_file_cache_settings.h"
 #include "util/uid_util.h"
 
 namespace doris {
 
 struct StorePath {
-    StorePath() : capacity_bytes(-1) { }
+    StorePath() : capacity_bytes(-1), storage_medium(TStorageMedium::HDD) {}
     StorePath(const std::string& path_, int64_t capacity_bytes_)
-        : path(path_), capacity_bytes(capacity_bytes_) { }
+            : path(path_), capacity_bytes(capacity_bytes_), storage_medium(TStorageMedium::HDD) {}
+    StorePath(const std::string& path_, int64_t capacity_bytes_,
+              TStorageMedium::type storage_medium_)
+            : path(path_), capacity_bytes(capacity_bytes_), storage_medium(storage_medium_) {}
     std::string path;
     int64_t capacity_bytes;
+    TStorageMedium::type storage_medium;
 };
 
-OLAPStatus parse_conf_store_paths(const std::string& config_path, std::vector<StorePath>* path);
+// parse a single root path of storage_root_path
+Status parse_root_path(const std::string& root_path, StorePath* path);
+
+Status parse_conf_store_paths(const std::string& config_path, std::vector<StorePath>* path);
+
+struct CachePath {
+    io::FileCacheSettings init_settings() const;
+    CachePath(std::string path, int64_t total_bytes, int64_t query_limit_bytes)
+            : path(std::move(path)),
+              total_bytes(total_bytes),
+              query_limit_bytes(query_limit_bytes) {}
+    std::string path;
+    int64_t total_bytes = 0;
+    int64_t query_limit_bytes = 0;
+};
+Status parse_conf_cache_paths(const std::string& config_path, std::vector<CachePath>& path);
 
 struct EngineOptions {
     // list paths that tablet will be put into.
     std::vector<StorePath> store_paths;
+    // BE's UUID. It will be reset every time BE restarts.
     UniqueId backend_uid {0, 0};
 };
-
-}
+} // namespace doris

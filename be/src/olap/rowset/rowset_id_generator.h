@@ -19,8 +19,8 @@
 
 #include <mutex>
 
-#include "olap/olap_define.h"
 #include "olap/olap_common.h"
+#include "olap/olap_define.h"
 
 namespace doris {
 
@@ -28,7 +28,7 @@ class OlapMeta;
 
 // all implementations must be thread-safe
 class RowsetIdGenerator {
-public:    
+public:
     RowsetIdGenerator() {}
     virtual ~RowsetIdGenerator() {}
 
@@ -39,7 +39,7 @@ public:
     // for example, during gc logic, gc thread finds a file
     // and it could not find it under rowset list. but it maybe in use
     // during load procedure. Gc thread will check it using this method.
-    virtual bool id_in_use(const RowsetId& rowset_id) = 0;
+    virtual bool id_in_use(const RowsetId& rowset_id) const = 0;
 
     // remove the rowsetid from useful rowsetid list.
     virtual void release_id(const RowsetId& rowset_id) = 0;

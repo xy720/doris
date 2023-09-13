@@ -16,19 +16,39 @@
 // under the License.
 
 #include "runtime/primitive_type.h"
-#include <sstream>
-#include "gen_cpp/Types_types.h"
+
+#include <gen_cpp/Types_types.h>
+
+#include <vector>
+
+#include "runtime/define_primitive_type.h"
 
 namespace doris {
-//to_tcolumn_type_thrift only test
-TColumnType to_tcolumn_type_thrift(TPrimitiveType::type ttype) {
-    TColumnType t;
-    t.__set_type(ttype);
-    return t;
-}
 
-TExprOpcode::type to_in_opcode(PrimitiveType t) {
-    return TExprOpcode::FILTER_IN;
+bool is_type_compatible(PrimitiveType lhs, PrimitiveType rhs) {
+    if (lhs == TYPE_VARCHAR) {
+        return rhs == TYPE_CHAR || rhs == TYPE_VARCHAR || rhs == TYPE_HLL || rhs == TYPE_OBJECT ||
+               rhs == TYPE_QUANTILE_STATE || rhs == TYPE_STRING;
+    }
+
+    if (lhs == TYPE_OBJECT) {
+        return rhs == TYPE_VARCHAR || rhs == TYPE_OBJECT || rhs == TYPE_STRING;
+    }
+
+    if (lhs == TYPE_CHAR || lhs == TYPE_HLL) {
+        return rhs == TYPE_CHAR || rhs == TYPE_VARCHAR || rhs == TYPE_HLL || rhs == TYPE_STRING;
+    }
+
+    if (lhs == TYPE_STRING) {
+        return rhs == TYPE_CHAR || rhs == TYPE_VARCHAR || rhs == TYPE_HLL || rhs == TYPE_OBJECT ||
+               rhs == TYPE_STRING;
+    }
+
+    if (lhs == TYPE_QUANTILE_STATE) {
+        return rhs == TYPE_VARCHAR || rhs == TYPE_QUANTILE_STATE || rhs == TYPE_STRING;
+    }
+
+    return lhs == rhs;
 }
 
 PrimitiveType thrift_to_type(TPrimitiveType::type ttype) {
@@ -69,31 +89,71 @@ PrimitiveType thrift_to_type(TPrimitiveType::type ttype) {
     case TPrimitiveType::DATETIME:
         return TYPE_DATETIME;
 
+    case TPrimitiveType::DATEV2:
+        return TYPE_DATEV2;
+
+    case TPrimitiveType::DATETIMEV2:
+        return TYPE_DATETIMEV2;
+
+    case TPrimitiveType::TIMEV2:
+        return TYPE_TIMEV2;
+
     case TPrimitiveType::TIME:
         return TYPE_TIME;
 
     case TPrimitiveType::VARCHAR:
         return TYPE_VARCHAR;
 
+    case TPrimitiveType::STRING:
+        return TYPE_STRING;
+
+    case TPrimitiveType::JSONB:
+        return TYPE_JSONB;
+
     case TPrimitiveType::BINARY:
         return TYPE_BINARY;
-
-    case TPrimitiveType::DECIMAL:
-        return TYPE_DECIMAL;
 
     case TPrimitiveType::DECIMALV2:
         return TYPE_DECIMALV2;
 
+    case TPrimitiveType::DECIMAL32:
+        return TYPE_DECIMAL32;
+
+    case TPrimitiveType::DECIMAL64:
+        return TYPE_DECIMAL64;
+
+    case TPrimitiveType::DECIMAL128I:
+        return TYPE_DECIMAL128I;
+
     case TPrimitiveType::CHAR:
         return TYPE_CHAR;
-            
+
     case TPrimitiveType::HLL:
         return TYPE_HLL;
 
     case TPrimitiveType::OBJECT:
         return TYPE_OBJECT;
 
+    case TPrimitiveType::QUANTILE_STATE:
+        return TYPE_QUANTILE_STATE;
+
+    case TPrimitiveType::ARRAY:
+        return TYPE_ARRAY;
+
+    case TPrimitiveType::MAP:
+        return TYPE_MAP;
+
+    case TPrimitiveType::STRUCT:
+        return TYPE_STRUCT;
+
+    case TPrimitiveType::LAMBDA_FUNCTION:
+        return TYPE_LAMBDA_FUNCTION;
+
+    case TPrimitiveType::AGG_STATE:
+        return TYPE_AGG_STATE;
+
     default:
+        CHECK(false) << ", meet unknown type " << ttype;
         return INVALID_TYPE;
     }
 }
@@ -139,17 +199,38 @@ TPrimitiveType::type to_thrift(PrimitiveType ptype) {
     case TYPE_TIME:
         return TPrimitiveType::TIME;
 
+    case TYPE_DATEV2:
+        return TPrimitiveType::DATEV2;
+
+    case TYPE_DATETIMEV2:
+        return TPrimitiveType::DATETIMEV2;
+
+    case TYPE_TIMEV2:
+        return TPrimitiveType::TIMEV2;
+
     case TYPE_VARCHAR:
         return TPrimitiveType::VARCHAR;
+
+    case TYPE_STRING:
+        return TPrimitiveType::STRING;
+
+    case TYPE_JSONB:
+        return TPrimitiveType::JSONB;
 
     case TYPE_BINARY:
         return TPrimitiveType::BINARY;
 
-    case TYPE_DECIMAL:
-        return TPrimitiveType::DECIMAL;
-
     case TYPE_DECIMALV2:
         return TPrimitiveType::DECIMALV2;
+
+    case TYPE_DECIMAL32:
+        return TPrimitiveType::DECIMAL32;
+
+    case TYPE_DECIMAL64:
+        return TPrimitiveType::DECIMAL64;
+
+    case TYPE_DECIMAL128I:
+        return TPrimitiveType::DECIMAL128I;
 
     case TYPE_CHAR:
         return TPrimitiveType::CHAR;
@@ -159,7 +240,21 @@ TPrimitiveType::type to_thrift(PrimitiveType ptype) {
 
     case TYPE_OBJECT:
         return TPrimitiveType::OBJECT;
-            
+
+    case TYPE_QUANTILE_STATE:
+        return TPrimitiveType::QUANTILE_STATE;
+
+    case TYPE_ARRAY:
+        return TPrimitiveType::ARRAY;
+
+    case TYPE_MAP:
+        return TPrimitiveType::MAP;
+
+    case TYPE_STRUCT:
+        return TPrimitiveType::STRUCT;
+    case TYPE_LAMBDA_FUNCTION:
+        return TPrimitiveType::LAMBDA_FUNCTION;
+
     default:
         return TPrimitiveType::INVALID_TYPE;
     }
@@ -206,17 +301,38 @@ std::string type_to_string(PrimitiveType t) {
     case TYPE_TIME:
         return "TIME";
 
+    case TYPE_DATEV2:
+        return "DATEV2";
+
+    case TYPE_DATETIMEV2:
+        return "DATETIMEV2";
+
+    case TYPE_TIMEV2:
+        return "TIMEV2";
+
     case TYPE_VARCHAR:
         return "VARCHAR";
+
+    case TYPE_STRING:
+        return "STRING";
+
+    case TYPE_JSONB:
+        return "JSONB";
 
     case TYPE_BINARY:
         return "BINARY";
 
-    case TYPE_DECIMAL:
-        return "DECIMAL";
-
     case TYPE_DECIMALV2:
         return "DECIMALV2";
+
+    case TYPE_DECIMAL32:
+        return "DECIMAL32";
+
+    case TYPE_DECIMAL64:
+        return "DECIMAL64";
+
+    case TYPE_DECIMAL128I:
+        return "DECIMAL128I";
 
     case TYPE_CHAR:
         return "CHAR";
@@ -226,6 +342,23 @@ std::string type_to_string(PrimitiveType t) {
 
     case TYPE_OBJECT:
         return "OBJECT";
+
+    case TYPE_QUANTILE_STATE:
+        return "QUANTILE_STATE";
+
+    case TYPE_AGG_STATE:
+        return "AGG_STATE";
+
+    case TYPE_ARRAY:
+        return "ARRAY";
+
+    case TYPE_MAP:
+        return "MAP";
+
+    case TYPE_STRUCT:
+        return "STRUCT";
+    case TYPE_LAMBDA_FUNCTION:
+        return "LAMBDA_FUNCTION TYPE";
 
     default:
         return "";
@@ -274,26 +407,53 @@ std::string type_to_odbc_string(PrimitiveType t) {
     case TYPE_DATETIME:
         return "datetime";
 
+    case TYPE_DATEV2:
+        return "datev2";
+
+    case TYPE_DATETIMEV2:
+        return "datetimev2";
+
+    case TYPE_TIMEV2:
+        return "timev2";
+
     case TYPE_VARCHAR:
         return "string";
+
+    case TYPE_STRING:
+        return "string";
+
+    case TYPE_JSONB:
+        return "jsonb";
 
     case TYPE_BINARY:
         return "binary";
 
-    case TYPE_DECIMAL:
-        return "decimal";
-
     case TYPE_DECIMALV2:
         return "decimalv2";
 
+    case TYPE_DECIMAL32:
+        return "decimal32";
+
+    case TYPE_DECIMAL64:
+        return "decimal64";
+
+    case TYPE_DECIMAL128I:
+        return "decimal128";
+
     case TYPE_CHAR:
         return "char";
-            
+
     case TYPE_HLL:
         return "hll";
 
     case TYPE_OBJECT:
         return "object";
+
+    case TYPE_QUANTILE_STATE:
+        return "quantile_state";
+
+    case TYPE_AGG_STATE:
+        return "agg_state";
     };
 
     return "unknown";
@@ -301,12 +461,12 @@ std::string type_to_odbc_string(PrimitiveType t) {
 
 // for test only
 TTypeDesc gen_type_desc(const TPrimitiveType::type val) {
-    std::vector<TTypeNode>  types_list;
+    std::vector<TTypeNode> types_list;
     TTypeNode type_node;
     TTypeDesc type_desc;
     TScalarType scalar_type;
     scalar_type.__set_type(val);
-    type_node.__set_scalar_type(scalar_type);  
+    type_node.__set_scalar_type(scalar_type);
     types_list.push_back(type_node);
     type_desc.__set_types(types_list);
     return type_desc;
@@ -314,7 +474,7 @@ TTypeDesc gen_type_desc(const TPrimitiveType::type val) {
 
 // for test only
 TTypeDesc gen_type_desc(const TPrimitiveType::type val, const std::string& name) {
-    std::vector<TTypeNode>  types_list;
+    std::vector<TTypeNode> types_list;
     TTypeNode type_node;
     TTypeDesc type_desc;
     TScalarType scalar_type;
@@ -324,10 +484,10 @@ TTypeDesc gen_type_desc(const TPrimitiveType::type val, const std::string& name)
     field.__set_name(name);
     fields.push_back(field);
     type_node.__set_struct_fields(fields);
-    type_node.__set_scalar_type(scalar_type);  
+    type_node.__set_scalar_type(scalar_type);
     types_list.push_back(type_node);
     type_desc.__set_types(types_list);
     return type_desc;
 }
 
-}
+} // namespace doris

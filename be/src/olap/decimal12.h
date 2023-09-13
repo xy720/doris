@@ -18,8 +18,8 @@
 #pragma once
 
 #include <cstdint>
-#include <string>
 #include <iostream>
+#include <string>
 
 #include "olap/utils.h"
 
@@ -27,17 +27,6 @@ namespace doris {
 
 // the sign of integer must be same as fraction
 struct decimal12_t {
-    decimal12_t() : integer(0), fraction(0) {}
-    decimal12_t(int64_t int_part, int32_t frac_part) {
-        integer = int_part;
-        fraction = frac_part;
-    }
-
-    decimal12_t(const decimal12_t& value) {
-        integer = value.integer;
-        fraction = value.fraction;
-    }
-
     decimal12_t& operator+=(const decimal12_t& value) {
         fraction += value.fraction;
         integer += value.integer;
@@ -57,41 +46,14 @@ struct decimal12_t {
             fraction += (sign ? -FRAC_RATIO : FRAC_RATIO);
         }
 
-        //OLAP_LOG_WARNING("agg: int=%ld, frac=%d", integer, fraction);
+        //LOG(WARNING) << "agg: int=" << integer << ", frac=" << fraction;
         //_set_flag();
         return *this;
     }
 
-    // call field::copy
-    decimal12_t& operator=(const decimal12_t& value) {
-        integer = value.integer;
-        fraction = value.fraction;
-        return *this;
-    }
+    bool operator==(const decimal12_t& value) const { return cmp(value) == 0; }
 
-    bool operator<(const decimal12_t& value) const {
-        return cmp(value) < 0;
-    }
-
-    bool operator<=(const decimal12_t& value) const {
-        return cmp(value) <= 0;
-    }
-
-    bool operator>(const decimal12_t& value) const {
-        return cmp(value) > 0;
-    }
-
-    bool operator>=(const decimal12_t& value) const {
-        return cmp(value) >= 0;
-    }
-
-    bool operator==(const decimal12_t& value) const {
-        return cmp(value) == 0;
-    }
-
-    bool operator!=(const decimal12_t& value) const {
-        return cmp(value) != 0;
-    }
+    auto operator<=>(const decimal12_t& value) const { return cmp(value) <=> 0; }
 
     int32_t cmp(const decimal12_t& other) const {
         if (integer > other.integer) {
@@ -111,55 +73,58 @@ struct decimal12_t {
         char buf[128] = {'\0'};
 
         if (integer < 0 || fraction < 0) {
-            snprintf(buf, sizeof(buf), "-%lu.%09u",
-                     std::abs(integer), std::abs(fraction));
+            snprintf(buf, sizeof(buf), "-%" PRIu64 ".%09u", std::abs(integer), std::abs(fraction));
         } else {
-            snprintf(buf, sizeof(buf), "%lu.%09u",
-                     std::abs(integer), std::abs(fraction));
+            snprintf(buf, sizeof(buf), "%" PRIu64 ".%09u", std::abs(integer), std::abs(fraction));
         }
 
         return std::string(buf);
     }
 
-    OLAPStatus from_string(const std::string& str) {
+    Status from_string(const std::string& str) {
         integer = 0;
         fraction = 0;
         const char* value_string = str.c_str();
         const char* sign = strchr(value_string, '-');
 
-        if (sign != NULL) {
+        if (sign != nullptr) {
             if (sign != value_string) {
-                return OLAP_ERR_INPUT_PARAMETER_ERROR;
+                return Status::Error<ErrorCode::INVALID_ARGUMENT>(
+                        "decimal12_t::from_string meet invalid sign");
             } else {
                 ++value_string;
             }
         }
 
         const char* sepr = strchr(value_string, '.');
-        if ((sepr != NULL && sepr - value_string > MAX_INT_DIGITS_NUM)
-                || (sepr == NULL && strlen(value_string) > MAX_INT_DIGITS_NUM)) {
+        if ((sepr != nullptr && sepr - value_string > MAX_INT_DIGITS_NUM) ||
+            (sepr == nullptr && strlen(value_string) > MAX_INT_DIGITS_NUM)) {
             integer = 999999999999999999;
             fraction = 999999999;
         } else {
+            int32_t f = 0;
+            int64_t i = 0;
             if (sepr == value_string) {
-                sscanf(value_string, ".%9d", &fraction);
-                integer = 0;
+                int32_t f = 0;
+                sscanf(value_string, ".%9d", &f);
             } else {
-                sscanf(value_string, "%18ld.%9d", &integer, &fraction);
+                sscanf(value_string, "%18" PRId64 ".%9d", &i, &f);
             }
+            integer = i;
+            fraction = f;
 
-            int32_t frac_len = (NULL != sepr) ?
-                               MAX_FRAC_DIGITS_NUM - strlen(sepr + 1) : MAX_FRAC_DIGITS_NUM;
+            int32_t frac_len = (nullptr != sepr) ? MAX_FRAC_DIGITS_NUM - strlen(sepr + 1)
+                                                 : MAX_FRAC_DIGITS_NUM;
             frac_len = frac_len > 0 ? frac_len : 0;
             fraction *= g_power_table[frac_len];
         }
 
-        if (sign != NULL) {
+        if (sign != nullptr) {
             fraction = -fraction;
             integer = -integer;
         }
 
-        return OLAP_SUCCESS;
+        return Status::OK();
     }
 
     static const int32_t FRAC_RATIO = 1000000000;
@@ -170,8 +135,11 @@ struct decimal12_t {
     int32_t fraction;
 } __attribute__((packed));
 
+static_assert(std::is_trivial<decimal12_t>::value, "decimal12_t should be a POD type");
+
 inline std::ostream& operator<<(std::ostream& os, const decimal12_t& val) {
+    os << val.to_string();
     return os;
 }
 
-}
+} // namespace doris

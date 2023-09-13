@@ -15,8 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_SRC_COMMON_UTIL_DEBUG_COUNTERS_H
-#define DORIS_BE_SRC_COMMON_UTIL_DEBUG_COUNTERS_H
+#pragma once
 
 #include "util/runtime_profile.h"
 
@@ -43,19 +42,16 @@ public:
 #if ENABLE_DEBUG_COUNTERS
 
 #define DEBUG_SCOPED_TIMER(counter_name) \
-  COUNTER_SCOPED_TIMER(DebugRuntimeProfile::profile().AddCounter(counter_name, \
-    TUnit::CPU_TICKS))
+    COUNTER_SCOPED_TIMER(DebugRuntimeProfile::profile().AddCounter(counter_name, TUnit::CPU_TICKS))
 
 #define DEBUG_COUNTER_UPDATE(counter_name, v) \
-  COUNTER_UPDATE(DebugRuntimeProfile::profile().AddCounter(counter_name, \
-    TUnit::UNIT), v)
+    COUNTER_UPDATE(DebugRuntimeProfile::profile().AddCounter(counter_name, TUnit::UNIT), v)
 
 #define DEBUG_COUNTER_SET(counter_name, v) \
-  COUNTER_SET(DebugRuntimeProfile::profile().AddCounter(counter_name, \
-    TUnit::UNIT), v)
+    COUNTER_SET(DebugRuntimeProfile::profile().AddCounter(counter_name, TUnit::UNIT), v)
 
 #define PRETTY_PRINT_DEBUG_COUNTERS(ostream_ptr) \
-  DebugRuntimeProfile::profile().PrettyPrint(ostream_ptr)
+    DebugRuntimeProfile::profile().PrettyPrint(ostream_ptr)
 
 #else
 
@@ -66,6 +62,4 @@ public:
 
 #endif // ENABLE_DEBUG_COUNTERS
 
-}
-
-#endif // DORIS_BE_SRC_COMMON_UTIL_DEBUG_COUNTERS_H
+} // namespace doris

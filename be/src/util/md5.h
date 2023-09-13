@@ -17,9 +17,10 @@
 
 #pragma once
 
-#include <string>
-
 #include <openssl/md5.h>
+#include <stddef.h>
+
+#include <string>
 
 namespace doris {
 
@@ -30,12 +31,11 @@ public:
     void update(const void* data, size_t length);
     void digest();
 
-    const std::string& hex() const {
-        return _hex;
-    }
+    const std::string& hex() const { return _hex; }
+
 private:
     MD5_CTX _md5_ctx;
     std::string _hex;
 };
 
-}
+} // namespace doris

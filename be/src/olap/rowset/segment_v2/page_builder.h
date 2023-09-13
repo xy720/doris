@@ -18,6 +18,7 @@
 #pragma once
 
 #include <stdint.h>
+
 #include <vector>
 
 #include "common/status.h"
@@ -37,9 +38,9 @@ namespace segment_v2 {
 // 5. Bitmap Index Page: store bitmap index of data
 class PageBuilder {
 public:
-    PageBuilder() { }
+    PageBuilder() {}
 
-    virtual ~PageBuilder() { }
+    virtual ~PageBuilder() {}
 
     // Used by column writer to determine whether the current page is full.
     // Column writer depends on the result to decide whether to flush current page.
@@ -48,9 +49,13 @@ public:
     // Add a sequence of values to the page.
     // The number of values actually added will be returned through count, which may be less
     // than requested if the page is full.
-    //
+
+    // check page if full before truly add, return ok when page is full so that column write
+    // will switch to next page
     // vals size should be decided according to the page build type
-    virtual doris::Status add(const uint8_t* vals, size_t* count) = 0;
+    // TODO make sure vals is naturally-aligned to its type so that impls can use aligned load
+    // instead of memcpy to copy values.
+    virtual Status add(const uint8_t* vals, size_t* count) = 0;
 
     // Finish building the current page, return the encoded data.
     // This api should be followed by reset() before reusing the builder
@@ -71,6 +76,16 @@ public:
 
     // Return the total bytes of pageBuilder that have been added to the page.
     virtual uint64_t size() const = 0;
+
+    // Return the first value in this page.
+    // This method could only be called between finish() and reset().
+    // Status::Error<ENTRY_NOT_FOUND> if no values have been added.
+    virtual Status get_first_value(void* value) const = 0;
+
+    // Return the last value in this page.
+    // This method could only be called between finish() and reset().
+    // Status::Error<ENTRY_NOT_FOUND> if no values have been added.
+    virtual Status get_last_value(void* value) const = 0;
 
 private:
     DISALLOW_COPY_AND_ASSIGN(PageBuilder);

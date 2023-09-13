@@ -15,15 +15,18 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include <gtest/gtest.h>
+#include "runtime/external_scan_context_mgr.h"
+
+#include <gtest/gtest-message.h>
+#include <gtest/gtest-test-part.h>
+
 #include <memory>
 
-#include "common/config.h"
 #include "common/status.h"
-#include "runtime/external_scan_context_mgr.h"
+#include "gtest/gtest_pred_impl.h"
+#include "runtime/exec_env.h"
 #include "runtime/fragment_mgr.h"
 #include "runtime/result_queue_mgr.h"
-#include "runtime/thread_resource_mgr.h"
 
 namespace doris {
 
@@ -31,18 +34,16 @@ class ExternalScanContextMgrTest : public testing::Test {
 public:
     ExternalScanContextMgrTest() {
         FragmentMgr* fragment_mgr = new FragmentMgr(&_exec_env);
-        ThreadResourceMgr* thread_mgr = new ThreadResourceMgr();
-        ResultQueueMgr* result_queue_mgr = new  ResultQueueMgr();
+        ResultQueueMgr* result_queue_mgr = new ResultQueueMgr();
         _exec_env._fragment_mgr = fragment_mgr;
-        _exec_env._thread_mgr = thread_mgr;
         _exec_env._result_queue_mgr = result_queue_mgr;
     }
-    virtual ~ExternalScanContextMgrTest() {
-    }
+    ~ExternalScanContextMgrTest() = default;
 
 protected:
-    virtual void SetUp() {
-    }
+    void SetUp() override { _exec_env.set_ready(); }
+    void TearDown() override { _exec_env.destroy(); }
+
 private:
     ExecEnv _exec_env;
 };
@@ -50,66 +51,48 @@ private:
 TEST_F(ExternalScanContextMgrTest, create_normal) {
     std::shared_ptr<ScanContext> context;
     ExternalScanContextMgr context_mgr(&_exec_env);
-    context_mgr._is_stop = true;
     Status st = context_mgr.create_scan_context(&context);
-    ASSERT_TRUE(st.ok());
-    ASSERT_TRUE(context != nullptr);
+    EXPECT_TRUE(st.ok());
+    EXPECT_TRUE(context != nullptr);
 }
 
 TEST_F(ExternalScanContextMgrTest, get_normal) {
     std::shared_ptr<ScanContext> context;
     ExternalScanContextMgr context_mgr(&_exec_env);
-    context_mgr._is_stop = true;
     Status st = context_mgr.create_scan_context(&context);
-    ASSERT_TRUE(st.ok());
-    ASSERT_TRUE(context != nullptr);
+    EXPECT_TRUE(st.ok());
+    EXPECT_TRUE(context != nullptr);
 
     std::string context_id = context->context_id;
     std::shared_ptr<ScanContext> result;
     st = context_mgr.get_scan_context(context_id, &result);
-    ASSERT_TRUE(st.ok());
-    ASSERT_TRUE(context != nullptr);
+    EXPECT_TRUE(st.ok());
+    EXPECT_TRUE(context != nullptr);
 }
 
 TEST_F(ExternalScanContextMgrTest, get_abnormal) {
     std::string context_id = "not_exist";
     std::shared_ptr<ScanContext> result;
     ExternalScanContextMgr context_mgr(&_exec_env);
-    context_mgr._is_stop = true;
     Status st = context_mgr.get_scan_context(context_id, &result);
-    ASSERT_TRUE(!st.ok());
-    ASSERT_TRUE(result == nullptr);
+    EXPECT_TRUE(!st.ok());
+    EXPECT_TRUE(result == nullptr);
 }
 
 TEST_F(ExternalScanContextMgrTest, clear_context) {
     std::shared_ptr<ScanContext> context;
     ExternalScanContextMgr context_mgr(&_exec_env);
-    context_mgr._is_stop = true;
     Status st = context_mgr.create_scan_context(&context);
-    ASSERT_TRUE(st.ok());
-    ASSERT_TRUE(context != nullptr);
-    
+    EXPECT_TRUE(st.ok());
+    EXPECT_TRUE(context != nullptr);
+
     std::string context_id = context->context_id;
     st = context_mgr.clear_scan_context(context_id);
-    ASSERT_TRUE(st.ok());
+    EXPECT_TRUE(st.ok());
 
     std::shared_ptr<ScanContext> result;
     st = context_mgr.get_scan_context(context_id, &result);
-    ASSERT_TRUE(!st.ok());
-    ASSERT_TRUE(result == nullptr);
+    EXPECT_TRUE(!st.ok());
+    EXPECT_TRUE(result == nullptr);
 }
-}
-
-int main(int argc, char** argv) {
-    std::string conffile = std::string(getenv("DORIS_HOME")) + "/conf/be.conf";
-    if (!doris::config::init(conffile.c_str(), false)) {
-        fprintf(stderr, "error read config file. \n");
-        return -1;
-    }
-
-    doris::config::scan_context_gc_interval_min = 1;
-    // doris::init_glog("be-test");
-    ::testing::InitGoogleTest(&argc, argv);
-    doris::CpuInfo::init();
-    return RUN_ALL_TESTS();
-}
+} // namespace doris

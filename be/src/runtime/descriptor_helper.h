@@ -17,10 +17,13 @@
 
 #pragma once
 
+#include <gen_cpp/Descriptors_types.h>
+#include <gen_cpp/Types_types.h>
+
 #include <vector>
 
-#include "gen_cpp/Descriptors_types.h"
-#include "gen_cpp/Types_types.h"
+#include "runtime/define_primitive_type.h"
+#include "runtime/primitive_type.h"
 
 namespace doris {
 
@@ -31,14 +34,13 @@ public:
 
     void add_slots(const std::vector<TSlotDescriptor>& slots) {
         _desc_tbl.__isset.slotDescriptors = true;
-        _desc_tbl.slotDescriptors.insert(
-            _desc_tbl.slotDescriptors.end(), slots.begin(), slots.end());
+        _desc_tbl.slotDescriptors.insert(_desc_tbl.slotDescriptors.end(), slots.begin(),
+                                         slots.end());
     }
-    void add_tuple(const TTupleDescriptor& tuple) {
-        _desc_tbl.tupleDescriptors.push_back(tuple);
-    }
+    void add_tuple(const TTupleDescriptor& tuple) { _desc_tbl.tupleDescriptors.push_back(tuple); }
 
     TDescriptorTable desc_tbl() { return _desc_tbl; }
+
 private:
     TSlotId _next_slot_id = 0;
     TTupleId _next_tuple_id = 0;
@@ -65,15 +67,15 @@ public:
         _slot_desc.slotType = get_common_type(to_thrift(type));
         return *this;
     }
+    TSlotDescriptorBuilder& decimal_type(int precision, int scale) {
+        _slot_desc.slotType = get_common_type(to_thrift(TYPE_DECIMALV2));
+        _slot_desc.slotType.types[0].scalar_type.__set_precision(precision);
+        _slot_desc.slotType.types[0].scalar_type.__set_scale(scale);
+        return *this;
+    }
     TSlotDescriptorBuilder& string_type(int len) {
         _slot_desc.slotType = get_common_type(to_thrift(TYPE_VARCHAR));
         _slot_desc.slotType.types[0].scalar_type.__set_len(len);
-        return *this;
-    }
-    TSlotDescriptorBuilder& decimal_type(int precision, int scale) {
-        _slot_desc.slotType = get_common_type(to_thrift(TYPE_DECIMAL));
-        _slot_desc.slotType.types[0].scalar_type.__set_precision(precision);
-        _slot_desc.slotType.types[0].scalar_type.__set_scale(scale);
         return *this;
     }
     TSlotDescriptorBuilder& nullable(bool nullable) {
@@ -92,9 +94,8 @@ public:
         _slot_desc.columnPos = column_pos;
         return *this;
     }
-    TSlotDescriptor build() {
-        return _slot_desc;
-    }
+    TSlotDescriptor build() { return _slot_desc; }
+
 private:
     friend TTupleDescriptorBuilder;
     TSlotDescriptor _slot_desc;
@@ -116,19 +117,12 @@ public:
                 num_nullables++;
             }
         }
-        int null_byetes = (num_nullables + 7) / 8;
-        int offset = null_byetes;
+        int null_bytes = (num_nullables + 7) / 8;
         int null_offset = 0;
         for (int i = 0; i < _slot_descs.size(); ++i) {
             auto& slot_desc = _slot_descs[i];
-            int size = get_slot_size(
-                thrift_to_type(slot_desc.slotType.types[0].scalar_type.type));
-            int align = (size > 16) ? 16 : size;
-            offset = ((offset + align - 1) / align) * align;
             slot_desc.id = tb->next_slot_id();
             slot_desc.parent = _tuple_id;
-            slot_desc.byteOffset = offset;
-            offset += size;
             if (slot_desc.nullIndicatorByte >= 0) {
                 slot_desc.nullIndicatorBit = null_offset % 8;
                 slot_desc.nullIndicatorByte = null_offset / 8;
@@ -141,17 +135,19 @@ public:
         }
 
         _tuple_desc.id = _tuple_id;
-        _tuple_desc.byteSize = offset;
-        _tuple_desc.numNullBytes = null_byetes;
+        // Useless not set it.
+        _tuple_desc.byteSize = 0;
+        _tuple_desc.numNullBytes = null_bytes;
         _tuple_desc.numNullSlots = _slot_descs.size();
 
         tb->add_slots(_slot_descs);
         tb->add_tuple(_tuple_desc);
     }
+
 private:
     TTupleId _tuple_id;
     std::vector<TSlotDescriptor> _slot_descs;
     TTupleDescriptor _tuple_desc;
 };
 
-}
+} // namespace doris

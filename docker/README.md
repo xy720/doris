@@ -25,27 +25,27 @@ under the License.
 
     ```console
     $ cd /to/your/workspace/
-    $ git clone https://github.com/apache/incubator-doris.git
+    $ git clone https://github.com/apache/doris.git
+    $ cd doris
+    $ git submodule update --init --recursive
     ```
 
-1. Copy Dockerfile
+    You can remove the `.git` dir in `doris/` to make the dir size smaller.
+    So that the following generated docker image can be smaller.
+
+2. Copy Dockerfile
 
     ```console
     $ cd /to/your/workspace/
-    $ cp incubator-doris/docker/Dockerfile ./
+    $ cp doris/docker/Dockerfile ./
     ```
-
-1. Download Oracle JDK(1.8+) RPM
-
-    You need to download the Oracle JDK RPM, which can be found [here][1]. And
-    rename it to `jdk.rpm`.
 
 After preparation, your workspace should like this:
 
 ```
 .
 ├── Dockerfile
-├── incubator-doris
+├── doris
 │   ├── be
 │   ├── bin
 │   ├── build.sh
@@ -56,7 +56,6 @@ After preparation, your workspace should like this:
 │   ├── env.sh
 │   ├── fe
 │   ├── ...
-├── jdk.rpm
 ```
 
 ### Build docker image
@@ -66,8 +65,7 @@ $ cd /to/your/workspace/
 $ docker build -t doris:v1.0  .
 ```
 
-> `doris` is docker image repository name and `v1.0` is tag name, you can change
-> them to whatever you like.
+> `doris` is docker image repository name and `v1.0` is tag name, you can change them to whatever you like.
 
 ### Use docker image
 
@@ -76,14 +74,29 @@ to download it first and map it to the container. (You can just use the one you
 used to build this image before)
 
 ```console
-$ docker run -it -v /your/local/path/incubator-doris/:/root/incubator-doris/ doris:v1.0
+$ docker run -it -v /your/local/path/doris/:/root/doris/ doris:v1.0
+$ docker run -it -v /your/local/.m2:/root/.m2 -v /your/local/doris-DORIS-x.x.x-release/:/root/doris-DORIS-x.x.x-release/ doris:v1.0
 ```
 
 Then you can build source code inside the container.
 
 ```console
-$ cd /root/incubator-doris/
+$ cd /root/doris/
 $ sh build.sh
 ```
 
-[1]: https://www.oracle.com/technetwork/java/javase/downloads/index.html
+**NOTICE**
+
+The default JDK version is openjdk 11, if you want to use openjdk 8, you can run the command:
+
+```console
+$ alternatives --set java java-1.8.0-openjdk.x86_64
+$ alternatives --set javac java-1.8.0-openjdk.x86_64
+$ export JAVA_HOME=/usr/lib/jvm/java-1.8.0
+```
+
+The version of jdk you used to run FE must be the same version you used to compile FE.
+
+### Latest update time
+
+2022-1-23

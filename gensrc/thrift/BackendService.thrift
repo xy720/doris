@@ -20,6 +20,7 @@ namespace java org.apache.doris.thrift
 
 include "Status.thrift"
 include "Types.thrift"
+include "PlanNodes.thrift"
 include "AgentService.thrift"
 include "PaloInternalService.thrift"
 include "DorisExternalService.thrift"
@@ -30,12 +31,16 @@ struct TExportTaskRequest {
 
 struct TTabletStat {
     1: required i64 tablet_id
+    // local data size
     2: optional i64 data_size
     3: optional i64 row_num
+    4: optional i64 version_count
+    5: optional i64 remote_data_size
 }
 
 struct TTabletStatResult {
     1: required map<i64, TTabletStat> tablets_stats
+    2: optional list<TTabletStat> tablet_stat_list
 }
 
 struct TKafkaLoadInfo {
@@ -59,6 +64,9 @@ struct TRoutineLoadTask {
     11: optional i64 max_batch_size
     12: optional TKafkaLoadInfo kafka_load_info
     13: optional PaloInternalService.TExecPlanFragmentParams params
+    14: optional PlanNodes.TFileFormatType format
+    15: optional PaloInternalService.TPipelineFragmentParams pipeline_params
+    16: optional bool is_multi_table
 }
 
 struct TKafkaMetaProxyRequest {
@@ -78,6 +86,58 @@ struct TProxyResult {
     2: optional TKafkaMetaProxyResult kafka_meta_result;
 }
 
+struct TStreamLoadRecord {
+    1: optional string cluster
+    2: required string user
+    3: required string passwd
+    4: required string db
+    5: required string tbl
+    6: optional string user_ip
+    7: required string label
+    8: required string status
+    9: required string message
+    10: optional string url
+    11: optional i64 auth_code;
+    12: required i64 total_rows
+    13: required i64 loaded_rows
+    14: required i64 filtered_rows
+    15: required i64 unselected_rows
+    16: required i64 load_bytes
+    17: required i64 start_time
+    18: required i64 finish_time
+    19: optional string comment
+}
+
+struct TStreamLoadRecordResult {
+    1: required map<string, TStreamLoadRecord> stream_load_record
+}
+
+struct TDiskTrashInfo {
+    1: required string root_path
+    2: required string state
+    3: required i64 trash_used_capacity
+}
+
+struct TCheckStorageFormatResult {
+    1: optional list<i64> v1_tablets;
+    2: optional list<i64> v2_tablets;
+}
+
+struct TIngestBinlogRequest {
+    1: optional i64 txn_id;
+    2: optional i64 remote_tablet_id;
+    3: optional i64 binlog_version;
+    4: optional string remote_host;
+    5: optional string remote_port;
+    6: optional i64 partition_id;
+    7: optional i64 local_tablet_id;
+    8: optional Types.TUniqueId load_id;
+}
+
+struct TIngestBinlogResult {
+    1: optional Status.TStatus status;
+}
+
 service BackendService {
     // Called by coord to start asynchronous execution of plan fragment in backend.
     // Returns as soon as all incoming data streams have been set up.
@@ -94,10 +154,6 @@ service BackendService {
     PaloInternalService.TTransmitDataResult transmit_data(
         1:PaloInternalService.TTransmitDataParams params);
 
-    // Coordinator Fetch Data From Root fragment
-    PaloInternalService.TFetchDataResult fetch_data(
-        1:PaloInternalService.TFetchDataParams params);
-
     AgentService.TAgentResult submit_tasks(1:list<AgentService.TAgentTaskRequest> tasks);
 
     AgentService.TAgentResult make_snapshot(1:AgentService.TSnapshotRequest snapshot_request);
@@ -106,13 +162,6 @@ service BackendService {
 
     AgentService.TAgentResult publish_cluster_state(1:AgentService.TAgentPublishRequest request);
 
-    AgentService.TAgentResult submit_etl_task(1:AgentService.TMiniLoadEtlTaskRequest request);
-
-    AgentService.TMiniLoadEtlStatusResult get_etl_status(
-            1:AgentService.TMiniLoadEtlStatusRequest request);
-
-    AgentService.TAgentResult delete_etl_files(1:AgentService.TDeleteEtlFilesRequest request);
-
     Status.TStatus submit_export_task(1:TExportTaskRequest request);
 
     PaloInternalService.TExportStatusResult get_export_status(1:Types.TUniqueId task_id);
@@ -120,6 +169,10 @@ service BackendService {
     Status.TStatus erase_export_task(1:Types.TUniqueId task_id);
 
     TTabletStatResult get_tablet_stat();
+
+    i64 get_trash_used_capacity();
+
+    list<TDiskTrashInfo> get_disk_trash_used_capacity();
 
     Status.TStatus submit_routine_load_task(1:list<TRoutineLoadTask> tasks);
 
@@ -132,4 +185,12 @@ service BackendService {
     // release the context resource associated with the context_id
     DorisExternalService.TScanCloseResult close_scanner(1: DorisExternalService.TScanCloseParams params);
 
+    TStreamLoadRecordResult get_stream_load_record(1: i64 last_stream_record_time);
+
+    oneway void clean_trash();
+
+    // check tablet rowset type
+    TCheckStorageFormatResult check_storage_format();
+
+    TIngestBinlogResult ingest_binlog(1: TIngestBinlogRequest ingest_binlog_request);
 }

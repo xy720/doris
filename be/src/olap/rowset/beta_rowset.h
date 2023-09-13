@@ -18,60 +18,105 @@
 #ifndef DORIS_SRC_OLAP_ROWSET_BETA_ROWSET_H_
 #define DORIS_SRC_OLAP_ROWSET_BETA_ROWSET_H_
 
-#include "olap/olap_common.h"
-#include "olap/olap_define.h"
+#include <stddef.h>
+
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include "common/status.h"
 #include "olap/rowset/rowset.h"
 #include "olap/rowset/rowset_meta.h"
+#include "olap/rowset/rowset_reader.h"
 #include "olap/rowset/segment_v2/segment.h"
-#include "olap/data_dir.h"
+#include "olap/tablet_schema.h"
 
 namespace doris {
 
 class BetaRowset;
+
+namespace io {
+class RemoteFileSystem;
+} // namespace io
+struct RowsetId;
+
 using BetaRowsetSharedPtr = std::shared_ptr<BetaRowset>;
-class BetaRowsetReader;
-class RowsetFactory;
 
-class BetaRowset : public Rowset {
+class BetaRowset final : public Rowset {
 public:
-    virtual ~BetaRowset() {}
+    virtual ~BetaRowset();
 
-    static std::string segment_file_path(const std::string& segment_dir, const RowsetId& rowset_id, int segment_id);
+    Status create_reader(RowsetReaderSharedPtr* result) override;
 
-    OLAPStatus create_reader(RowsetReaderSharedPtr* result) override;
+    std::string segment_file_path(int segment_id);
 
-    OLAPStatus split_range(const RowCursor& start_key,
-                           const RowCursor& end_key,
-                           uint64_t request_block_row_count,
-                           std::vector<OlapTuple>* ranges) override;
+    static std::string segment_file_path(const std::string& rowset_dir, const RowsetId& rowset_id,
+                                         int segment_id);
 
-    OLAPStatus remove() override;
+    // Return the absolute path of local segcompacted segment file
+    static std::string local_segment_path_segcompacted(const std::string& tablet_path,
+                                                       const RowsetId& rowset_id, int64_t begin,
+                                                       int64_t end);
 
-    OLAPStatus link_files_to(const std::string& dir, RowsetId new_rowset_id) override;
+    // Return the relative path of remote segment file
+    static std::string remote_segment_path(int64_t tablet_id, const RowsetId& rowset_id,
+                                           int segment_id);
 
-    OLAPStatus copy_files_to(const std::string& dir) override;
+    // Return the relative path of remote segment file
+    static std::string remote_segment_path(int64_t tablet_id, const std::string& rowset_id,
+                                           int segment_id);
+
+    Status remove() override;
+
+    Status link_files_to(const std::string& dir, RowsetId new_rowset_id,
+                         size_t new_rowset_start_seg_id = 0,
+                         std::set<int32_t>* without_index_uids = nullptr) override;
+
+    Status copy_files_to(const std::string& dir, const RowsetId& new_rowset_id) override;
+
+    Status upload_to(io::RemoteFileSystem* dest_fs, const RowsetId& new_rowset_id) override;
 
     // only applicable to alpha rowset, no op here
-    OLAPStatus remove_old_files(std::vector<std::string>* files_to_remove) override {
-        return OLAP_SUCCESS;
-    };
+    Status remove_old_files(std::vector<std::string>* files_to_remove) override {
+        return Status::OK();
+    }
 
     bool check_path(const std::string& path) override;
 
+    bool check_file_exist() override;
+
+    Status load_segments(std::vector<segment_v2::SegmentSharedPtr>* segments);
+
+    Status load_segments(int64_t seg_id_begin, int64_t seg_id_end,
+                         std::vector<segment_v2::SegmentSharedPtr>* segments);
+
+    Status load_segment(int64_t seg_id, segment_v2::SegmentSharedPtr* segment);
+
+    Status get_segments_size(std::vector<size_t>* segments_size);
+
+    [[nodiscard]] virtual Status add_to_binlog() override;
+
 protected:
-    friend class RowsetFactory;
+    BetaRowset(const TabletSchemaSPtr& schema, const std::string& tablet_path,
+               const RowsetMetaSharedPtr& rowset_meta);
 
-    BetaRowset(const TabletSchema* schema,
-               std::string rowset_path,
-               RowsetMetaSharedPtr rowset_meta);
+    // init segment groups
+    Status init() override;
 
-    OLAPStatus init() override;
+    Status do_load(bool use_cache) override;
 
-    OLAPStatus do_load_once(bool use_cache) override ;
+    void do_close() override;
+
+    bool check_current_rowset_segment() override;
 
 private:
+    friend class RowsetFactory;
     friend class BetaRowsetReader;
-    std::vector<segment_v2::SegmentSharedPtr> _segments;
+
+    // Remote format: {remote_fs_root}/data/{tablet_id}
+    // Local format: {local_storage_root}/data/{shard_id}/{tablet_id}/{schema_hash}
+    std::string _rowset_dir;
 };
 
 } // namespace doris

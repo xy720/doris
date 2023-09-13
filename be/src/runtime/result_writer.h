@@ -15,43 +15,46 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_RUNTIME_RESULT_WRITER_H
-#define  DORIS_BE_RUNTIME_RESULT_WRITER_H
+#pragma once
 
-#include <vector>
+#include <stdint.h>
+
+#include <string>
 
 #include "common/status.h"
 
 namespace doris {
 
-class TupleRow;
-class RowBatch;
-class ExprContext;
-class MysqlRowBuffer;
-class BufferControlBlock;
+namespace vectorized {
+class Block;
+}
 class RuntimeState;
 
-//convert the row batch to mysql protol row
+// abstract class of the result writer
 class ResultWriter {
 public:
-    ResultWriter(BufferControlBlock* sinker, const std::vector<ExprContext*>& output_expr_ctxs);
-    ~ResultWriter();
+    ResultWriter() = default;
+    virtual ~ResultWriter() = default;
 
-    Status init(RuntimeState* state);
-    // convert one row batch to mysql result and
-    // append this batch to the result sink
-    Status append_row_batch(RowBatch* batch);
+    virtual Status init(RuntimeState* state) = 0;
 
-private:
-    // convert one tuple row
-    Status add_one_row(TupleRow* row);
+    virtual Status close() = 0;
 
-    // The expressions that are run to create tuples to be written to hbase.
-    BufferControlBlock* _sinker;
-    const std::vector<ExprContext*>& _output_expr_ctxs;
-    MysqlRowBuffer* _row_buffer;
+    [[nodiscard]] virtual int64_t get_written_rows() const { return _written_rows; }
+
+    [[nodiscard]] bool output_object_data() const { return _output_object_data; }
+
+    virtual Status append_block(vectorized::Block& block) = 0;
+
+    virtual bool can_sink() { return true; }
+
+    void set_output_object_data(bool output_object_data) {
+        _output_object_data = output_object_data;
+    }
+
+protected:
+    int64_t _written_rows = 0; // number of rows written
+    bool _output_object_data = false;
 };
 
-}
-
-#endif
+} // namespace doris

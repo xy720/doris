@@ -96,6 +96,8 @@ import java.nio.charset.StandardCharsets;
  *     "LoadBytes": 0,
  *     "LoadTimeMs": 0
  * }
+ * 3 when the response statusCode is 200, that doesn't mean your stream load is ok, there may be still
+ *   some stream problem unless you see the output with 'ok' message
  */
 public class DorisStreamLoad {
     private final static String DORIS_HOST = "xxx.com";
@@ -137,6 +139,8 @@ public class DorisStreamLoad {
                     loadResult = EntityUtils.toString(response.getEntity());
                 }
                 final int statusCode = response.getStatusLine().getStatusCode();
+                // statusCode 200 just indicates that doris be service is ok, not stream load
+                // you should see the output content to find whether stream load is success
                 if (statusCode != 200) {
                     throw new IOException(
                             String.format("Stream load failed, statusCode=%s load result=%s", statusCode, loadResult));
@@ -166,7 +170,7 @@ public class DorisStreamLoad {
         }
 
         //in doris 0.9 version, you need to comment this line
-        //refer to https://github.com/apache/incubator-doris/issues/783
+        //refer to https://github.com/apache/doris/issues/783
         stringBuilder.deleteCharAt(stringBuilder.length() - 1);
 
         String loadData = stringBuilder.toString();

@@ -15,46 +15,49 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef  DORIS_BE_SRC_HTTP_RESTORE_TABLET_ACTION_H
-#define  DORIS_BE_SRC_HTTP_RESTORE_TABLET_ACTION_H
+#pragma once
 
-#include <boost/scoped_ptr.hpp>
+#include <stdint.h>
+
 #include <map>
 #include <mutex>
+#include <string>
 
-#include "http/http_handler.h"
-#include "gen_cpp/AgentService_types.h"
 #include "common/status.h"
+#include "http/http_handler_with_auth.h"
 
 namespace doris {
 
 class ExecEnv;
+class HttpRequest;
 
-class RestoreTabletAction : public HttpHandler {
+class RestoreTabletAction : public HttpHandlerWithAuth {
 public:
-    RestoreTabletAction(ExecEnv* exec_env);
+    RestoreTabletAction(ExecEnv* exec_env, TPrivilegeHier::type hier, TPrivilegeType::type type);
 
-    virtual ~RestoreTabletAction() { }
+    ~RestoreTabletAction() override = default;
 
-    void handle(HttpRequest *req) override;
+    void handle(HttpRequest* req) override;
+
 private:
-    Status _handle(HttpRequest *req);
+    Status _handle(HttpRequest* req);
 
     Status _restore(const std::string& key, int64_t tablet_id, int32_t schema_hash);
 
-    Status _reload_tablet(const std::string& key, const std::string& shard_path, int64_t tablet_id, int32_t schema_hash);
+    Status _reload_tablet(const std::string& key, const std::string& shard_path, int64_t tablet_id,
+                          int32_t schema_hash);
 
-    bool _get_latest_tablet_path_from_trash(int64_t tablet_id, int32_t schema_hash, std::string* path);
+    bool _get_latest_tablet_path_from_trash(int64_t tablet_id, int32_t schema_hash,
+                                            std::string* path);
 
-    bool _get_timestamp_and_count_from_schema_hash_path(
-            const std::string& time_label, uint64_t* timestamp, uint64_t* counter);
-    
+    bool _get_timestamp_and_count_from_schema_hash_path(const std::string& time_label,
+                                                        uint64_t* timestamp, uint64_t* counter);
+
     void _clear_key(const std::string& key);
 
     Status _create_hard_link_recursive(const std::string& src, const std::string& dst);
 
 private:
-    ExecEnv* _exec_env;
     std::mutex _tablet_restore_lock;
     // store all current restoring tablet_id + schema_hash
     // key: tablet_id + schema_hash
@@ -63,4 +66,3 @@ private:
 }; // end class RestoreTabletAction
 
 } // end namespace doris
-#endif // DORIS_BE_SRC_HTTP_RESTORE_TABLET_ACTION_H
