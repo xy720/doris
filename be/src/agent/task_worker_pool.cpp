@@ -90,10 +90,13 @@ TaskWorkerPool::TaskWorkerPool(const TaskWorkerType task_worker_type, ExecEnv* e
     _metric_entity = DorisMetrics::instance()->metric_registry()->register_entity(
             task_worker_type_name, {{"type", task_worker_type_name}});
     REGISTER_ENTITY_HOOK_METRIC(_metric_entity, this, agent_task_queue_size, [this]() -> uint64_t {
+        MonotonicStopWatch hold_watch;
         if (_thread_model == ThreadModel::SINGLE_THREAD) {
             return _is_doing_work.load();
         } else {
             std::lock_guard<std::mutex> lock(_worker_thread_lock);
+            hold_watch.start();
+            LOG(INFO) << "metric::Lock held for " << hold_watch.elapsed_time() << "ms";
             return _tasks.size();
         }
     });
@@ -240,11 +243,14 @@ void TaskWorkerPool::submit_task(const TAgentTaskRequest& task) {
         // Set the receiving time of task so that we can determine whether it is timed out later
         (const_cast<TAgentTaskRequest&>(task)).__set_recv_time(time(nullptr));
         size_t task_count_in_queue = 0;
+        MonotonicStopWatch hold_watch;
         {
             std::lock_guard<std::mutex> worker_thread_lock(_worker_thread_lock);
+            hold_watch.start();
             _tasks.push_back(task);
             task_count_in_queue = _tasks.size();
             _worker_thread_condition_variable.notify_one();
+            LOG(INFO) << "submit_task::Lock held for " << hold_watch.elapsed_time() << "ms";
         }
         LOG_INFO("successfully submit task")
                 .tag("type", type_str)
@@ -283,23 +289,51 @@ void TaskWorkerPool::_remove_task_info(const TTaskType::type task_type, int64_t 
 }
 
 void TaskWorkerPool::_finish_task(const TFinishTaskRequest& finish_task_request) {
+    MonotonicStopWatch watch;
+    watch.start();
+
+    LOG(INFO) << "Start finishing task. type=" << finish_task_request.task_type
+              << ", signature=" << finish_task_request.signature;
+
     // Return result to FE
     TMasterResult result;
     uint32_t try_time = 0;
 
     while (try_time < TASK_FINISH_MAX_RETRY) {
         DorisMetrics::instance()->finish_task_requests_total->increment(1);
+
+        LOG(INFO) << "Attempting to finish task with FE, attempt=" << (try_time + 1)
+                  << "/" << TASK_FINISH_MAX_RETRY
+                  << ", type=" << finish_task_request.task_type
+                  << ", signature=" << finish_task_request.signature;
+
         Status client_status = _master_client->finish_task(finish_task_request, &result);
 
         if (client_status.ok()) {
+            LOG(INFO) << "Successfully finished task with FE. time_cost=" << watch.elapsed_time()
+                      << "ms, type=" << finish_task_request.task_type
+                      << ", signature=" << finish_task_request.signature;
             break;
         } else {
             DorisMetrics::instance()->finish_task_requests_failed->increment(1);
             LOG_WARNING("failed to finish task")
+                    .tag("attempt", try_time + 1)
                     .tag("type", finish_task_request.task_type)
                     .tag("signature", finish_task_request.signature)
+                    .tag("time_cost_ms", watch.elapsed_time())
                     .error(result.status);
             try_time += 1;
+
+            if (try_time < TASK_FINISH_MAX_RETRY) {
+                LOG(INFO) << "Will retry finishing task after " << config::sleep_one_second
+                          << "s, type=" << finish_task_request.task_type
+                          << ", signature=" << finish_task_request.signature;
+            } else {
+                LOG(WARNING) << "Failed to finish task after " << TASK_FINISH_MAX_RETRY
+                             << " attempts, total_time=" << watch.elapsed_time()
+                             << "ms, type=" << finish_task_request.task_type
+                             << ", signature=" << finish_task_request.signature;
+            }
         }
         sleep(config::sleep_one_second);
     }
@@ -562,13 +596,19 @@ void PushTaskPool::_push_worker_thread_callback() {
         if (s_worker_count < push_worker_count_high_priority) {
             ++s_worker_count;
             priority = TPriority::HIGH;
+            LOG(INFO) << "Worker thread initialized with HIGH priority, worker_count=" << s_worker_count;
         }
     }
 
     while (_is_work) {
+        MonotonicStopWatch hold_watch;
+        MonotonicStopWatch watch;
+        watch.start();
         TAgentTaskRequest agent_task_req;
         {
             std::unique_lock<std::mutex> worker_thread_lock(_worker_thread_lock);
+            hold_watch.start();
+            LOG(INFO) << "Waiting for new task, priority=" << priority;
             _worker_thread_condition_variable.wait(
                     worker_thread_lock, [this]() { return !_is_work || !_tasks.empty(); });
             if (!_is_work) {
@@ -584,26 +624,39 @@ void PushTaskPool::_push_worker_thread_callback() {
                 if (it == _tasks.cend()) {
                     // there is no high priority task. notify other thread to handle normal task
                     _worker_thread_condition_variable.notify_all();
+                    LOG(INFO) << "No high priority task found, waiting for next task";
                     sleep(1);
                     continue;
                 }
                 agent_task_req = std::move(*it);
                 _tasks.erase(it);
+                LOG(INFO) << "Got high priority task after waiting for " << watch.elapsed_time() << "ms";
             } else {
                 agent_task_req = std::move(_tasks.front());
                 _tasks.pop_front();
+                LOG(INFO) << "Got normal priority task after waiting for " << watch.elapsed_time() << "ms";
             }
+            LOG(INFO) << "_push_worker_thread_callback:: Lock held for " << hold_watch.elapsed_time() << "ms";
         }
         TPushReq& push_req = agent_task_req.push_req;
 
-        LOG(INFO) << "get push task. signature=" << agent_task_req.signature
-                  << ", priority=" << priority << " push_type=" << push_req.push_type;
+        LOG(INFO) << "Start processing push task. signature=" << agent_task_req.signature
+                  << ", priority=" << priority << " push_type=" << push_req.push_type
+                << ", tablet_id=" << push_req.tablet_id;
         std::vector<TTabletInfo> tablet_infos;
 
+        watch.reset();
+        watch.start();
         EngineBatchLoadTask engine_task(push_req, &tablet_infos);
         auto status = _env->storage_engine()->execute_task(&engine_task);
+        int64_t execute_task_time = watch.elapsed_time();
 
+        LOG(INFO) << "Engine task execution completed. time_cost=" << execute_task_time
+                  << "ms, signature=" << agent_task_req.signature
+                  << ", tablet_id=" << push_req.tablet_id;
         // Return result to fe
+        watch.reset();
+        watch.start();
         TFinishTaskRequest finish_task_request;
         finish_task_request.__set_backend(_backend);
         finish_task_request.__set_task_type(agent_task_req.task_type);
@@ -616,7 +669,8 @@ void PushTaskPool::_push_worker_thread_callback() {
             LOG_INFO("successfully execute push task")
                     .tag("signature", agent_task_req.signature)
                     .tag("tablet_id", push_req.tablet_id)
-                    .tag("push_type", push_req.push_type);
+                    .tag("push_type", push_req.push_type)
+                    .tag("execution_time_ms", execute_task_time);
             ++_s_report_version;
             finish_task_request.__set_finish_tablet_infos(tablet_infos);
         } else {
@@ -624,6 +678,7 @@ void PushTaskPool::_push_worker_thread_callback() {
                     .tag("signature", agent_task_req.signature)
                     .tag("tablet_id", push_req.tablet_id)
                     .tag("push_type", push_req.push_type)
+                    .tag("execution_time_ms", execute_task_time)
                     .error(status);
         }
         finish_task_request.__set_task_status(status.to_thrift());
@@ -631,6 +686,10 @@ void PushTaskPool::_push_worker_thread_callback() {
 
         _finish_task(finish_task_request);
         _remove_task_info(agent_task_req.task_type, agent_task_req.signature);
+
+        LOG(INFO) << "Task completed. total_time=" << watch.elapsed_time()
+                  << "ms, signature=" << agent_task_req.signature
+                  << ", tablet_id=" << push_req.tablet_id;
     }
 }
 
