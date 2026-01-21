@@ -704,10 +704,6 @@ public abstract class BaseJdbcExecutor implements JdbcExecutor {
                 preparedStatement.setTimestamp(
                         parameterIndex, Timestamp.valueOf(column.getDateTime(rowIdx)));
                 break;
-            case TIMESTAMPTZ:
-                preparedStatement.setObject(
-                        parameterIndex, Timestamp.valueOf(column.getTimeStampTz(rowIdx)));
-                break;
             case CHAR:
             case VARCHAR:
             case STRING:
@@ -760,9 +756,6 @@ public abstract class BaseJdbcExecutor implements JdbcExecutor {
                 break;
             case DATETIMEV2:
                 preparedStatement.setNull(parameterIndex, Types.TIMESTAMP);
-                break;
-            case TIMESTAMPTZ:
-                preparedStatement.setNull(parameterIndex, Types.TIMESTAMP_WITH_TIMEZONE);
                 break;
             case CHAR:
             case VARCHAR:

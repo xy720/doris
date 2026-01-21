@@ -169,12 +169,6 @@ public class TrinoConnectorColumnValue implements ColumnValue {
     }
 
     @Override
-    public LocalDateTime getTimeStampTz() {
-        Object o = trinoType.getObjectValue(connectorSession, block, position);
-        return ((SqlTimestampWithTimeZone) o).toZonedDateTime().toLocalDateTime();
-    }
-
-    @Override
     public boolean isNull() {
         return block.isNull(position);
     }

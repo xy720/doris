@@ -195,7 +195,7 @@ public class PaimonUtil {
     }
 
     private static Type paimonPrimitiveTypeToDorisType(org.apache.paimon.types.DataType dataType,
-            boolean enableVarbinaryMapping, boolean enableTimestampTzMapping) {
+            boolean enableVarbinaryMapping) {
         int tsScale = 3; // default
         switch (dataType.getTypeRoot()) {
             case BOOLEAN:
@@ -256,27 +256,22 @@ public class PaimonUtil {
                         tsScale = 6;
                     }
                 }
-                if (enableTimestampTzMapping) {
-                    return ScalarType.createTimeStampTzType(tsScale);
-                }
                 return ScalarType.createDatetimeV2Type(tsScale);
             case ARRAY:
                 ArrayType arrayType = (ArrayType) dataType;
-                Type innerType = paimonPrimitiveTypeToDorisType(arrayType.getElementType(), enableVarbinaryMapping,
-                        enableTimestampTzMapping);
+                Type innerType = paimonPrimitiveTypeToDorisType(arrayType.getElementType(), enableVarbinaryMapping);
                 return org.apache.doris.catalog.ArrayType.create(innerType, true);
             case MAP:
                 MapType mapType = (MapType) dataType;
                 return new org.apache.doris.catalog.MapType(
-                        paimonTypeToDorisType(mapType.getKeyType(), enableVarbinaryMapping, enableTimestampTzMapping),
-                        paimonTypeToDorisType(mapType.getValueType(), enableVarbinaryMapping,
-                                enableTimestampTzMapping));
+                        paimonTypeToDorisType(mapType.getKeyType(), enableVarbinaryMapping),
+                        paimonTypeToDorisType(mapType.getValueType(), enableVarbinaryMapping));
             case ROW:
                 RowType rowType = (RowType) dataType;
                 List<DataField> fields = rowType.getFields();
                 return new org.apache.doris.catalog.StructType(fields.stream()
                         .map(field -> new org.apache.doris.catalog.StructField(field.name(),
-                                paimonTypeToDorisType(field.type(), enableVarbinaryMapping, enableTimestampTzMapping)))
+                                paimonTypeToDorisType(field.type(), enableVarbinaryMapping)))
                         .collect(Collectors.toCollection(ArrayList::new)));
             case TIME_WITHOUT_TIME_ZONE:
                 return Type.UNSUPPORTED;
@@ -286,9 +281,8 @@ public class PaimonUtil {
         }
     }
 
-    public static Type paimonTypeToDorisType(org.apache.paimon.types.DataType type, boolean enableVarbinaryMapping,
-            boolean enableTimestampTzMapping) {
-        return paimonPrimitiveTypeToDorisType(type, enableVarbinaryMapping, enableTimestampTzMapping);
+    public static Type paimonTypeToDorisType(org.apache.paimon.types.DataType type, boolean enableVarbinaryMapping) {
+        return paimonPrimitiveTypeToDorisType(type, enableVarbinaryMapping);
     }
 
     public static void updatePaimonColumnUniqueId(Column column, DataType dataType) {
@@ -322,8 +316,7 @@ public class PaimonUtil {
         updatePaimonColumnUniqueId(column, field.type());
     }
 
-    public static TField getSchemaInfo(DataType dataType, boolean enableVarbinaryMapping,
-            boolean enableTimestampTzMapping) {
+    public static TField getSchemaInfo(DataType dataType, boolean enableVarbinaryMapping) {
         TField field = new TField();
         field.setIsOptional(dataType.isNullable());
         TNestedField nestedField = new TNestedField();
@@ -332,8 +325,7 @@ public class PaimonUtil {
                 TArrayField listField = new TArrayField();
                 org.apache.paimon.types.ArrayType paimonArrayType = (org.apache.paimon.types.ArrayType) dataType;
                 TFieldPtr fieldPtr = new TFieldPtr();
-                fieldPtr.setFieldPtr(getSchemaInfo(paimonArrayType.getElementType(), enableVarbinaryMapping,
-                        enableTimestampTzMapping));
+                fieldPtr.setFieldPtr(getSchemaInfo(paimonArrayType.getElementType(), enableVarbinaryMapping));
                 listField.setItemField(fieldPtr);
                 nestedField.setArrayField(listField);
                 field.setNestedField(nestedField);
@@ -347,12 +339,10 @@ public class PaimonUtil {
                 TMapField mapField = new TMapField();
                 org.apache.paimon.types.MapType mapType = (org.apache.paimon.types.MapType) dataType;
                 TFieldPtr keyField = new TFieldPtr();
-                keyField.setFieldPtr(
-                        getSchemaInfo(mapType.getKeyType(), enableVarbinaryMapping, enableTimestampTzMapping));
+                keyField.setFieldPtr(getSchemaInfo(mapType.getKeyType(), enableVarbinaryMapping));
                 mapField.setKeyField(keyField);
                 TFieldPtr valueField = new TFieldPtr();
-                valueField.setFieldPtr(
-                        getSchemaInfo(mapType.getValueType(), enableVarbinaryMapping, enableTimestampTzMapping));
+                valueField.setFieldPtr(getSchemaInfo(mapType.getValueType(), enableVarbinaryMapping));
                 mapField.setValueField(valueField);
                 nestedField.setMapField(mapField);
                 field.setNestedField(nestedField);
@@ -364,8 +354,7 @@ public class PaimonUtil {
             }
             case ROW: {
                 RowType rowType = (RowType) dataType;
-                TStructField structField = getSchemaInfo(rowType.getFields(), enableVarbinaryMapping,
-                        enableTimestampTzMapping);
+                TStructField structField = getSchemaInfo(rowType.getFields(), enableVarbinaryMapping);
                 nestedField.setStructField(structField);
                 field.setNestedField(nestedField);
 
@@ -375,18 +364,16 @@ public class PaimonUtil {
                 break;
             }
             default:
-                field.setType(paimonPrimitiveTypeToDorisType(dataType, enableVarbinaryMapping, enableTimestampTzMapping)
-                        .toColumnTypeThrift());
+                field.setType(paimonPrimitiveTypeToDorisType(dataType, enableVarbinaryMapping).toColumnTypeThrift());
                 break;
         }
         return field;
     }
 
-    public static TStructField getSchemaInfo(List<DataField> paimonFields, boolean enableVarbinaryMapping,
-            boolean enableTimestampTzMapping) {
+    public static TStructField getSchemaInfo(List<DataField> paimonFields, boolean enableVarbinaryMapping) {
         TStructField structField = new TStructField();
         for (DataField paimonField : paimonFields) {
-            TField childField = getSchemaInfo(paimonField.type(), enableVarbinaryMapping, enableTimestampTzMapping);
+            TField childField = getSchemaInfo(paimonField.type(), enableVarbinaryMapping);
             childField.setName(paimonField.name());
             childField.setId(paimonField.id());
             TFieldPtr fieldPtr = new TFieldPtr();
@@ -396,27 +383,23 @@ public class PaimonUtil {
         return structField;
     }
 
-    public static TSchema getSchemaInfo(TableSchema paimonTableSchema, boolean enableVarbinaryMapping,
-            boolean enableTimestampTzMapping) {
+    public static TSchema getSchemaInfo(TableSchema paimonTableSchema, boolean enableVarbinaryMapping) {
         TSchema tSchema = new TSchema();
         tSchema.setSchemaId(paimonTableSchema.id());
-        tSchema.setRootField(
-                getSchemaInfo(paimonTableSchema.fields(), enableVarbinaryMapping, enableTimestampTzMapping));
+        tSchema.setRootField(getSchemaInfo(paimonTableSchema.fields(), enableVarbinaryMapping));
         return tSchema;
     }
 
-    public static List<Column> parseSchema(Table table, boolean enableVarbinaryMapping,
-            boolean enableTimestampTzMapping) {
+    public static List<Column> parseSchema(Table table, boolean enableVarbinaryMapping) {
         List<String> primaryKeys = table.primaryKeys();
-        return parseSchema(table.rowType(), primaryKeys, enableVarbinaryMapping, enableTimestampTzMapping);
+        return parseSchema(table.rowType(), primaryKeys, enableVarbinaryMapping);
     }
 
-    public static List<Column> parseSchema(RowType rowType, List<String> primaryKeys, boolean enableVarbinaryMapping,
-            boolean enableTimestampTzMapping) {
+    public static List<Column> parseSchema(RowType rowType, List<String> primaryKeys, boolean enableVarbinaryMapping) {
         List<Column> resSchema = Lists.newArrayListWithCapacity(rowType.getFields().size());
         rowType.getFields().forEach(field -> {
             resSchema.add(new Column(field.name().toLowerCase(),
-                    PaimonUtil.paimonTypeToDorisType(field.type(), enableVarbinaryMapping, enableTimestampTzMapping),
+                    PaimonUtil.paimonTypeToDorisType(field.type(), enableVarbinaryMapping),
                     primaryKeys.contains(field.name()),
                     null,
                     field.type().isNullable(),

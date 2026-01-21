@@ -49,7 +49,6 @@ public abstract class FileFormatProperties {
     // Default: false, mapping BINARY types to STRING for compatibility
     // When enabled, BINARY types map to VARBINARY
     public boolean enableMappingVarbinary = false;
-    public boolean enableMappingTimestampTz = false;
 
     public FileFormatProperties(TFileFormatType fileFormatType, String formatName) {
         this.fileFormatType = fileFormatType;

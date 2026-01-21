@@ -528,10 +528,3 @@ CREATE TABLE test_varbinary_db.`test_varbinary_udf` (
   `varbinary_c` varbinary(100)
 );
 
-CREATE TABLE test_timestamp_tz_db.ts_test (
-    id INT,
-    ts_ts TIMESTAMP NULL,
-    ts_dt DATETIME NULL
-);
-
-

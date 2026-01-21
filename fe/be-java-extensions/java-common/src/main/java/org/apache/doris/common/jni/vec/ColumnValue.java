@@ -73,8 +73,6 @@ public interface ColumnValue {
 
     LocalDateTime getDateTime();
 
-    LocalDateTime getTimeStampTz();
-
     byte[] getBytes();
 
     void unpackArray(List<ColumnValue> values);

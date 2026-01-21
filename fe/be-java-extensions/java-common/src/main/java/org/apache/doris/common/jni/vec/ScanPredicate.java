@@ -199,11 +199,6 @@ public class ScanPredicate {
         }
 
         @Override
-        public LocalDateTime getTimeStampTz() {
-            throw new UnsupportedOperationException();
-        }
-
-        @Override
         public byte[] getBytes() {
             return (byte[]) inspectObject();
         }

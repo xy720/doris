@@ -127,8 +127,7 @@ public abstract class ExternalCatalog
     public static final Set<String> HIDDEN_PROPERTIES = Sets.newHashSet(
             CREATE_TIME,
             USE_META_CACHE,
-            CatalogProperty.ENABLE_MAPPING_VARBINARY,
-            CatalogProperty.ENABLE_MAPPING_TIMESTAMP_TZ);
+            CatalogProperty.ENABLE_MAPPING_VARBINARY);
 
     protected static final int ICEBERG_CATALOG_EXECUTOR_THREAD_NUM = Runtime.getRuntime().availableProcessors();
 
@@ -247,17 +246,10 @@ public abstract class ExternalCatalog
         if (catalogProperty.getOrDefault(CatalogProperty.ENABLE_MAPPING_VARBINARY, "").isEmpty()) {
             catalogProperty.setEnableMappingVarbinary(false);
         }
-        if (catalogProperty.getOrDefault(CatalogProperty.ENABLE_MAPPING_TIMESTAMP_TZ, "").isEmpty()) {
-            catalogProperty.setEnableMappingTimestampTz(false);
-        }
     }
 
     public boolean getEnableMappingVarbinary() {
         return catalogProperty.getEnableMappingVarbinary();
-    }
-
-    public boolean getEnableMappingTimestampTz() {
-        return catalogProperty.getEnableMappingTimestampTz();
     }
 
     // we need check auth fallback for kerberos or simple

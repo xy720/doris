@@ -205,8 +205,7 @@ public class PaimonScanNode extends FileQueryScanNode {
             TableSchema tableSchema = Env.getCurrentEnv().getExtMetaCacheMgr().getPaimonMetadataCache()
                     .getPaimonSchemaCacheValue(table.getOrBuildNameMapping(), schemaId).getTableSchema();
             params.addToHistorySchemaInfo(
-                    PaimonUtil.getSchemaInfo(tableSchema, source.getCatalog().getEnableMappingVarbinary(),
-                            source.getCatalog().getEnableMappingTimestampTz()));
+                    PaimonUtil.getSchemaInfo(tableSchema, source.getCatalog().getEnableMappingVarbinary()));
         }
     }
 

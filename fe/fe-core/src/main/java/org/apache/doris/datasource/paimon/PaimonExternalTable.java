@@ -304,9 +304,7 @@ public class PaimonExternalTable extends ExternalTable implements MTMVRelatedTab
             List<Column> partitionColumns = Lists.newArrayList();
             for (DataField field : columns) {
                 Column column = new Column(field.name().toLowerCase(),
-                        PaimonUtil.paimonTypeToDorisType(field.type(), getCatalog().getEnableMappingVarbinary(),
-                                getCatalog().getEnableMappingTimestampTz()),
-                        true,
+                        PaimonUtil.paimonTypeToDorisType(field.type(), getCatalog().getEnableMappingVarbinary()), true,
                         null, true, field.description(), true,
                         -1);
                 PaimonUtil.updatePaimonColumnUniqueId(column, field);

@@ -247,11 +247,6 @@ public class MaxComputeColumnValue implements ColumnValue {
     }
 
     @Override
-    public LocalDateTime getTimeStampTz() {
-        return convertToLocalDateTime((TimeStampMicroTZVector) column, idx);
-    }
-
-    @Override
     public byte[] getBytes() {
         VarBinaryVector binaryCol = (VarBinaryVector) column;
         byte[] v = binaryCol.getObject(idx);

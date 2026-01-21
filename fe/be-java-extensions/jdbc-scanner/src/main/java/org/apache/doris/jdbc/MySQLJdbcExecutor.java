@@ -167,9 +167,6 @@ public class MySQLJdbcExecutor extends BaseJdbcExecutor {
                 }
                 return data;
             }
-            case TIMESTAMPTZ: {
-                return resultSet.getObject(columnIndex + 1, LocalDateTime.class);
-            }
             default:
                 throw new IllegalArgumentException("Unsupported column type: " + type.getType());
         }

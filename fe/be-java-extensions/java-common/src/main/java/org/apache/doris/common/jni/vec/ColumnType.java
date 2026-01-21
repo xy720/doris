@@ -49,7 +49,6 @@ public class ColumnType {
         DATEV2(4),
         DATETIME(8),
         DATETIMEV2(8),
-        TIMESTAMPTZ(8),
         CHAR(-1),
         VARCHAR(-1),
         BINARY(-1),
@@ -193,8 +192,7 @@ public class ColumnType {
 
     public boolean isPrimitive() {
         return type == Type.BOOLEAN || type == Type.BYTE || type == Type.TINYINT || type == Type.SMALLINT
-                || type == Type.INT || type == Type.BIGINT || type == Type.FLOAT || type == Type.DOUBLE
-                || type == Type.TIMESTAMPTZ;
+                || type == Type.INT || type == Type.BIGINT || type == Type.FLOAT || type == Type.DOUBLE;
     }
 
     public Type getType() {
@@ -334,14 +332,7 @@ public class ColumnType {
                 type = Type.VARBINARY;
                 break;
             default:
-                if (lowerCaseType.startsWith("timestamptz")) {
-                    type = Type.TIMESTAMPTZ;
-                    precision = 6; // default
-                    Matcher match = digitPattern.matcher(lowerCaseType);
-                    if (match.find()) {
-                        precision = Integer.parseInt(match.group(1).trim());
-                    }
-                } else if (lowerCaseType.startsWith("timestamp")
+                if (lowerCaseType.startsWith("timestamp")
                         || lowerCaseType.startsWith("datetime")
                         || lowerCaseType.startsWith("datetimev2")) {
                     type = Type.DATETIMEV2;
